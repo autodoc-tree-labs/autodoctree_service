@@ -22,24 +22,33 @@
 - `doc-api`: 8080 (권장)
 - (선택) OpenSearch: 9200, Redis: 6379, Postgres: 5432, MinIO: 9000/9001
 
-## Quickstart (when code exists)
-> 이 zip은 **문서+티켓 패키지**입니다. 실제 코드 스캐폴드는 티켓을 따라 Codex가 생성합니다.
+## Quickstart
 
 1) infra
 ```bash
-docker compose up -d
+POSTGRES_PORT=55432 OPENSEARCH_PORT=59200 REDIS_PORT=56379 MINIO_PORT=59000 MINIO_CONSOLE_PORT=59001 docker compose up -d
 docker compose ps
 ```
 
 2) backend (IntelliJ)
-- `services/doc-api` Run Config
-- `SPRING_PROFILES_ACTIVE=local`
+- `services/doc-api` Run Config (`com.autodoctree.api.DocApiApplicationKt`)
+- example env:
+  - `DB_PORT=55432`
+  - `REDIS_PORT=56379`
+  - `S3_ENDPOINT=http://localhost:59000`
 
 3) front
 ```bash
 pnpm -w install
 pnpm -C web-user dev --port 5174
 pnpm -C web-admin dev --port 5173
+```
+
+4) tests/build
+```bash
+./gradlew -p services test
+pnpm build
+pnpm test:e2e
 ```
 
 ## Documents
