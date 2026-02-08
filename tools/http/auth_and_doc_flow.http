@@ -1,0 +1,27 @@
+### health
+GET http://localhost:8080/api/v1/health
+
+### login (seed user)
+POST http://localhost:8080/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "owner@autodoc.local",
+  "password": "password"
+}
+
+### list workspaces
+GET http://localhost:8080/api/v1/workspaces
+Authorization: Bearer {{access_token}}
+
+### create document
+POST http://localhost:8080/api/v1/documents
+Authorization: Bearer {{access_token}}
+X-Workspace-Id: {{workspace_id}}
+Content-Type: application/json
+
+{
+  "title": "Smoke doc",
+  "body_markdown": "# hello",
+  "source_type": "EDITOR"
+}

@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  services:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Build and test services
+        run: ./gradlew -p services test
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm -w install --frozen-lockfile=false
+      - run: pnpm -C web-user lint
+      - run: pnpm -C web-admin lint
+      - run: pnpm -C web-user build
+      - run: pnpm -C web-admin build
+      - run: pnpm -C web-user exec playwright install --with-deps chromium
+      - run: pnpm -C web-user test:e2e
+      - run: pnpm -C web-admin test:e2e

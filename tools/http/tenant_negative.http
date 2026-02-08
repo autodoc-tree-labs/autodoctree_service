@@ -1,0 +1,4 @@
+### wsB should not read wsA document
+GET http://localhost:8080/api/v1/documents/{{doc_id}}
+Authorization: Bearer {{wsB_access_token}}
+X-Workspace-Id: {{wsB_workspace_id}}

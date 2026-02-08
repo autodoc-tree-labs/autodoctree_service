@@ -1,0 +1,11 @@
+{
+  "name": "autodoc-tree-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.2.1",
+  "scripts": {
+    "build": "pnpm -C packages/api-client build && pnpm -C web-user build && pnpm -C web-admin build",
+    "lint": "pnpm -C web-user lint && pnpm -C web-admin lint",
+    "test:e2e": "pnpm -C web-user test:e2e && pnpm -C web-admin test:e2e"
+  }
+}
