@@ -61,6 +61,14 @@ data class SecurityFlags(
     val osTenantAssert: Boolean
 )
 
+@ConfigurationProperties(prefix = "tree")
+data class TreeProperties(
+    val neighborTopK: Int,
+    val maxClusterSize: Int,
+    val personalizationDecay: Double,
+    val personalizationMinScore: Double
+)
+
 @Configuration
 class AppConfig {
 

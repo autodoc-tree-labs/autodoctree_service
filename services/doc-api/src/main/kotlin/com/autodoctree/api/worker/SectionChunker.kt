@@ -5,7 +5,12 @@ import java.time.LocalDateTime
 import java.util.UUID
 
 class SectionChunker {
-    fun split(workspaceId: String, documentId: String, text: String): List<SectionRow> {
+    fun split(
+        workspaceId: String,
+        documentId: String,
+        text: String,
+        globalQualityFlags: Set<String> = emptySet()
+    ): List<SectionRow> {
         val headings = mutableListOf<Pair<String?, String>>()
         val lines = text.lines()
         var currentHeading: String? = null
@@ -41,7 +46,7 @@ class SectionChunker {
                 return@forEach
             }
             if (normalized.length <= 800) {
-                chunks.add(newSection(workspaceId, documentId, ord++, heading, normalized))
+                chunks.add(newSection(workspaceId, documentId, ord++, heading, normalized, globalQualityFlags))
                 return@forEach
             }
 
@@ -51,13 +56,25 @@ class SectionChunker {
             while (index < normalized.length) {
                 val end = minOf(index + chunkSize, normalized.length)
                 val chunk = normalized.substring(index, end)
-                chunks.add(newSection(workspaceId, documentId, ord++, heading, chunk))
+                chunks.add(newSection(workspaceId, documentId, ord++, heading, chunk, globalQualityFlags))
                 if (end == normalized.length) {
                     break
                 }
                 index += (chunkSize - overlap)
             }
         }
+
+        if (chunks.isEmpty()) {
+            chunks += newSection(
+                workspaceId = workspaceId,
+                documentId = documentId,
+                ord = 0,
+                heading = null,
+                chunk = "",
+                globalQualityFlags = globalQualityFlags + "ZERO_LENGTH"
+            )
+        }
+
         return chunks
     }
 
@@ -66,14 +83,18 @@ class SectionChunker {
         documentId: String,
         ord: Int,
         heading: String?,
-        chunk: String
+        chunk: String,
+        globalQualityFlags: Set<String>
     ): SectionRow {
-        val quality = when {
-            chunk.isBlank() -> "ZERO_LENGTH"
-            chunk.length < 40 -> "TOO_SHORT"
-            isGibberish(chunk) -> "GIBBERISH"
-            else -> null
+        val localFlags = mutableSetOf<String>()
+        when {
+            chunk.isBlank() -> localFlags += "ZERO_LENGTH"
+            chunk.length < 40 -> localFlags += "TOO_SHORT"
+            isGibberish(chunk) -> localFlags += "GIBBERISH"
         }
+        globalQualityFlags.forEach { localFlags += it }
+
+        val quality = if (localFlags.isEmpty()) null else localFlags.sorted().joinToString(",")
         return SectionRow(
             id = UUID.randomUUID().toString(),
             workspaceId = workspaceId,

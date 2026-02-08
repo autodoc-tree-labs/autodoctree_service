@@ -17,11 +17,15 @@ import com.autodoctree.api.storage.S3StorageService
 import com.autodoctree.common.Stage
 import com.autodoctree.common.StageStatus
 import com.fasterxml.jackson.databind.ObjectMapper
-import org.apache.tika.Tika
+import io.micrometer.core.instrument.Counter
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Timer
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
+import java.time.Duration
 import java.time.LocalDateTime
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.pow
 
 @Component
@@ -38,12 +42,30 @@ class OutboxWorker(
     private val treeService: TreeService,
     private val rebuildDebounceQueue: RebuildDebounceQueue,
     private val s3StorageService: S3StorageService,
+    private val textExtractor: TikaTextExtractor,
     private val objectMapper: ObjectMapper,
+    private val meterRegistry: MeterRegistry,
     private val workerProperties: WorkerProperties
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
     private val chunker = SectionChunker()
-    private val tika = Tika()
+
+    private val eventFailureCounter = meterRegistry.counter("worker.event.failure_total")
+    private val eventSuccessCounter = meterRegistry.counter("worker.event.success_total")
+    private val outboxLagSeconds = AtomicLong(0)
+    private val stageSuccessCounters: Map<Stage, Counter> = Stage.entries.associateWith { stage ->
+        meterRegistry.counter("worker.stage.success_total", "stage", stage.name)
+    }
+    private val stageFailureCounters: Map<Stage, Counter> = Stage.entries.associateWith { stage ->
+        meterRegistry.counter("worker.stage.failure_total", "stage", stage.name)
+    }
+    private val stageDurationTimers: Map<Stage, Timer> = Stage.entries.associateWith { stage ->
+        meterRegistry.timer("worker.stage.duration", "stage", stage.name)
+    }
+
+    init {
+        meterRegistry.gauge("worker.outbox.lag_seconds", outboxLagSeconds)
+    }
 
     @Scheduled(fixedDelayString = "\${worker.poll-interval-ms:2000}")
     fun poll() {
@@ -73,10 +95,13 @@ class OutboxWorker(
 
     private fun processEventSafely(event: OutboxEventRow) {
         outboxRepository.markProcessing(event.id)
+        outboxLagSeconds.set(Duration.between(event.createdAt, LocalDateTime.now()).seconds.coerceAtLeast(0))
         try {
             processEvent(event)
             outboxRepository.markDone(event.id)
+            eventSuccessCounter.increment()
         } catch (ex: Exception) {
+            eventFailureCounter.increment()
             val retries = event.retryCount + 1
             if (retries > workerProperties.maxRetries) {
                 outboxRepository.markDlq(event.id)
@@ -108,17 +133,32 @@ class OutboxWorker(
     }
 
     private fun processEvent(event: OutboxEventRow) {
-        val payload = objectMapper.readValue(event.payloadJson, Map::class.java) as Map<String, Any?>
+        val rawPayload = objectMapper.readValue(event.payloadJson, Map::class.java) as Map<*, *>
+        val payload = rawPayload.entries.associate { (key, value) -> key.toString() to value }
+
         when (event.eventType) {
             "DocumentSaved", "DocumentUpdated" -> {
                 val documentId = event.documentId ?: return
-                runPipeline(event.workspaceId, documentId, attachmentObjectKey = null, onlyStage = null)
+                runPipeline(
+                    workspaceId = event.workspaceId,
+                    documentId = documentId,
+                    attachmentObjectKey = null,
+                    attachmentContentType = null,
+                    onlyStage = null
+                )
             }
 
             "AttachmentUploaded" -> {
                 val documentId = event.documentId ?: payload["document_id"]?.toString() ?: return
                 val objectKey = payload["object_key"]?.toString()
-                runPipeline(event.workspaceId, documentId, attachmentObjectKey = objectKey, onlyStage = null)
+                val contentType = payload["content_type"]?.toString()
+                runPipeline(
+                    workspaceId = event.workspaceId,
+                    documentId = documentId,
+                    attachmentObjectKey = objectKey,
+                    attachmentContentType = contentType,
+                    onlyStage = null
+                )
             }
 
             "DocumentDeleted" -> {
@@ -133,7 +173,13 @@ class OutboxWorker(
             "StageRetry" -> {
                 val documentId = payload["document_id"]?.toString() ?: return
                 val stage = payload["stage"]?.toString()?.let { parseStage(it) }
-                runPipeline(event.workspaceId, documentId, attachmentObjectKey = null, onlyStage = stage)
+                runPipeline(
+                    workspaceId = event.workspaceId,
+                    documentId = documentId,
+                    attachmentObjectKey = null,
+                    attachmentContentType = null,
+                    onlyStage = stage
+                )
             }
         }
     }
@@ -146,7 +192,13 @@ class OutboxWorker(
         }
     }
 
-    private fun runPipeline(workspaceId: String, documentId: String, attachmentObjectKey: String?, onlyStage: Stage?) {
+    private fun runPipeline(
+        workspaceId: String,
+        documentId: String,
+        attachmentObjectKey: String?,
+        attachmentContentType: String?,
+        onlyStage: Stage?
+    ) {
         val document = documentRepository.findByWorkspaceAndId(workspaceId, documentId) ?: return
 
         val runIngest = onlyStage == null || onlyStage == Stage.INGEST
@@ -157,12 +209,26 @@ class OutboxWorker(
         if (runIngest) {
             val inputHash = sha256((document.updatedAt.toString() + (attachmentObjectKey ?: "") + Stage.INGEST.name))
             executeStage(workspaceId, documentId, Stage.INGEST, inputHash, "tika-v1") {
-                val text = if (!attachmentObjectKey.isNullOrBlank()) {
-                    extractTextFromObject(attachmentObjectKey)
+                val text: String
+                val qualityFlags: Set<String>
+                if (!attachmentObjectKey.isNullOrBlank()) {
+                    val extracted = extractTextFromObject(attachmentObjectKey, attachmentContentType)
+                    if (extracted.failureReason != null) {
+                        throw IllegalStateException(extracted.failureReason)
+                    }
+                    text = extracted.text
+                    qualityFlags = extracted.qualityFlags
                 } else {
-                    document.bodyMarkdown ?: ""
+                    text = document.bodyMarkdown ?: ""
+                    qualityFlags = emptySet()
                 }
-                val sections = chunker.split(workspaceId, documentId, text)
+
+                val sections = chunker.split(
+                    workspaceId = workspaceId,
+                    documentId = documentId,
+                    text = text,
+                    globalQualityFlags = qualityFlags
+                )
                 documentSectionRepository.replaceSections(workspaceId, documentId, sections)
                 documentRepository.updateBodyText(workspaceId, documentId, text, "PROCESSING")
             }
@@ -173,7 +239,7 @@ class OutboxWorker(
             val textForEmbedding = if (sections.isNotEmpty()) {
                 sections.joinToString("\n") { it.chunkText }
             } else {
-                (documentRepository.findByWorkspaceAndId(workspaceId, documentId)?.bodyText ?: "")
+                documentRepository.findByWorkspaceAndId(workspaceId, documentId)?.bodyText ?: ""
             }
             val inputHash = sha256(textForEmbedding + Stage.EMBED.name)
             executeStage(workspaceId, documentId, Stage.EMBED, inputHash, embeddingProvider.modelVersion()) {
@@ -225,11 +291,13 @@ class OutboxWorker(
             return
         }
 
+        val timerSample = Timer.start(meterRegistry)
         pipelineStatusRepository.updateStage(workspaceId, documentId, stage, StageStatus.RUNNING)
         try {
             block()
             pipelineStatusRepository.updateStage(workspaceId, documentId, stage, StageStatus.DONE)
             stageExecutionRepository.markDone(workspaceId, documentId, stage, inputHash, modelVersion)
+            stageSuccessCounters[stage]?.increment()
         } catch (ex: Exception) {
             pipelineStatusRepository.updateStage(
                 workspaceId,
@@ -246,19 +314,15 @@ class OutboxWorker(
                 modelVersion,
                 ex.message ?: "failed"
             )
+            stageFailureCounters[stage]?.increment()
             throw ex
+        } finally {
+            timerSample.stop(stageDurationTimers.getValue(stage))
         }
     }
 
-    private fun extractTextFromObject(objectKey: String): String {
+    private fun extractTextFromObject(objectKey: String, contentType: String?): ExtractionResult {
         val bytes = s3StorageService.readObjectBytes(objectKey)
-        if (bytes.isEmpty()) {
-            return ""
-        }
-        return runCatching {
-            tika.parseToString(bytes.inputStream())
-        }.getOrElse {
-            ""
-        }
+        return textExtractor.extract(bytes, contentType)
     }
 }

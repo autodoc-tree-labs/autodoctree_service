@@ -62,3 +62,9 @@ worker:
   poll-interval-ms: 2000
   max-retries: 3
   debounce-window-seconds: 30
+
+tree:
+  neighbor-top-k: ${TREE_NEIGHBOR_TOP_K:5}
+  max-cluster-size: ${TREE_MAX_CLUSTER_SIZE:20}
+  personalization-decay: ${TREE_PERSONALIZATION_DECAY:0.85}
+  personalization-min-score: ${TREE_PERSONALIZATION_MIN_SCORE:1.2}

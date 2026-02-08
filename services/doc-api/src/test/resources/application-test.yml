@@ -29,3 +29,9 @@ worker:
   poll-interval-ms: 86400000
   max-retries: 3
   debounce-window-seconds: 1
+
+tree:
+  neighbor-top-k: 3
+  max-cluster-size: 8
+  personalization-decay: 0.85
+  personalization-min-score: 0.8

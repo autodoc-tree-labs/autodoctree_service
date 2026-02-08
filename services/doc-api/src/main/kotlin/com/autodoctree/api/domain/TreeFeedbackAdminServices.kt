@@ -1,8 +1,10 @@
 package com.autodoctree.api.domain
 
 import com.autodoctree.api.config.FeatureFlags
+import com.autodoctree.api.config.TreeProperties
 import com.autodoctree.api.db.AuditLogRepository
 import com.autodoctree.api.db.DocumentRepository
+import com.autodoctree.api.db.EmbeddingRow
 import com.autodoctree.api.db.EmbeddingRepository
 import com.autodoctree.api.db.FeedbackRepository
 import com.autodoctree.api.db.OutboxRepository
@@ -20,7 +22,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
-import kotlin.math.min
 
 @Service
 class TreeService(
@@ -30,7 +31,12 @@ class TreeService(
     private val feedbackRepository: FeedbackRepository,
     private val auditService: AuditService,
     private val objectMapper: ObjectMapper,
+    private val treeProperties: TreeProperties,
     private val featureFlags: FeatureFlags,
+    private val neighborBuilder: NeighborBuilder,
+    private val treeClusterer: TreeClusterer,
+    private val treeLabeler: TreeLabeler,
+    private val treePersonalizationEngine: TreePersonalizationEngine,
     private val rebuildDebounceQueue: RebuildDebounceQueue
 ) {
 
@@ -43,6 +49,8 @@ class TreeService(
 
         val lockedNodes = activeNodes.filter { it.locked }
         val lockedNodeById = lockedNodes.associateBy { it.id }
+        val nodeById = activeNodes.associateBy { it.id }
+
         val lockedLabelByDocument = activeMemberships
             .filter { lockedNodeById.containsKey(it.nodeId) }
             .associate { membership ->
@@ -50,30 +58,85 @@ class TreeService(
                 membership.documentId to label
             }
 
+        val lockedParentLabelByLeaf = lockedNodes.associate { node ->
+            val parentLabel = node.parentId?.let { parentId -> nodeById[parentId]?.label }
+            node.label to parentLabel
+        }
+
         val feedbackEvents = feedbackRepository.listByWorkspace(workspaceId, 200)
-        val movePreferredNodeLabel = buildMovePreference(feedbackEvents, activeNodes)
+        val personalizationModel = if (featureFlags.autoTree) {
+            treePersonalizationEngine.buildModel(
+                feedbackEvents = feedbackEvents,
+                activeNodes = activeNodes,
+                documents = documents,
+                tokenizer = treeLabeler::tokenize
+            )
+        } else {
+            PersonalizationModel(
+                docLabelScores = emptyMap(),
+                keywordLabelScores = emptyMap(),
+                minScore = Double.MAX_VALUE
+            )
+        }
 
         val assignment = mutableMapOf<String, String>()
+        val personalizedDocIds = mutableSetOf<String>()
+
         documents.forEach { doc ->
             val forced = lockedLabelByDocument[doc.id]
             if (forced != null) {
                 assignment[doc.id] = forced
                 return@forEach
             }
-            val preferred = movePreferredNodeLabel[doc.id]
+
+            val preferred = personalizationModel.preferredLabelFor(doc, treeLabeler::tokenize)
             if (preferred != null) {
                 assignment[doc.id] = preferred
-                return@forEach
+                personalizedDocIds += doc.id
             }
-            val label = inferLeafLabel(doc.title + " " + (doc.bodyText ?: ""))
-            assignment[doc.id] = label
+        }
+
+        val embeddingByDocumentId = embeddingRepository.listDocEmbeddings(workspaceId, "local-stub-v1").associateBy { it.documentId }
+        val remaining = documents.filterNot { assignment.containsKey(it.id) }
+        if (remaining.isNotEmpty()) {
+            val graph = neighborBuilder.build(
+                workspaceId = workspaceId,
+                documents = remaining,
+                embeddings = embeddingByDocumentId,
+                topK = treeProperties.neighborTopK
+            )
+
+            val clusters = treeClusterer.cluster(
+                documents = remaining,
+                graph = graph,
+                maxClusterSize = treeProperties.maxClusterSize
+            )
+
+            val labelsByCluster = treeLabeler.labelClusters(
+                workspaceDocuments = documents,
+                clusters = clusters
+            )
+
+            clusters.forEach { cluster ->
+                val label = labelsByCluster[cluster.id] ?: "general"
+                cluster.documentIds.forEach { docId ->
+                    assignment[docId] = label
+                }
+            }
+        }
+
+        documents.forEach { doc ->
+            assignment.putIfAbsent(doc.id, "general")
         }
 
         val previousDocToLabel = activeMemberships.associate { membership ->
             val node = activeNodes.firstOrNull { it.id == membership.nodeId }
             membership.documentId to (node?.label ?: "")
         }
-        val movedCount = assignment.entries.count { (docId, newLabel) -> previousDocToLabel[docId] != null && previousDocToLabel[docId] != newLabel }
+
+        val movedCount = assignment.entries.count { (docId, newLabel) ->
+            previousDocToLabel[docId] != null && previousDocToLabel[docId] != newLabel
+        }
         val movedRatio = if (assignment.isEmpty()) 0.0 else movedCount.toDouble() / assignment.size.toDouble()
 
         val churnCount = movedCount
@@ -103,31 +166,52 @@ class TreeService(
             addAll(lockedNodes.map { it.label })
         }.toList().sorted()
 
-        val labelToNode = mutableMapOf<String, TreeNodeRow>()
-        labels.forEach { label ->
-            val locked = lockedNodes.any { it.label == label }
-            val node = treeRepository.insertNode(
+        val topLabelByLeaf = labels.associateWith { leafLabel ->
+            val lockedParent = lockedParentLabelByLeaf[leafLabel]
+            if (!lockedParent.isNullOrBlank() && lockedParent != "AutoDoc") {
+                lockedParent
+            } else {
+                treeLabeler.topLevelLabel(leafLabel)
+            }
+        }
+
+        val topNodes = mutableMapOf<String, TreeNodeRow>()
+        topLabelByLeaf.values.toSet().sorted().forEach { topLabel ->
+            topNodes[topLabel] = treeRepository.insertNode(
                 workspaceId = workspaceId,
                 snapshotId = snapshot.id,
                 parentId = root.id,
-                label = label,
+                label = topLabel,
                 depth = 1,
+                locked = false
+            )
+        }
+
+        val labelToNode = mutableMapOf<String, TreeNodeRow>()
+        labels.forEach { label ->
+            val locked = lockedNodes.any { it.label == label }
+            val topLabel = topLabelByLeaf[label] ?: treeLabeler.topLevelLabel(label)
+            val parent = topNodes[topLabel]
+            val node = treeRepository.insertNode(
+                workspaceId = workspaceId,
+                snapshotId = snapshot.id,
+                parentId = parent?.id ?: root.id,
+                label = label,
+                depth = if (parent == null) 1 else 2,
                 locked = locked
             )
             labelToNode[label] = node
         }
 
-        val embeddingByDocumentId = embeddingRepository.listDocEmbeddings(workspaceId, "local-stub-v1").associateBy { it.documentId }
-
         documents.forEach { doc ->
             val label = assignment[doc.id] ?: "general"
             val node = labelToNode[label] ?: return@forEach
             val rationale = mapOf(
-                "keywords" to extractKeywords(doc.title + " " + (doc.bodyText ?: ""), 5),
+                "keywords" to treeLabeler.keywords(doc.title + " " + (doc.bodyText ?: ""), 5),
                 "similar_docs" to findSimilarDocs(doc.id, embeddingByDocumentId, 3),
                 "signals" to buildSignals(
                     wasLocked = lockedLabelByDocument.containsKey(doc.id),
-                    personalized = movePreferredNodeLabel.containsKey(doc.id)
+                    personalized = personalizedDocIds.contains(doc.id)
                 )
             )
             treeRepository.insertMembership(
@@ -240,27 +324,12 @@ class TreeService(
             "similar_docs" to emptyList<Map<String, Any?>>(),
             "signals" to emptyList<String>()
         )
-        val rationale = membership?.let {
-            objectMapper.readValue(it.rationaleJson, Map::class.java) as Map<String, Any?>
-        } ?: fallback
+        val rationale = membership?.let { parseRationale(it.rationaleJson) } ?: fallback
         return mapOf(
             "document_id" to documentId,
             "node_id" to membership?.nodeId,
             "rationale" to rationale
         )
-    }
-
-    private fun extractKeywords(text: String, limit: Int): List<String> {
-        val words = text.lowercase()
-            .replace(Regex("[^a-z0-9 ]"), " ")
-            .split(Regex("\\s+"))
-            .filter { it.length >= 3 }
-            .groupingBy { it }
-            .eachCount()
-            .entries
-            .sortedByDescending { it.value }
-            .map { it.key }
-        return words.take(limit)
     }
 
     private fun buildSignals(wasLocked: Boolean, personalized: Boolean): List<String> {
@@ -273,35 +342,49 @@ class TreeService(
         return signals
     }
 
-    private fun inferLeafLabel(text: String): String {
-        val keywords = extractKeywords(text, 3)
-        return if (keywords.isEmpty()) "general" else keywords.joinToString("-").take(40)
+    private fun parseRationale(json: String): Map<String, Any?> {
+        return runCatching {
+            val raw = objectMapper.readValue(json, Map::class.java) as Map<*, *>
+            raw.entries.associate { (key, value) -> key.toString() to value }
+        }.getOrElse {
+            mapOf(
+                "keywords" to emptyList<String>(),
+                "similar_docs" to emptyList<Map<String, Any?>>(),
+                "signals" to emptyList<String>()
+            )
+        }
     }
 
-    private fun findSimilarDocs(
-        documentId: String,
-        embeddings: Map<String, com.autodoctree.api.db.EmbeddingRow>,
-        limit: Int
-    ): List<Map<String, Any?>> {
+    private fun findSimilarDocs(documentId: String, embeddings: Map<String, EmbeddingRow>, limit: Int): List<Map<String, Any?>> {
         val source = embeddings[documentId] ?: return emptyList()
-        val sourceVector = objectMapper.readValue(source.vectorJson, List::class.java).map { (it as Number).toDouble() }
+        val sourceVector = objectMapper.readValue(source.vectorJson, List::class.java)
+            .mapNotNull { number -> (number as? Number)?.toDouble() }
+
         val scores = embeddings.values
+            .asSequence()
             .filter { it.documentId != documentId }
-            .map {
-                val vector = objectMapper.readValue(it.vectorJson, List::class.java).map { number -> (number as Number).toDouble() }
+            .mapNotNull { candidate ->
+                val vector = objectMapper.readValue(candidate.vectorJson, List::class.java)
+                    .mapNotNull { number -> (number as? Number)?.toDouble() }
+                if (vector.isEmpty()) {
+                    return@mapNotNull null
+                }
                 val similarity = cosine(sourceVector, vector)
                 mapOf(
-                    "document_id" to it.documentId,
-                    "title" to it.documentId,
+                    "document_id" to candidate.documentId,
+                    "title" to candidate.documentId,
                     "similarity" to similarity
                 )
             }
-            .sortedByDescending { (it["similarity"] as Double) }
-        return scores.take(limit)
+            .sortedByDescending { it["similarity"] as Double }
+            .take(limit)
+            .toList()
+
+        return scores
     }
 
     private fun cosine(a: List<Double>, b: List<Double>): Double {
-        val size = min(a.size, b.size)
+        val size = minOf(a.size, b.size)
         if (size == 0) return 0.0
         var dot = 0.0
         var an = 0.0
@@ -313,24 +396,6 @@ class TreeService(
         }
         if (an == 0.0 || bn == 0.0) return 0.0
         return dot / (kotlin.math.sqrt(an) * kotlin.math.sqrt(bn))
-    }
-
-    private fun buildMovePreference(feedbackEvents: List<com.autodoctree.api.db.FeedbackEventRow>, activeNodes: List<TreeNodeRow>): Map<String, String> {
-        if (!featureFlags.autoTree) {
-            return emptyMap()
-        }
-        val nodeLabelById = activeNodes.associate { it.id to it.label }
-        val preference = mutableMapOf<String, String>()
-        feedbackEvents
-            .filter { it.eventType == "MOVE" }
-            .forEach { event ->
-                val payload = objectMapper.readValue(event.payloadJson, Map::class.java)
-                val docId = payload["document_id"]?.toString() ?: return@forEach
-                val toNodeId = payload["to_node_id"]?.toString() ?: return@forEach
-                val label = nodeLabelById[toNodeId] ?: return@forEach
-                preference[docId] = label
-            }
-        return preference
     }
 }
 
