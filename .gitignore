@@ -1,0 +1,61 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE/editor
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env files
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Node/pnpm
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/*
+!.yarn/releases
+!.yarn/plugins
+!.yarn/sdks
+!.yarn/versions
+dist/
+coverage/
+.next/
+.nuxt/
+.svelte-kit/
+*.tsbuildinfo
+
+# Gradle/Kotlin/Java
+.gradle/
+**/build/
+out/
+target/
+*.class
+
+# Test reports
+**/test-results/
+**/reports/
+
+# Temp/runtime files
+tmp/
+temp/
+*.tmp
+*.pid
+*.pid.lock
+*.seed
