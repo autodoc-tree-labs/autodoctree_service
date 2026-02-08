@@ -1,0 +1,28 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:autodoc;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DATABASE_TO_UPPER=false
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  flyway:
+    enabled: true
+
+auth:
+  jwt-secret: test-secret-1234567890
+  access-token-ttl-seconds: 900
+  refresh-token-ttl-seconds: 1209600
+
+storage:
+  endpoint: http://localhost:9000
+  access-key: minio
+  secret-key: minio123
+  bucket: autodoc
+  region: us-east-1
+
+security:
+  os-tenant-assert: true
+
+worker:
+  poll-interval-ms: 86400000
+  max-retries: 3
+  debounce-window-seconds: 1

@@ -22,6 +22,10 @@ Base URL: `/api/v1`
 }
 ```
 
+## Health & metrics
+- `GET /health` → `{ "status": "OK" }`
+- `GET /metrics` → `{ "meters": ["..."] }`
+
 ---
 
 # 1) Auth
@@ -52,6 +56,10 @@ Response:
 ## POST /workspaces
 ```json
 { "name": "Team Alpha" }
+```
+Response:
+```json
+{ "id": "ws_1", "name": "Team Alpha" }
 ```
 
 ## GET /workspaces/{workspaceId}/members
@@ -90,6 +98,13 @@ Query: `status`, `q`, `page`, `size`, `sort`
 
 ## PATCH /documents/{documentId}
 - title/body updates (optimistic locking recommended)
+```json
+{
+  "version": 0,
+  "title": "new title",
+  "body_markdown": "# updated"
+}
+```
 
 ## DELETE /documents/{documentId}
 - soft delete
@@ -199,6 +214,7 @@ Response:
 ---
 
 # 9) Admin/Ops
+> Owner role required.
 ## GET /admin/jobs
 Query: `document_id` optional
 
