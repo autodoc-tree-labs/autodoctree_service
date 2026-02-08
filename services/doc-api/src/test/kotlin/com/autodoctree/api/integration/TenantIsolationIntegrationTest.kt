@@ -17,7 +17,9 @@ import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 
@@ -55,6 +57,7 @@ class TenantIsolationIntegrationTest {
 
     private lateinit var wsAId: String
     private lateinit var wsBId: String
+    private lateinit var wsAOwnerUserId: String
     private lateinit var wsADocId: String
     private lateinit var wsAAttachmentId: String
     private lateinit var tokenA: String
@@ -66,6 +69,7 @@ class TenantIsolationIntegrationTest {
             ?: userRepository.create("wsa-owner@autodoc.local", passwordEncoder.encode("password"))
         val userB = userRepository.findByEmail("wsb-owner@autodoc.local")
             ?: userRepository.create("wsb-owner@autodoc.local", passwordEncoder.encode("password"))
+        wsAOwnerUserId = userA.id
 
         wsAId = workspaceRepository.listByUser(userA.id).firstOrNull()?.id
             ?: workspaceRepository.create("Workspace-A", userA.id).id.also {
@@ -180,6 +184,20 @@ class TenantIsolationIntegrationTest {
 
         mockMvc.perform(
             get("/api/v1/admin/jobs")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
+            patch("/api/v1/workspaces/$wsAId/members/$wsAOwnerUserId")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+                .content(objectMapper.writeValueAsString(mapOf("role" to "VIEWER")))
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
+            delete("/api/v1/workspaces/$wsAId/members/$wsAOwnerUserId")
                 .header("Authorization", "Bearer $tokenB")
                 .header("X-Workspace-Id", wsAId)
         ).andExpect(status().isForbidden)

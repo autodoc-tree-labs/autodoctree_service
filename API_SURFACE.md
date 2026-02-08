@@ -67,6 +67,11 @@ Response:
 ```json
 { "email": "new@ex.com", "role": "MEMBER" }
 ```
+## PATCH /workspaces/{workspaceId}/members/{userId}
+```json
+{ "role": "VIEWER" }
+```
+## DELETE /workspaces/{workspaceId}/members/{userId}
 
 ---
 

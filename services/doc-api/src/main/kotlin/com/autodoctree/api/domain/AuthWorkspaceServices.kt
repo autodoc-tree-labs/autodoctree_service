@@ -6,6 +6,7 @@ import com.autodoctree.api.db.MembershipRepository
 import com.autodoctree.api.db.RefreshTokenRepository
 import com.autodoctree.api.db.UserRepository
 import com.autodoctree.api.db.WorkspaceRepository
+import com.autodoctree.api.infra.NotFoundException
 import com.autodoctree.api.infra.ForbiddenException
 import com.autodoctree.api.infra.UnauthorizedException
 import com.autodoctree.api.infra.requireOwner
@@ -172,6 +173,56 @@ class WorkspaceService(
                     "target_user_id" to user.id,
                     "email" to email,
                     "role" to role
+                )
+            )
+        )
+    }
+
+    @Transactional
+    fun updateMemberRole(context: WorkspaceContext, workspaceId: String, userId: String, role: String) {
+        if (context.workspaceId != workspaceId) {
+            throw ForbiddenException()
+        }
+        requireOwner(context)
+        val exists = membershipRepository.findRoleByWorkspaceAndUser(workspaceId, userId)
+            ?: throw NotFoundException()
+        if (exists == role) {
+            return
+        }
+        membershipRepository.updateRole(workspaceId, userId, role)
+        auditLogRepository.insert(
+            workspaceId,
+            context.userId,
+            "membership.role_updated",
+            objectMapper.writeValueAsString(
+                mapOf(
+                    "target_user_id" to userId,
+                    "role" to role
+                )
+            )
+        )
+    }
+
+    @Transactional
+    fun removeMember(context: WorkspaceContext, workspaceId: String, userId: String) {
+        if (context.workspaceId != workspaceId) {
+            throw ForbiddenException()
+        }
+        requireOwner(context)
+        if (context.userId == userId) {
+            throw ForbiddenException("Cannot remove yourself from workspace")
+        }
+        val exists = membershipRepository.findRoleByWorkspaceAndUser(workspaceId, userId)
+            ?: throw NotFoundException()
+        membershipRepository.delete(workspaceId, userId)
+        auditLogRepository.insert(
+            workspaceId,
+            context.userId,
+            "membership.removed",
+            objectMapper.writeValueAsString(
+                mapOf(
+                    "target_user_id" to userId,
+                    "previous_role" to exists
                 )
             )
         )

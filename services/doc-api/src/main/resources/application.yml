@@ -43,7 +43,12 @@ storage:
   region: ${S3_REGION:us-east-1}
 
 search:
+  backend: ${SEARCH_BACKEND:opensearch}
+  opensearch-url: ${OPENSEARCH_URL:http://localhost:9200}
+  username: ${OPENSEARCH_USERNAME:admin}
+  password: ${OPENSEARCH_PASSWORD:admin}
   index-alias: ${OPENSEARCH_INDEX_ALIAS:docs-active}
+  template-name: ${OPENSEARCH_TEMPLATE_NAME:docs-template}
 
 feature:
   auto-tree: true

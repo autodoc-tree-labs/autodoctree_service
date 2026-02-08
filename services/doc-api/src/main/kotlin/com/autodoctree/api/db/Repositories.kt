@@ -341,6 +341,14 @@ class MembershipRepository(private val jdbcTemplate: JdbcTemplate) {
         )
     }
 
+    fun delete(workspaceId: String, userId: String) {
+        jdbcTemplate.update(
+            "DELETE FROM memberships WHERE workspace_id = ? AND user_id = ?",
+            workspaceId,
+            userId
+        )
+    }
+
     fun findRoleByWorkspaceAndUser(workspaceId: String, userId: String): String? {
         val rows = jdbcTemplate.queryForList(
             "SELECT role FROM memberships WHERE workspace_id = ? AND user_id = ?",

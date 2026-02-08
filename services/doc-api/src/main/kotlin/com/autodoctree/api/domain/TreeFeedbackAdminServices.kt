@@ -30,7 +30,8 @@ class TreeService(
     private val feedbackRepository: FeedbackRepository,
     private val auditService: AuditService,
     private val objectMapper: ObjectMapper,
-    private val featureFlags: FeatureFlags
+    private val featureFlags: FeatureFlags,
+    private val rebuildDebounceQueue: RebuildDebounceQueue
 ) {
 
     @Transactional
@@ -194,6 +195,14 @@ class TreeService(
     fun requestRebuild(context: WorkspaceContext, mode: String): Map<String, Any?> {
         requireEditor(context)
         val manual = mode.equals("IMMEDIATE", ignoreCase = true)
+        if (!manual) {
+            rebuildDebounceQueue.request(context.workspaceId, "MANUAL_DEBOUNCED_REQUEST")
+            return mapOf(
+                "snapshot_id" to null,
+                "status" to "QUEUED",
+                "pending_count" to rebuildDebounceQueue.pendingCount(context.workspaceId)
+            )
+        }
         val snapshot = rebuildWorkspace(context.workspaceId, context.userId, manual = manual)
         return mapOf("snapshot_id" to snapshot.id, "status" to snapshot.status)
     }

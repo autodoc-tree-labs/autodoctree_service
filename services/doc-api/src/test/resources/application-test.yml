@@ -19,6 +19,9 @@ storage:
   bucket: autodoc
   region: us-east-1
 
+search:
+  backend: database
+
 security:
   os-tenant-assert: true
 

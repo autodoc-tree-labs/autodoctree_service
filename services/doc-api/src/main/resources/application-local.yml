@@ -9,5 +9,8 @@ feature:
   explain: true
   hybrid-search: false
 
+search:
+  backend: ${SEARCH_BACKEND:opensearch}
+
 security:
   os-tenant-assert: true

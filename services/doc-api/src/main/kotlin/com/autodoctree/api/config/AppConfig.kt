@@ -39,6 +39,16 @@ data class WorkerProperties(
     val debounceWindowSeconds: Long
 )
 
+@ConfigurationProperties(prefix = "search")
+data class SearchProperties(
+    val backend: String,
+    val opensearchUrl: String,
+    val username: String?,
+    val password: String?,
+    val indexAlias: String,
+    val templateName: String
+)
+
 @ConfigurationProperties(prefix = "feature")
 data class FeatureFlags(
     val autoTree: Boolean,

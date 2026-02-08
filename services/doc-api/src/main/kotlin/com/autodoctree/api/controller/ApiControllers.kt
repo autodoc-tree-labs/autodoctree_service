@@ -117,6 +117,29 @@ class WorkspaceController(
         workspaceService.addMember(context, workspaceId, body.email, body.role)
         return ResponseEntity.status(HttpStatus.CREATED).build()
     }
+
+    @PatchMapping("/{workspaceId}/members/{userId}")
+    fun updateMemberRole(
+        request: HttpServletRequest,
+        @PathVariable workspaceId: String,
+        @PathVariable userId: String,
+        @Valid @RequestBody body: UpdateMemberRoleRequest
+    ): ResponseEntity<Void> {
+        val context = workspaceContextResolver.resolve(request)
+        workspaceService.updateMemberRole(context, workspaceId, userId, body.role)
+        return ResponseEntity.noContent().build()
+    }
+
+    @DeleteMapping("/{workspaceId}/members/{userId}")
+    fun deleteMember(
+        request: HttpServletRequest,
+        @PathVariable workspaceId: String,
+        @PathVariable userId: String
+    ): ResponseEntity<Void> {
+        val context = workspaceContextResolver.resolve(request)
+        workspaceService.removeMember(context, workspaceId, userId)
+        return ResponseEntity.noContent().build()
+    }
 }
 
 @RestController
@@ -363,6 +386,10 @@ data class CreateWorkspaceRequest(
 
 data class AddMemberRequest(
     @field:Email val email: String,
+    @field:NotBlank val role: String
+)
+
+data class UpdateMemberRoleRequest(
     @field:NotBlank val role: String
 )
 

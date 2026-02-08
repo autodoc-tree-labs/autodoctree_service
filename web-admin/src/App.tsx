@@ -247,10 +247,17 @@ export default function App() {
     const [members, setMembers] = useState<Member[]>([]);
     const [email, setEmail] = useState("member@autodoc.local");
     const [role, setRole] = useState("MEMBER");
+    const [editingRole, setEditingRole] = useState<Record<string, string>>({});
 
     const load = async () => {
       const response = await api.request<{ items: Member[] }>(`/workspaces/${state.workspaceId}/members`, {}, true);
       setMembers(response.items);
+      setEditingRole(
+        response.items.reduce<Record<string, string>>((acc, member) => {
+          acc[member.user_id] = member.role;
+          return acc;
+        }, {})
+      );
     };
 
     useEffect(() => {
@@ -288,7 +295,50 @@ export default function App() {
         <ul>
           {members.map((member) => (
             <li key={member.user_id}>
-              {member.email} ({member.role})
+              <span>{member.email}</span>
+              <span> current:{member.role} </span>
+              <select
+                value={editingRole[member.user_id] ?? member.role}
+                onChange={(e) =>
+                  setEditingRole((prev) => ({
+                    ...prev,
+                    [member.user_id]: e.target.value
+                  }))
+                }
+              >
+                <option>OWNER</option>
+                <option>MEMBER</option>
+                <option>VIEWER</option>
+              </select>
+              <button
+                onClick={async () => {
+                  await api.request(
+                    `/workspaces/${state.workspaceId}/members/${member.user_id}`,
+                    {
+                      method: "PATCH",
+                      body: JSON.stringify({ role: editingRole[member.user_id] ?? member.role })
+                    },
+                    true
+                  );
+                  await load();
+                }}
+              >
+                Change role
+              </button>
+              <button
+                onClick={async () => {
+                  await api.request(
+                    `/workspaces/${state.workspaceId}/members/${member.user_id}`,
+                    {
+                      method: "DELETE"
+                    },
+                    true
+                  );
+                  await load();
+                }}
+              >
+                Remove
+              </button>
             </li>
           ))}
         </ul>

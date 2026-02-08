@@ -9,6 +9,7 @@ import com.autodoctree.api.db.OutboxEventRow
 import com.autodoctree.api.db.OutboxRepository
 import com.autodoctree.api.db.PipelineStatusRepository
 import com.autodoctree.api.db.StageExecutionRepository
+import com.autodoctree.api.domain.RebuildDebounceQueue
 import com.autodoctree.api.domain.TreeService
 import com.autodoctree.api.infra.sha256
 import com.autodoctree.api.search.TenantSearchClient
@@ -35,6 +36,7 @@ class OutboxWorker(
     private val embeddingProvider: LocalStubEmbeddingProvider,
     private val tenantSearchClient: TenantSearchClient,
     private val treeService: TreeService,
+    private val rebuildDebounceQueue: RebuildDebounceQueue,
     private val s3StorageService: S3StorageService,
     private val objectMapper: ObjectMapper,
     private val workerProperties: WorkerProperties
@@ -45,9 +47,27 @@ class OutboxWorker(
 
     @Scheduled(fixedDelayString = "\${worker.poll-interval-ms:2000}")
     fun poll() {
+        flushDebouncedRebuilds()
         val events = outboxRepository.fetchBatch(20)
         events.forEach { event ->
             processEventSafely(event)
+        }
+    }
+
+    private fun flushDebouncedRebuilds() {
+        val dueRequests = rebuildDebounceQueue.dequeueDue()
+        dueRequests.forEach { pending ->
+            runCatching {
+                treeService.rebuildWorkspace(pending.workspaceId)
+            }.onFailure { ex ->
+                logger.warn(
+                    "debounced_rebuild_failed workspace_id={} triggers={} reason_count={} message={}",
+                    pending.workspaceId,
+                    pending.triggerCount,
+                    pending.reasons.size,
+                    ex.message
+                )
+            }
         }
     }
 
@@ -107,7 +127,7 @@ class OutboxWorker(
             }
 
             "FeedbackRecorded" -> {
-                treeService.rebuildWorkspace(event.workspaceId)
+                rebuildDebounceQueue.request(event.workspaceId, "FEEDBACK_RECORDED")
             }
 
             "StageRetry" -> {
@@ -179,7 +199,11 @@ class OutboxWorker(
         if (runTree) {
             val inputHash = sha256(document.updatedAt.toString() + Stage.TREE.name)
             executeStage(workspaceId, documentId, Stage.TREE, inputHash, "tree-v1") {
-                treeService.rebuildWorkspace(workspaceId)
+                if (onlyStage == null) {
+                    rebuildDebounceQueue.request(workspaceId, "PIPELINE_STAGE_TREE")
+                } else {
+                    treeService.rebuildWorkspace(workspaceId)
+                }
             }
         }
 
