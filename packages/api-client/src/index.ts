@@ -15,6 +15,17 @@ export type RequestContext = {
   onUnauthorized?: () => Promise<boolean>;
 };
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly payload: unknown;
+
+  constructor(status: number, message: string, payload: unknown) {
+    super(message);
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
 const generateRequestId = () => {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -60,8 +71,8 @@ export class ApiClient {
     }
 
     if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text || `Request failed with ${response.status}`);
+      const payload = await parseErrorPayload(response);
+      throw new ApiError(response.status, toSafeMessage(response.status, payload), payload);
     }
 
     if (response.status === 204) {
@@ -70,3 +81,38 @@ export class ApiClient {
     return (await response.json()) as T;
   }
 }
+
+const parseErrorPayload = async (response: Response): Promise<unknown> => {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+  const text = await response.text();
+  return text || null;
+};
+
+const toSafeMessage = (status: number, payload: unknown): string => {
+  if (status === 401) {
+    return "Session expired. Please sign in again.";
+  }
+  if (status === 403 || status === 404) {
+    return "Access denied.";
+  }
+  if (status >= 500) {
+    return "Server error. Please retry.";
+  }
+  if (typeof payload === "string" && payload.trim().length > 0) {
+    return payload;
+  }
+  if (payload && typeof payload === "object" && "error" in payload) {
+    const errorPayload = (payload as { error?: { message?: string } }).error;
+    if (errorPayload?.message) {
+      return errorPayload.message;
+    }
+  }
+  return `Request failed with ${status}`;
+};

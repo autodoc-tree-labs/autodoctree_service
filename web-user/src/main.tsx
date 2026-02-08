@@ -3,13 +3,16 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { SessionProvider } from "./session";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <SessionProvider>
-      <BrowserRouter>
-        <App />
-      </BrowserRouter>
-    </SessionProvider>
+    <ErrorBoundary>
+      <SessionProvider>
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
+      </SessionProvider>
+    </ErrorBoundary>
   </React.StrictMode>
 );

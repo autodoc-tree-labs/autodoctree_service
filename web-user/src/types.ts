@@ -3,6 +3,7 @@ export type PipelineStatus = {
   embed: string;
   index: string;
   tree: string;
+  failure_reason?: string | null;
 };
 
 export type AttachmentSummary = {
@@ -18,4 +19,7 @@ export type DocumentItem = {
   pipeline_status: PipelineStatus;
   attachments: AttachmentSummary[];
   updated_at: string;
+  body_markdown?: string;
+  workspace_id?: string;
+  version?: number;
 };
