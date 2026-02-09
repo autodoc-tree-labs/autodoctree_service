@@ -23,7 +23,11 @@ type TreeActiveResponse = {
 type ExplainResponse = {
   document_id: string;
   node_id: string | null;
-  rationale: { keywords: string[]; similar_docs: Array<{ document_id: string; title: string; similarity: number }>; signals: string[] };
+  rationale?: {
+    keywords?: string[];
+    similar_docs?: Array<{ document_id: string; title: string; similarity: number }>;
+    signals?: string[];
+  };
 };
 
 type UiError = {
@@ -360,6 +364,8 @@ export default function App() {
     const [doc, setDoc] = useState<DocumentItem | null>(null);
     const [uploadFile, setUploadFile] = useState<File | null>(null);
     const [explain, setExplain] = useState<ExplainResponse | null>(null);
+    const [explainError, setExplainError] = useState<UiError | null>(null);
+    const [explainLoading, setExplainLoading] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [uploading, setUploading] = useState(false);
     const [documentError, setDocumentError] = useState<UiError | null>(null);
@@ -446,6 +452,23 @@ export default function App() {
       void loadDocument();
     }, [loadDocument]);
 
+    const loadExplain = useCallback(async () => {
+      if (!params.documentId) {
+        return;
+      }
+
+      setExplainLoading(true);
+      setExplainError(null);
+      try {
+        const payload = await api.request<ExplainResponse>(`/documents/${params.documentId}/explain`, {}, true);
+        setExplain(payload);
+      } catch (e) {
+        setExplainError(toUiError(e, "failed to load explain"));
+      } finally {
+        setExplainLoading(false);
+      }
+    }, [api, params.documentId]);
+
     useEffect(() => {
       if (!doc) {
         return;
@@ -523,22 +546,71 @@ export default function App() {
         </div>
 
         <h3>Explain</h3>
-        <button
-          onClick={async () => {
-            if (!params.documentId) {
-              return;
-            }
-            try {
-              const payload = await api.request<ExplainResponse>(`/documents/${params.documentId}/explain`, {}, true);
-              setExplain(payload);
-            } catch (e) {
-              setDocumentError(toUiError(e, "failed to load explain"));
-            }
+        <ErrorPanel
+          error={explainError}
+          onRetry={() => {
+            void loadExplain();
           }}
-        >
-          Load explain
+        />
+        <button disabled={explainLoading} onClick={() => void loadExplain()}>
+          {explainLoading ? "Loading..." : explain ? "Refresh explain" : "Load explain"}
         </button>
-        <pre>{JSON.stringify(explain, null, 2)}</pre>
+        <div style={{ marginTop: 12, border: "1px solid #ddd", padding: 12 }}>
+          {explain ? (
+            <div style={{ display: "grid", gap: 12 }}>
+              {(() => {
+                const keywords = explain.rationale?.keywords ?? [];
+                const similarDocs = explain.rationale?.similar_docs ?? [];
+                const signals = explain.rationale?.signals ?? [];
+
+                return (
+                  <>
+                    <div>
+                      <strong>Keywords</strong>
+                      {keywords.length ? (
+                        <ul>
+                          {keywords.map((keyword) => (
+                            <li key={keyword}>{keyword}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div>No keywords available.</div>
+                      )}
+                    </div>
+                    <div>
+                      <strong>Similar docs</strong>
+                      {similarDocs.length ? (
+                        <ul>
+                          {similarDocs.map((doc) => (
+                            <li key={doc.document_id}>
+                              <Link to={`/documents/${doc.document_id}`}>{doc.title || doc.document_id}</Link> ({doc.similarity.toFixed(2)})
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div>No similar docs available.</div>
+                      )}
+                    </div>
+                    <div>
+                      <strong>Signals</strong>
+                      {signals.length ? (
+                        <ul>
+                          {signals.map((signal) => (
+                            <li key={signal}>{signal}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div>No signals available.</div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          ) : (
+            <div>Explain data not loaded yet.</div>
+          )}
+        </div>
       </Layout>
     );
   }
