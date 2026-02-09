@@ -140,6 +140,10 @@ class TreeService(
         val movedRatio = if (assignment.isEmpty()) 0.0 else movedCount.toDouble() / assignment.size.toDouble()
 
         val churnCount = movedCount
+        val nodeRenameCount = TreeSnapshotMetrics.computeNodeRenameCount(
+            activeNodes = activeNodes,
+            newLabels = assignment.values.toSet()
+        )
         val nextStatus = if (manual || active == null || movedRatio <= 0.35) "ACTIVE" else "RECOMMENDED"
 
         if (nextStatus == "ACTIVE") {
@@ -150,7 +154,8 @@ class TreeService(
             workspaceId = workspaceId,
             status = nextStatus,
             movedRatio = movedRatio,
-            churnCount = churnCount
+            churnCount = churnCount,
+            nodeRenameCount = nodeRenameCount
         )
 
         val root = treeRepository.insertNode(
@@ -269,6 +274,7 @@ class TreeService(
                     "status" to it.status,
                     "moved_ratio" to it.movedRatio,
                     "churn_count" to it.churnCount,
+                    "node_rename_count" to it.nodeRenameCount,
                     "created_at" to it.createdAt.toString()
                 )
             }

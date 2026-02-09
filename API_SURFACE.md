@@ -169,6 +169,21 @@ Response:
 ```
 
 ## GET /tree/snapshots
+Response:
+```json
+{
+  "items": [
+    {
+      "id": "ts_1",
+      "status": "ACTIVE",
+      "moved_ratio": 0.12,
+      "churn_count": 3,
+      "node_rename_count": 2,
+      "created_at": "2024-01-01T10:00:00Z"
+    }
+  ]
+}
+```
 ## POST /tree/rebuild
 ```json
 { "mode": "DEBOUNCED" }
