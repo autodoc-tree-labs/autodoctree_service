@@ -133,6 +133,7 @@ data class TreeSnapshotRow(
     val status: String,
     val movedRatio: Double,
     val churnCount: Int,
+    val nodeRenameCount: Int,
     val createdAt: LocalDateTime,
     val activatedAt: LocalDateTime?,
     val activatedBy: String?
@@ -1092,6 +1093,7 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
             status = rs.getString("status"),
             movedRatio = rs.getDouble("moved_ratio"),
             churnCount = rs.getInt("churn_count"),
+            nodeRenameCount = rs.getInt("node_rename_count"),
             createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
             activatedAt = rs.getTimestamp("activated_at")?.toLocalDateTime(),
             activatedBy = rs.getString("activated_by")
@@ -1123,23 +1125,30 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
         )
     }
 
-    fun createSnapshot(workspaceId: String, status: String, movedRatio: Double, churnCount: Int): TreeSnapshotRow {
+    fun createSnapshot(
+        workspaceId: String,
+        status: String,
+        movedRatio: Double,
+        churnCount: Int,
+        nodeRenameCount: Int
+    ): TreeSnapshotRow {
         val id = UUID.randomUUID().toString()
         val now = LocalDateTime.now()
         jdbcTemplate.update(
             """
             INSERT INTO tree_snapshot(
-                id, workspace_id, status, moved_ratio, churn_count, created_at, activated_at, activated_by
-            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+                id, workspace_id, status, moved_ratio, churn_count, node_rename_count, created_at, activated_at, activated_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
             """.trimIndent(),
             id,
             workspaceId,
             status,
             movedRatio,
             churnCount,
+            nodeRenameCount,
             now
         )
-        return TreeSnapshotRow(id, workspaceId, status, movedRatio, churnCount, now, null, null)
+        return TreeSnapshotRow(id, workspaceId, status, movedRatio, churnCount, nodeRenameCount, now, null, null)
     }
 
     fun findActiveSnapshot(workspaceId: String): TreeSnapshotRow? = jdbcTemplate.queryOneOrNull(
