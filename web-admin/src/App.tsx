@@ -27,6 +27,36 @@ type AuditResponse = {
     payload: Record<string, unknown>;
   }>;
 };
+type DebugNeighborItem = {
+  neighbor_doc_id: string;
+  title: string;
+  sem_sim: number | null;
+  lex_sim: number;
+  entity_overlap: number;
+  final_sim: number;
+  gate_flags: {
+    lexical_gate_passed: boolean;
+    reason: string;
+  };
+};
+type DebugNeighborsResponse = {
+  document_id: string;
+  title: string;
+  neighbors: DebugNeighborItem[];
+};
+type ClusterStatsResponse = {
+  snapshot_id: string | null;
+  status: string;
+  cluster_count: number;
+  avg_cluster_size: number;
+  neighbor_edges_total: number;
+  edges_filtered_total: number;
+  label_filtered_total: number;
+  avg_label_length: number;
+  tree_rebuild_duration_ms: number;
+  moved_ratio: number;
+  churn_ratio: number;
+};
 
 type Member = { user_id: string; email: string; role: string };
 
@@ -91,6 +121,12 @@ const localizeErrorMessage = (message: string, fallback: string): string => {
 const roleLabel = (value: string): string => ROLE_LABEL[value.toUpperCase()] ?? value;
 const statusLabel = (value: string): string => STATUS_LABEL[value.toUpperCase()] ?? value;
 const stageLabel = (value: string): string => STAGE_LABEL[value.toUpperCase()] ?? value;
+const formatMetric = (value: number | null | undefined, digits = 3): string => {
+  if (value == null || Number.isNaN(value)) {
+    return "-";
+  }
+  return value.toFixed(digits);
+};
 
 function Layout({ children }: { children: React.ReactNode }) {
   const { state, clearTokens } = useSession();
@@ -108,6 +144,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           <Link to="/jobs">작업</Link>
           <Link to="/audit">감사 로그</Link>
           <Link to="/members">멤버</Link>
+          <Link to="/tree-debug">트리 디버그</Link>
         </nav>
         <button
           onClick={() => {
@@ -408,6 +445,176 @@ export default function App() {
     );
   }
 
+  function TreeDebugPage() {
+    const [documentId, setDocumentId] = useState("");
+    const [sourceTitle, setSourceTitle] = useState("");
+    const [neighbors, setNeighbors] = useState<DebugNeighborItem[]>([]);
+    const [stats, setStats] = useState<ClusterStatsResponse | null>(null);
+    const [error, setError] = useState<string | null>(null);
+
+    const loadStats = async () => {
+      try {
+        const response = await api.request<ClusterStatsResponse>("/admin/tree/debug/cluster-stats", {}, true);
+        setStats(response);
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "클러스터 통계를 불러오지 못했습니다."));
+      }
+    };
+
+    useEffect(() => {
+      if (!state.workspaceId) {
+        setStats(null);
+        setNeighbors([]);
+        return;
+      }
+      void loadStats();
+    }, [state.workspaceId]);
+
+    const loadNeighbors = async () => {
+      if (!state.workspaceId) {
+        setError("먼저 워크스페이스를 선택하세요.");
+        return;
+      }
+      if (!documentId.trim()) {
+        setError("문서 식별자를 입력하세요.");
+        return;
+      }
+      setError(null);
+      try {
+        const response = await api.request<DebugNeighborsResponse>(
+          `/admin/tree/debug/neighbors?document_id=${encodeURIComponent(documentId.trim())}`,
+          {},
+          true
+        );
+        setSourceTitle(response.title);
+        setNeighbors(response.neighbors);
+      } catch (e) {
+        setNeighbors([]);
+        setSourceTitle("");
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "이웃 정보를 불러오지 못했습니다."));
+      }
+    };
+
+    return (
+      <Layout>
+        <h2>트리 디버그</h2>
+        <p>문서 ID로 이웃 신호를 조회하고 현재 클러스터 지표를 확인합니다.</p>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <input
+            value={documentId}
+            onChange={(e) => setDocumentId(e.target.value)}
+            placeholder="문서 식별자(document_id)"
+            style={{ minWidth: 320 }}
+          />
+          <button onClick={() => void loadNeighbors()}>이웃 조회</button>
+          <button onClick={() => void loadStats()}>통계 새로고침</button>
+        </div>
+        {error ? (
+          <div style={{ border: "1px solid #d33", padding: 10, marginBottom: 12, background: "#fff3f3" }}>{error}</div>
+        ) : null}
+
+        <section style={{ border: "1px solid #ccd", padding: 12, marginBottom: 14 }}>
+          <h3 style={{ marginTop: 0 }}>클러스터 통계</h3>
+          {stats ? (
+            <table>
+              <tbody>
+                <tr>
+                  <td>스냅샷</td>
+                  <td>{stats.snapshot_id ?? "없음"}</td>
+                </tr>
+                <tr>
+                  <td>상태</td>
+                  <td>{stats.status}</td>
+                </tr>
+                <tr>
+                  <td>클러스터 수</td>
+                  <td>{stats.cluster_count}</td>
+                </tr>
+                <tr>
+                  <td>평균 클러스터 크기</td>
+                  <td>{formatMetric(stats.avg_cluster_size, 2)}</td>
+                </tr>
+                <tr>
+                  <td>neighbor_edges_total</td>
+                  <td>{formatMetric(stats.neighbor_edges_total, 0)}</td>
+                </tr>
+                <tr>
+                  <td>edges_filtered_total</td>
+                  <td>{formatMetric(stats.edges_filtered_total, 0)}</td>
+                </tr>
+                <tr>
+                  <td>label_filtered_total</td>
+                  <td>{formatMetric(stats.label_filtered_total, 0)}</td>
+                </tr>
+                <tr>
+                  <td>avg_label_length</td>
+                  <td>{formatMetric(stats.avg_label_length, 2)}</td>
+                </tr>
+                <tr>
+                  <td>tree_rebuild_duration_ms</td>
+                  <td>{formatMetric(stats.tree_rebuild_duration_ms, 2)}</td>
+                </tr>
+                <tr>
+                  <td>moved_ratio</td>
+                  <td>{formatMetric(stats.moved_ratio, 3)}</td>
+                </tr>
+                <tr>
+                  <td>churn_ratio</td>
+                  <td>{formatMetric(stats.churn_ratio, 3)}</td>
+                </tr>
+              </tbody>
+            </table>
+          ) : (
+            <p>통계 없음</p>
+          )}
+        </section>
+
+        <section style={{ border: "1px solid #ccd", padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>Neighbors</h3>
+          <p>
+            문서: <strong>{sourceTitle || "-"}</strong>
+          </p>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>문서</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>semantic</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>lexical</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>entity_overlap</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>final</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>gate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {neighbors.map((neighbor) => (
+                <tr key={neighbor.neighbor_doc_id}>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>
+                    <div>{neighbor.title}</div>
+                    <small>{neighbor.neighbor_doc_id}</small>
+                  </td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{formatMetric(neighbor.sem_sim)}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{formatMetric(neighbor.lex_sim)}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{neighbor.entity_overlap}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{formatMetric(neighbor.final_sim)}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>
+                    {neighbor.gate_flags.lexical_gate_passed ? "PASS" : "BLOCK"} / {neighbor.gate_flags.reason}
+                  </td>
+                </tr>
+              ))}
+              {neighbors.length === 0 ? (
+                <tr>
+                  <td colSpan={6} style={{ padding: "8px 4px" }}>
+                    조회 결과가 없습니다.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </section>
+      </Layout>
+    );
+  }
+
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
@@ -440,6 +647,14 @@ export default function App() {
         element={
           <Protected>
             <MembersPage />
+          </Protected>
+        }
+      />
+      <Route
+        path="/tree-debug"
+        element={
+          <Protected>
+            <TreeDebugPage />
           </Protected>
         }
       />
