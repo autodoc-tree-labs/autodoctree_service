@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
+import { Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { ApiError, type Workspace } from "@autodoctree/api-client";
 import { createApiClient } from "./api";
 import { useSession } from "./session";
@@ -35,6 +35,8 @@ type UiError = {
   status: number | null;
 };
 
+type StatusTone = "neutral" | "good" | "warn" | "bad";
+
 const toUiError = (error: unknown, fallback: string): UiError => {
   if (error instanceof ApiError) {
     return {
@@ -54,6 +56,56 @@ const toUiError = (error: unknown, fallback: string): UiError => {
   };
 };
 
+const statusTone = (value: string): StatusTone => {
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "DONE" || normalized === "SUCCESS") {
+    return "good";
+  }
+  if (normalized === "RUNNING" || normalized === "PROCESSING" || normalized === "PENDING") {
+    return "warn";
+  }
+  if (normalized === "FAILED" || normalized === "ERROR") {
+    return "bad";
+  }
+  return "neutral";
+};
+
+function StatusChip({ label, value }: { label: string; value: string }) {
+  return <span className={`status-chip status-chip-${statusTone(value)}`}>{label}: {value}</span>;
+}
+
+function PageHeader({ title, subtitle, action }: { title: string; subtitle: string; action?: React.ReactNode }) {
+  return (
+    <div className="page-header">
+      <div>
+        <h1 className="page-title">{title}</h1>
+        <p className="page-subtitle">{subtitle}</p>
+      </div>
+      {action ? <div className="page-header-action">{action}</div> : null}
+    </div>
+  );
+}
+
+function EmptyState({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) {
+  return (
+    <div className="empty-state">
+      <strong>{title}</strong>
+      <p>{description}</p>
+      {action}
+    </div>
+  );
+}
+
+function WorkspaceRequiredHint() {
+  return (
+    <EmptyState
+      title="Select a workspace first"
+      description="Tenant-scoped pages need an active workspace to attach the X-Workspace-Id header."
+      action={<NavLink className="btn btn-primary" to="/workspace">Go to workspace</NavLink>}
+    />
+  );
+}
+
 function ErrorPanel({ error, onRetry }: { error: UiError | null; onRetry?: () => void }) {
   if (!error) {
     return null;
@@ -62,14 +114,18 @@ function ErrorPanel({ error, onRetry }: { error: UiError | null; onRetry?: () =>
   const canRetry = Boolean(onRetry) && Boolean(error.status && error.status >= 500);
 
   return (
-    <div style={{ border: "1px solid #d55", background: "#fff5f5", padding: 10, marginBottom: 10 }}>
-      <strong>{error.message}</strong>
+    <div className="error-panel" role="alert">
+      <div>
+        <strong>{error.message}</strong>
+        {error.status ? <span className="error-code">HTTP {error.status}</span> : null}
+      </div>
       {canRetry ? (
         <button
-          style={{ marginLeft: 10 }}
+          className="btn btn-ghost btn-small"
           onClick={() => {
             onRetry?.();
           }}
+          type="button"
         >
           Retry
         </button>
@@ -104,27 +160,52 @@ function Layout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
 
   return (
-    <div style={{ fontFamily: "sans-serif", maxWidth: 1100, margin: "0 auto", padding: 16 }}>
-      <header style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
-        <strong>AutoDoc Tree User</strong>
-        <span style={{ background: "#f2f2f2", padding: "4px 8px" }}>Workspace: {state.workspaceName ?? "(not selected)"}</span>
-        <nav style={{ display: "flex", gap: 10 }}>
-          <Link to="/workspace">Workspace</Link>
-          <Link to="/inbox">Inbox</Link>
-          <Link to="/editor">Editor</Link>
-          <Link to="/search">Search</Link>
-          <Link to="/tree">Tree</Link>
+    <div className="app-shell">
+      <header className="panel panel-compact topbar">
+        <div className="brand">
+          <span className="brand-mark">A</span>
+          <div className="brand-text">
+            <strong>AutoDoc Tree</strong>
+            <span>User Console</span>
+          </div>
+        </div>
+
+        <div className="workspace-chip" title={state.workspaceId ?? undefined}>
+          <span>Workspace</span>
+          <strong>{state.workspaceName ?? "Not selected"}</strong>
+        </div>
+
+        <nav className="top-nav" aria-label="Main navigation">
+          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/workspace">
+            Workspace
+          </NavLink>
+          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/inbox">
+            Inbox
+          </NavLink>
+          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/editor">
+            Editor
+          </NavLink>
+          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/search">
+            Search
+          </NavLink>
+          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/tree">
+            Tree
+          </NavLink>
         </nav>
+
         <button
+          className="btn btn-secondary"
           onClick={() => {
             clearTokens();
             navigate("/login");
           }}
+          type="button"
         >
           Logout
         </button>
       </header>
-      {children}
+
+      <main className="page-stack">{children}</main>
     </div>
   );
 }
@@ -147,29 +228,59 @@ function LoginPage() {
   );
 
   return (
-    <form
-      onSubmit={async (event) => {
-        event.preventDefault();
-        setError(null);
-        try {
-          const response = await api.request<AuthResponse>("/auth/login", {
-            method: "POST",
-            body: JSON.stringify({ email, password })
-          });
-          setTokens(response.access_token, response.refresh_token);
-          navigate("/workspace");
-        } catch (e) {
-          setError(toUiError(e, "login failed"));
-        }
-      }}
-      style={{ display: "grid", gap: 8, maxWidth: 420, margin: "80px auto" }}
-    >
-      <h2>Login</h2>
-      <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-      <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
-      <button type="submit">Sign in</button>
-      <ErrorPanel error={error} />
-    </form>
+    <div className="auth-shell">
+      <form
+        className="panel auth-card"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          setError(null);
+          try {
+            const response = await api.request<AuthResponse>("/auth/login", {
+              method: "POST",
+              body: JSON.stringify({ email, password })
+            });
+            setTokens(response.access_token, response.refresh_token);
+            navigate("/workspace");
+          } catch (e) {
+            setError(toUiError(e, "login failed"));
+          }
+        }}
+      >
+        <div className="auth-eyebrow">AutoDoc Tree</div>
+        <h1 className="auth-title">Welcome back</h1>
+        <p className="auth-subtitle">Sign in with your workspace account to organize documents automatically.</p>
+
+        <label className="field-label" htmlFor="login-email">
+          Email
+        </label>
+        <input
+          className="field-input"
+          id="login-email"
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="owner@autodoc.local"
+          type="email"
+          value={email}
+        />
+
+        <label className="field-label" htmlFor="login-password">
+          Password
+        </label>
+        <input
+          className="field-input"
+          id="login-password"
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="password"
+          type="password"
+          value={password}
+        />
+
+        <button className="btn btn-primary btn-block" type="submit">
+          Sign in
+        </button>
+
+        <ErrorPanel error={error} />
+      </form>
+    </div>
   );
 }
 
@@ -239,38 +350,61 @@ export default function App() {
 
     return (
       <Layout>
-        <h2>Workspace</h2>
-        <ErrorPanel
-          error={error}
-          onRetry={() => {
-            void loadWorkspaces();
-          }}
-        />
-        <div style={{ display: "flex", gap: 8 }}>
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-          <button
-            onClick={async () => {
-              try {
-                await api.request("/workspaces", {
-                  method: "POST",
-                  body: JSON.stringify({ name })
-                });
-                await loadWorkspaces();
-              } catch (e) {
-                setError(toUiError(e, "failed to create workspace"));
-              }
+        <section className="panel">
+          <PageHeader title="Workspace" subtitle="Choose the tenant context before browsing or editing documents." />
+          <ErrorPanel
+            error={error}
+            onRetry={() => {
+              void loadWorkspaces();
             }}
-          >
-            Create Workspace
-          </button>
-        </div>
-        <ul>
-          {workspaces.map((ws) => (
-            <li key={ws.id}>
-              <button onClick={() => setWorkspace(ws.id, ws.name)}>{ws.name}</button> ({ws.role})
-            </li>
-          ))}
-        </ul>
+          />
+
+          <div className="field-row">
+            <div className="field-grow">
+              <label className="field-label" htmlFor="workspace-name">
+                New workspace name
+              </label>
+              <input className="field-input" id="workspace-name" onChange={(e) => setName(e.target.value)} value={name} />
+            </div>
+            <button
+              className="btn btn-primary"
+              onClick={async () => {
+                try {
+                  await api.request("/workspaces", {
+                    method: "POST",
+                    body: JSON.stringify({ name })
+                  });
+                  await loadWorkspaces();
+                } catch (e) {
+                  setError(toUiError(e, "failed to create workspace"));
+                }
+              }}
+              type="button"
+            >
+              Create workspace
+            </button>
+          </div>
+
+          {workspaces.length === 0 ? (
+            <EmptyState title="No workspace yet" description="Create one to start organizing documents." />
+          ) : (
+            <ul className="workspace-list">
+              {workspaces.map((ws) => {
+                const roleName = ws.role.toLowerCase();
+                const isSelected = state.workspaceId === ws.id;
+                return (
+                  <li className={`workspace-item${isSelected ? " is-selected" : ""}`} key={ws.id}>
+                    <button className="workspace-button" onClick={() => setWorkspace(ws.id, ws.name)} type="button">
+                      <span className="workspace-name">{ws.name}</span>
+                      <span className={`role-badge role-${roleName}`}>{ws.role}</span>
+                      {isSelected ? <span className="workspace-current">Current</span> : null}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
       </Layout>
     );
   }
@@ -291,6 +425,7 @@ export default function App() {
 
     useEffect(() => {
       if (!state.workspaceId) {
+        setDocuments([]);
         return;
       }
       void loadDocuments();
@@ -298,21 +433,39 @@ export default function App() {
 
     return (
       <Layout>
-        <h2>Inbox</h2>
-        <ErrorPanel
-          error={error}
-          onRetry={() => {
-            void loadDocuments();
-          }}
-        />
-        <ul>
-          {documents.map((doc) => (
-            <li key={doc.id}>
-              <Link to={`/documents/${doc.id}`}>{doc.title}</Link> [{doc.status}] ingest:{doc.pipeline_status.ingest} embed:{doc.pipeline_status.embed} index:
-              {doc.pipeline_status.index} tree:{doc.pipeline_status.tree}
-            </li>
-          ))}
-        </ul>
+        <section className="panel">
+          <PageHeader title="Inbox" subtitle="Recently ingested documents and pipeline progress by stage." />
+          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
+          <ErrorPanel
+            error={error}
+            onRetry={() => {
+              void loadDocuments();
+            }}
+          />
+
+          {state.workspaceId && documents.length === 0 ? (
+            <EmptyState title="No documents yet" description="Create or upload a document from the Editor tab." />
+          ) : null}
+
+          <div className="doc-grid">
+            {documents.map((doc) => (
+              <article className="panel panel-soft doc-card" key={doc.id}>
+                <div className="doc-card-header">
+                  <Link className="doc-link" to={`/documents/${doc.id}`}>
+                    {doc.title}
+                  </Link>
+                  <StatusChip label="Status" value={doc.status} />
+                </div>
+                <div className="pipeline-grid">
+                  <StatusChip label="Ingest" value={doc.pipeline_status.ingest} />
+                  <StatusChip label="Embed" value={doc.pipeline_status.embed} />
+                  <StatusChip label="Index" value={doc.pipeline_status.index} />
+                  <StatusChip label="Tree" value={doc.pipeline_status.tree} />
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
       </Layout>
     );
   }
@@ -325,36 +478,53 @@ export default function App() {
 
     return (
       <Layout>
-        <h2>Editor</h2>
-        <ErrorPanel error={error} />
-        <div style={{ display: "grid", gap: 8 }}>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" />
-          <textarea rows={14} value={body} onChange={(e) => setBody(e.target.value)} />
-          <button
-            onClick={async () => {
-              setError(null);
-              try {
-                const created = await api.request<{ id: string }>(
-                  "/documents",
-                  {
-                    method: "POST",
-                    body: JSON.stringify({
-                      title,
-                      body_markdown: body,
-                      source_type: "EDITOR"
-                    })
-                  },
-                  true
-                );
-                navigate(`/documents/${created.id}`);
-              } catch (e) {
-                setError(toUiError(e, "failed to save document"));
-              }
-            }}
-          >
-            Save Document
-          </button>
-        </div>
+        <section className="panel">
+          <PageHeader title="Editor" subtitle="Create markdown docs and push them into the processing pipeline." />
+          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
+          <ErrorPanel error={error} />
+
+          <div className="field-stack">
+            <label className="field-label" htmlFor="editor-title">
+              Title
+            </label>
+            <input className="field-input" id="editor-title" onChange={(e) => setTitle(e.target.value)} placeholder="Document title" value={title} />
+
+            <label className="field-label" htmlFor="editor-body">
+              Body (Markdown)
+            </label>
+            <textarea className="field-textarea editor-textarea" id="editor-body" onChange={(e) => setBody(e.target.value)} rows={14} value={body} />
+
+            <div className="action-row">
+              <button
+                className="btn btn-primary"
+                disabled={!state.workspaceId}
+                onClick={async () => {
+                  setError(null);
+                  try {
+                    const created = await api.request<{ id: string }>(
+                      "/documents",
+                      {
+                        method: "POST",
+                        body: JSON.stringify({
+                          title,
+                          body_markdown: body,
+                          source_type: "EDITOR"
+                        })
+                      },
+                      true
+                    );
+                    navigate(`/documents/${created.id}`);
+                  } catch (e) {
+                    setError(toUiError(e, "failed to save document"));
+                  }
+                }}
+                type="button"
+              >
+                Save document
+              </button>
+            </div>
+          </div>
+        </section>
       </Layout>
     );
   }
@@ -372,7 +542,7 @@ export default function App() {
     const [uploadError, setUploadError] = useState<UiError | null>(null);
 
     const loadDocument = useCallback(async () => {
-      if (!params.documentId) {
+      if (!params.documentId || !state.workspaceId) {
         return;
       }
       try {
@@ -382,10 +552,10 @@ export default function App() {
       } catch (e) {
         setDocumentError(toUiError(e, "failed to load document"));
       }
-    }, [api, params.documentId]);
+    }, [api, params.documentId, state.workspaceId]);
 
     const uploadSelectedFile = useCallback(async () => {
-      if (!uploadFile || !params.documentId) {
+      if (!uploadFile || !params.documentId || !state.workspaceId) {
         return;
       }
 
@@ -446,7 +616,7 @@ export default function App() {
       } finally {
         setUploading(false);
       }
-    }, [api, loadDocument, params.documentId, uploadFile]);
+    }, [api, loadDocument, params.documentId, state.workspaceId, uploadFile]);
 
     useEffect(() => {
       void loadDocument();
@@ -490,127 +660,186 @@ export default function App() {
 
     return (
       <Layout>
-        <h2>Document Detail</h2>
-        <ErrorPanel
-          error={documentError}
-          onRetry={() => {
-            void loadDocument();
-          }}
-        />
+        <section className="panel">
+          <PageHeader
+            title={doc?.title ?? "Document detail"}
+            subtitle="Inspect processing stages, attachments, and explain rationale for placement."
+          />
+          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
+          <ErrorPanel
+            error={documentError}
+            onRetry={() => {
+              void loadDocument();
+            }}
+          />
 
-        {doc ? (
-          <div style={{ display: "grid", gap: 8 }}>
-            <div>Title: {doc.title}</div>
-            <div>Status: {doc.status}</div>
-            <div>
-              Pipeline: ingest={doc.pipeline_status.ingest} embed={doc.pipeline_status.embed} index={doc.pipeline_status.index} tree={doc.pipeline_status.tree}
-            </div>
-            {doc.pipeline_status.failure_reason ? <div>Failure reason: {doc.pipeline_status.failure_reason}</div> : null}
-            <div>Attachments ({doc.attachments.length})</div>
-            <ul>
-              {doc.attachments.map((attachment) => (
-                <li key={attachment.id}>
-                  {attachment.id} ({attachment.content_type}, {attachment.size} bytes)
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-
-        <h3>Upload attachment</h3>
-        <div
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => {
-            event.preventDefault();
-            const dropped = event.dataTransfer.files?.[0] ?? null;
-            setUploadFile(dropped);
-          }}
-          style={{ border: "1px dashed #999", padding: 12, marginBottom: 8 }}
-        >
-          Drop file here or select below.
-        </div>
-        <input type="file" onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)} />
-        <div>Selected file: {uploadFile ? `${uploadFile.name} (${uploadFile.size} bytes)` : "none"}</div>
-        <div>Upload progress: {uploadProgress}%</div>
-        <ErrorPanel
-          error={uploadError}
-          onRetry={() => {
-            void uploadSelectedFile();
-          }}
-        />
-        <div style={{ display: "flex", gap: 8 }}>
-          <button disabled={!uploadFile || !params.documentId || uploading} onClick={() => void uploadSelectedFile()}>
-            {uploading ? "Uploading..." : "Upload"}
-          </button>
-          {uploadError ? <button onClick={() => void uploadSelectedFile()}>Retry upload</button> : null}
-        </div>
-
-        <h3>Explain</h3>
-        <ErrorPanel
-          error={explainError}
-          onRetry={() => {
-            void loadExplain();
-          }}
-        />
-        <button disabled={explainLoading} onClick={() => void loadExplain()}>
-          {explainLoading ? "Loading..." : explain ? "Refresh explain" : "Load explain"}
-        </button>
-        <div style={{ marginTop: 12, border: "1px solid #ddd", padding: 12 }}>
-          {explain ? (
-            <div style={{ display: "grid", gap: 12 }}>
-              {(() => {
-                const keywords = explain.rationale?.keywords ?? [];
-                const similarDocs = explain.rationale?.similar_docs ?? [];
-                const signals = explain.rationale?.signals ?? [];
-
-                return (
-                  <>
-                    <div>
-                      <strong>Keywords</strong>
-                      {keywords.length ? (
-                        <ul>
-                          {keywords.map((keyword) => (
-                            <li key={keyword}>{keyword}</li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <div>No keywords available.</div>
-                      )}
-                    </div>
-                    <div>
-                      <strong>Similar docs</strong>
-                      {similarDocs.length ? (
-                        <ul>
-                          {similarDocs.map((doc) => (
-                            <li key={doc.document_id}>
-                              <Link to={`/documents/${doc.document_id}`}>{doc.title || doc.document_id}</Link> ({doc.similarity.toFixed(2)})
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <div>No similar docs available.</div>
-                      )}
-                    </div>
-                    <div>
-                      <strong>Signals</strong>
-                      {signals.length ? (
-                        <ul>
-                          {signals.map((signal) => (
-                            <li key={signal}>{signal}</li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <div>No signals available.</div>
-                      )}
-                    </div>
-                  </>
-                );
-              })()}
+          {doc ? (
+            <div className="document-meta-grid">
+              <div className="meta-block">
+                <span className="meta-label">Document ID</span>
+                <code>{doc.id}</code>
+              </div>
+              <div className="meta-block">
+                <span className="meta-label">Status</span>
+                <StatusChip label="Doc" value={doc.status} />
+              </div>
+              <div className="meta-block meta-block-wide">
+                <span className="meta-label">Pipeline</span>
+                <div className="pipeline-grid">
+                  <StatusChip label="Ingest" value={doc.pipeline_status.ingest} />
+                  <StatusChip label="Embed" value={doc.pipeline_status.embed} />
+                  <StatusChip label="Index" value={doc.pipeline_status.index} />
+                  <StatusChip label="Tree" value={doc.pipeline_status.tree} />
+                </div>
+              </div>
+              {doc.pipeline_status.failure_reason ? (
+                <div className="meta-block meta-block-wide meta-warning">
+                  <span className="meta-label">Failure reason</span>
+                  <span>{doc.pipeline_status.failure_reason}</span>
+                </div>
+              ) : null}
+              <div className="meta-block meta-block-wide">
+                <span className="meta-label">Attachments ({doc.attachments.length})</span>
+                {doc.attachments.length === 0 ? (
+                  <span className="muted">No attachments yet.</span>
+                ) : (
+                  <ul className="simple-list">
+                    {doc.attachments.map((attachment) => (
+                      <li key={attachment.id}>
+                        <code>{attachment.id}</code> ({attachment.content_type}, {attachment.size} bytes)
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </div>
           ) : (
-            <div>Explain data not loaded yet.</div>
+            <p className="muted">Loading document...</p>
           )}
-        </div>
+        </section>
+
+        <section className="panel">
+          <h2 className="section-title">Attachment upload</h2>
+          <p className="section-subtitle">Drag a file or choose one to attach to this document.</p>
+
+          <div
+            className="dropzone"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              const dropped = event.dataTransfer.files?.[0] ?? null;
+              setUploadFile(dropped);
+            }}
+          >
+            Drop file here
+          </div>
+
+          <input className="field-input" onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)} type="file" />
+          <p className="muted">Selected: {uploadFile ? `${uploadFile.name} (${uploadFile.size} bytes)` : "none"}</p>
+
+          <div className="progress-row">
+            <div className="progress-track">
+              <div className="progress-fill" style={{ width: `${uploadProgress}%` }} />
+            </div>
+            <span className="progress-value">{uploadProgress}%</span>
+          </div>
+
+          <ErrorPanel
+            error={uploadError}
+            onRetry={() => {
+              void uploadSelectedFile();
+            }}
+          />
+
+          <div className="action-row">
+            <button
+              className="btn btn-primary"
+              disabled={!uploadFile || !params.documentId || uploading || !state.workspaceId}
+              onClick={() => void uploadSelectedFile()}
+              type="button"
+            >
+              {uploading ? "Uploading..." : "Upload"}
+            </button>
+            {uploadError ? (
+              <button className="btn btn-secondary" onClick={() => void uploadSelectedFile()} type="button">
+                Retry upload
+              </button>
+            ) : null}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="section-header-inline">
+            <div>
+              <h2 className="section-title">Explain</h2>
+              <p className="section-subtitle">See why the document is placed into a specific tree node.</p>
+            </div>
+            <button
+              className="btn btn-secondary"
+              disabled={explainLoading}
+              onClick={() => void loadExplain()}
+              type="button"
+            >
+              {explainLoading ? "Loading..." : explain ? "Refresh explain" : "Load explain"}
+            </button>
+          </div>
+          <ErrorPanel
+            error={explainError}
+            onRetry={() => {
+              void loadExplain();
+            }}
+          />
+
+          {explain ? (
+            <div className="explain-grid">
+              <div className="explain-block">
+                <h3>Keywords</h3>
+                {(explain.rationale?.keywords ?? []).length ? (
+                  <ul className="simple-list">
+                    {(explain.rationale?.keywords ?? []).map((keyword) => (
+                      <li key={keyword}>{keyword}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">No keywords available.</p>
+                )}
+              </div>
+
+              <div className="explain-block">
+                <h3>Similar docs</h3>
+                {(explain.rationale?.similar_docs ?? []).length ? (
+                  <ul className="simple-list">
+                    {(explain.rationale?.similar_docs ?? []).map((related) => (
+                      <li key={related.document_id}>
+                        <Link className="doc-link" to={`/documents/${related.document_id}`}>
+                          {related.title || related.document_id}
+                        </Link>{" "}
+                        ({related.similarity.toFixed(2)})
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">No similar docs available.</p>
+                )}
+              </div>
+
+              <div className="explain-block">
+                <h3>Signals</h3>
+                {(explain.rationale?.signals ?? []).length ? (
+                  <ul className="simple-list">
+                    {(explain.rationale?.signals ?? []).map((signal) => (
+                      <li key={signal}>{signal}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">No signals available.</p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="muted">Explain data not loaded yet.</p>
+          )}
+        </section>
       </Layout>
     );
   }
@@ -621,7 +850,7 @@ export default function App() {
     const [error, setError] = useState<UiError | null>(null);
 
     const executeSearch = useCallback(async () => {
-      if (!q.trim()) {
+      if (!q.trim() || !state.workspaceId) {
         return;
       }
       setError(null);
@@ -631,26 +860,48 @@ export default function App() {
       } catch (e) {
         setError(toUiError(e, "search failed"));
       }
-    }, [api, q]);
+    }, [api, q, state.workspaceId]);
 
     return (
       <Layout>
-        <h2>Search</h2>
-        <ErrorPanel
-          error={error}
-          onRetry={() => {
-            void executeSearch();
-          }}
-        />
-        <input value={q} onChange={(e) => setQ(e.target.value)} />
-        <button onClick={() => void executeSearch()}>Search</button>
-        <ul>
-          {results.map((item) => (
-            <li key={item.document_id}>
-              <Link to={`/documents/${item.document_id}`}>{item.title}</Link> ({item.score.toFixed(2)})
-            </li>
-          ))}
-        </ul>
+        <section className="panel">
+          <PageHeader title="Search" subtitle="BM25 search over workspace-scoped indexed content." />
+          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
+          <ErrorPanel
+            error={error}
+            onRetry={() => {
+              void executeSearch();
+            }}
+          />
+
+          <form
+            className="search-row"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void executeSearch();
+            }}
+          >
+            <input className="field-input" onChange={(e) => setQ(e.target.value)} placeholder="Search documents" value={q} />
+            <button className="btn btn-primary" disabled={!state.workspaceId || !q.trim()} type="submit">
+              Search
+            </button>
+          </form>
+
+          {state.workspaceId && results.length === 0 && q.trim() ? (
+            <EmptyState title="No matches" description="Try broader keywords or check whether indexing is complete." />
+          ) : null}
+
+          <ul className="search-results">
+            {results.map((item) => (
+              <li className="search-result-item" key={item.document_id}>
+                <Link className="doc-link" to={`/documents/${item.document_id}`}>
+                  {item.title}
+                </Link>
+                <span className="score-pill">Score {item.score.toFixed(2)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
       </Layout>
     );
   }
@@ -666,6 +917,12 @@ export default function App() {
     const [treeError, setTreeError] = useState<UiError | null>(null);
 
     const refreshTree = useCallback(async () => {
+      if (!state.workspaceId) {
+        setTree(null);
+        setSelectedNode(null);
+        return;
+      }
+
       try {
         const payload = await api.request<TreeActiveResponse>("/tree/active", {}, true);
         setTree(payload);
@@ -674,7 +931,7 @@ export default function App() {
       } catch (e) {
         setTreeError(toUiError(e, "tree load failed"));
       }
-    }, [api]);
+    }, [api, state.workspaceId]);
 
     const moveDocument = useCallback(
       async (documentId: string, fromNodeId: string | null, toNodeId: string) => {
@@ -715,146 +972,200 @@ export default function App() {
 
     return (
       <Layout>
-        <h2>Tree</h2>
-        <ErrorPanel
-          error={treeError}
-          onRetry={() => {
-            void refreshTree();
-          }}
-        />
-        <button
-          onClick={async () => {
-            try {
-              await api.request("/tree/rebuild", { method: "POST", body: JSON.stringify({ mode: "DEBOUNCED" }) }, true);
-              await refreshTree();
-            } catch (e) {
-              setTreeError(toUiError(e, "rebuild failed"));
-            }
-          }}
-        >
-          Rebuild
-        </button>
-        <button
-          onClick={async () => {
-            try {
-              const snaps = await api.request<{ items: Array<{ id: string; status: string }> }>("/tree/snapshots", {}, true);
-              const recommended = snaps.items.find((item) => item.status === "RECOMMENDED");
-              if (recommended) {
-                await api.request(`/tree/snapshots/${recommended.id}/activate`, { method: "POST", body: "{}" }, true);
-                await refreshTree();
-              }
-            } catch (e) {
-              setTreeError(toUiError(e, "apply recommended failed"));
-            }
-          }}
-        >
-          Apply Recommended
-        </button>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <ul>
-            {tree?.nodes.map((node) => (
-              <li
-                key={node.id}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={async () => {
-                  if (!draggingDocId) {
-                    return;
-                  }
-                  await moveDocument(draggingDocId, dragSourceNodeId, node.id);
-                  setDraggingDocId(null);
-                  setDragSourceNodeId(null);
-                }}
-              >
-                <button onClick={() => setSelectedNode(node.id)}>
-                  {node.parent_id ? "- " : ""}
-                  {node.label} {node.locked ? "(locked)" : ""}
-                </button>
+        <section className="panel">
+          <PageHeader
+            title="Tree"
+            subtitle="Browse virtual folder snapshots, lock nodes, and submit move/rename feedback."
+            action={
+              <div className="action-row">
                 <button
+                  className="btn btn-secondary"
+                  disabled={!state.workspaceId}
                   onClick={async () => {
                     try {
-                      await api.request(`/tree/nodes/${node.id}/lock`, { method: "POST", body: JSON.stringify({ locked: !node.locked }) }, true);
+                      await api.request("/tree/rebuild", { method: "POST", body: JSON.stringify({ mode: "DEBOUNCED" }) }, true);
                       await refreshTree();
                     } catch (e) {
-                      setTreeError(toUiError(e, "lock update failed"));
+                      setTreeError(toUiError(e, "rebuild failed"));
                     }
                   }}
+                  type="button"
                 >
-                  Toggle lock
+                  Rebuild
                 </button>
-              </li>
-            ))}
-          </ul>
-          <div>
-            <h4>Docs in selected node</h4>
-            <ul>
-              {(selected?.documents ?? []).map((documentId) => (
-                <li key={documentId}>
-                  <button
-                    draggable
-                    onDragStart={() => {
-                      setDraggingDocId(documentId);
-                      setDragSourceNodeId(selectedNode);
-                    }}
-                    onDragEnd={() => {
+                <button
+                  className="btn btn-primary"
+                  disabled={!state.workspaceId}
+                  onClick={async () => {
+                    try {
+                      const snaps = await api.request<{ items: Array<{ id: string; status: string }> }>("/tree/snapshots", {}, true);
+                      const recommended = snaps.items.find((item) => item.status === "RECOMMENDED");
+                      if (recommended) {
+                        await api.request(`/tree/snapshots/${recommended.id}/activate`, { method: "POST", body: "{}" }, true);
+                        await refreshTree();
+                      }
+                    } catch (e) {
+                      setTreeError(toUiError(e, "apply recommended failed"));
+                    }
+                  }}
+                  type="button"
+                >
+                  Apply recommended
+                </button>
+              </div>
+            }
+          />
+
+          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
+          <ErrorPanel
+            error={treeError}
+            onRetry={() => {
+              void refreshTree();
+            }}
+          />
+
+          <div className="tree-layout">
+            <div className="panel panel-soft">
+              <h2 className="section-title">Nodes</h2>
+              <ul className="tree-node-list">
+                {tree?.nodes.map((node) => (
+                  <li
+                    className="tree-node-item"
+                    key={node.id}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={async () => {
+                      if (!draggingDocId) {
+                        return;
+                      }
+                      await moveDocument(draggingDocId, dragSourceNodeId, node.id);
                       setDraggingDocId(null);
                       setDragSourceNodeId(null);
                     }}
-                    style={{ cursor: "grab" }}
                   >
-                    Drag: {documentId}
-                  </button>
-                </li>
-              ))}
-            </ul>
+                    <button
+                      className={`tree-node-button${selectedNode === node.id ? " is-selected" : ""}`}
+                      onClick={() => setSelectedNode(node.id)}
+                      type="button"
+                    >
+                      <span className="tree-node-label">{node.parent_id ? `↳ ${node.label}` : node.label}</span>
+                      {node.locked ? <span className="lock-badge">Locked</span> : null}
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-small"
+                      onClick={async () => {
+                        try {
+                          await api.request(`/tree/nodes/${node.id}/lock`, { method: "POST", body: JSON.stringify({ locked: !node.locked }) }, true);
+                          await refreshTree();
+                        } catch (e) {
+                          setTreeError(toUiError(e, "lock update failed"));
+                        }
+                      }}
+                      type="button"
+                    >
+                      {node.locked ? "Unlock" : "Lock"}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="panel panel-soft">
+              <h2 className="section-title">Docs in selected node</h2>
+              {selected ? <p className="section-subtitle">Node: {selected.label}</p> : null}
+              <ul className="simple-list">
+                {(selected?.documents ?? []).map((documentId) => (
+                  <li key={documentId}>
+                    <button
+                      className="btn btn-ghost drag-doc-btn"
+                      draggable
+                      onDragEnd={() => {
+                        setDraggingDocId(null);
+                        setDragSourceNodeId(null);
+                      }}
+                      onDragStart={() => {
+                        setDraggingDocId(documentId);
+                        setDragSourceNodeId(selectedNode);
+                      }}
+                      type="button"
+                    >
+                      Drag {documentId}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
-        </div>
-        <h3>Feedback move</h3>
-        <input value={docIdForMove} onChange={(e) => setDocIdForMove(e.target.value)} placeholder="doc id" />
-        <button
-          onClick={async () => {
-            if (!selectedNode || !docIdForMove) {
-              return;
-            }
-            await moveDocument(docIdForMove, null, selectedNode);
-          }}
-        >
-          Move
-        </button>
+        </section>
 
-        <h3>Rename node</h3>
-        <input value={renameNodeId} onChange={(e) => setRenameNodeId(e.target.value)} placeholder="node id" />
-        <input value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder="new label" />
-        <button
-          onClick={async () => {
-            if (!renameNodeId || !newLabel.trim()) {
-              return;
-            }
+        <section className="panel">
+          <div className="two-col-grid">
+            <div>
+              <h2 className="section-title">Feedback move</h2>
+              <p className="section-subtitle">Move a document to the currently selected node.</p>
+              <div className="field-row">
+                <input className="field-input field-grow" onChange={(e) => setDocIdForMove(e.target.value)} placeholder="document id" value={docIdForMove} />
+                <button
+                  className="btn btn-secondary"
+                  disabled={!selectedNode || !docIdForMove}
+                  onClick={async () => {
+                    if (!selectedNode || !docIdForMove) {
+                      return;
+                    }
+                    await moveDocument(docIdForMove, null, selectedNode);
+                  }}
+                  type="button"
+                >
+                  Move
+                </button>
+              </div>
+            </div>
 
-            const snapshot = tree;
-            if (snapshot) {
-              setTree(renameNodeInTree(snapshot, renameNodeId, newLabel.trim()));
-            }
+            <div>
+              <h2 className="section-title">Rename node</h2>
+              <p className="section-subtitle">Update label text and sync to feedback API.</p>
+              <div className="field-stack">
+                <input className="field-input" onChange={(e) => setRenameNodeId(e.target.value)} placeholder="node id" value={renameNodeId} />
+                <div className="field-row">
+                  <input className="field-input field-grow" onChange={(e) => setNewLabel(e.target.value)} placeholder="new label" value={newLabel} />
+                  <button
+                    className="btn btn-secondary"
+                    disabled={!renameNodeId || !newLabel.trim()}
+                    onClick={async () => {
+                      if (!renameNodeId || !newLabel.trim()) {
+                        return;
+                      }
 
-            try {
-              await api.request(
-                "/feedback/rename",
-                {
-                  method: "POST",
-                  body: JSON.stringify({ node_id: renameNodeId, old_label: "", new_label: newLabel.trim() })
-                },
-                true
-              );
-              await refreshTree();
-            } catch (e) {
-              if (snapshot) {
-                setTree(snapshot);
-              }
-              setTreeError(toUiError(e, "rename failed"));
-            }
-          }}
-        >
-          Rename
-        </button>
+                      const snapshot = tree;
+                      if (snapshot) {
+                        setTree(renameNodeInTree(snapshot, renameNodeId, newLabel.trim()));
+                      }
+
+                      try {
+                        await api.request(
+                          "/feedback/rename",
+                          {
+                            method: "POST",
+                            body: JSON.stringify({ node_id: renameNodeId, old_label: "", new_label: newLabel.trim() })
+                          },
+                          true
+                        );
+                        await refreshTree();
+                      } catch (e) {
+                        if (snapshot) {
+                          setTree(snapshot);
+                        }
+                        setTreeError(toUiError(e, "rename failed"));
+                      }
+                    }}
+                    type="button"
+                  >
+                    Rename
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
       </Layout>
     );
   }
