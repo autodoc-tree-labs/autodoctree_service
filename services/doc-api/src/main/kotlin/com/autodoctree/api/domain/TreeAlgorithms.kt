@@ -42,6 +42,7 @@ data class TreeCluster(
 data class PersonalizationModel(
     private val docLabelScores: Map<String, Map<String, Double>>,
     private val keywordLabelScores: Map<String, Map<String, Double>>,
+    private val entityLabelScores: Map<String, Map<String, Double>>,
     private val minScore: Double
 ) {
     fun preferredLabelFor(document: DocumentRow, tokenizer: (String) -> List<String>): String? {
@@ -57,6 +58,13 @@ data class PersonalizationModel(
                 aggregated[label] = (aggregated[label] ?: 0.0) + score
             }
         }
+        extractEntityTokens(document.title + " " + (document.bodyText ?: ""))
+            .take(16)
+            .forEach { entity ->
+                entityLabelScores[entity].orEmpty().forEach { (label, score) ->
+                    aggregated[label] = (aggregated[label] ?: 0.0) + score
+                }
+            }
         return topLabel(aggregated, minScore)
     }
 
@@ -71,6 +79,14 @@ data class PersonalizationModel(
         val top = scores.maxByOrNull { it.value } ?: return null
         return if (top.value >= threshold) top.key else null
     }
+
+    private fun extractEntityTokens(text: String): List<String> {
+        return text
+            .split(Regex("[^\\p{L}\\p{N}_-]+"))
+            .map { it.trim().lowercase(Locale.ROOT) }
+            .filter { it.length >= 3 }
+            .distinct()
+    }
 }
 
 @Service
@@ -81,8 +97,9 @@ class NeighborBuilder(
 ) {
     private val durationTimer = meterRegistry.timer("tree.neighbor_builder.duration")
     private val docsSummary = meterRegistry.summary("tree.neighbor_builder.docs")
-    private val edgesSummary = meterRegistry.summary("tree.neighbor_builder.edges")
-    private val edgesFilteredSummary = meterRegistry.summary("neighbor_edges_filtered_total")
+    private val edgesSummary = meterRegistry.summary("neighbor_edges_total")
+    private val edgesFilteredSummary = meterRegistry.summary("edges_filtered_total")
+    private val legacyEdgesFilteredSummary = meterRegistry.summary("neighbor_edges_filtered_total")
     private val averageSimilaritySummary = meterRegistry.summary("tree.neighbor_builder.avg_similarity")
     private val averageSemanticSummary = meterRegistry.summary("tree.neighbor_builder.avg_sem_similarity")
     private val averageLexicalSummary = meterRegistry.summary("tree.neighbor_builder.avg_lex_similarity")
@@ -217,6 +234,7 @@ class NeighborBuilder(
         docsSummary.record(documents.size.toDouble())
         edgesSummary.record(adjacency.values.sumOf { it.size }.toDouble())
         edgesFilteredSummary.record(filteredOutCount.toDouble())
+        legacyEdgesFilteredSummary.record(filteredOutCount.toDouble())
         if (adjacency.values.sumOf { it.size } > 0) {
             averageSimilaritySummary.record(totalSimilarity / adjacency.values.sumOf { it.size }.toDouble())
         }
@@ -906,46 +924,156 @@ class TreePersonalizationEngine(
         feedbackEvents: List<FeedbackEventRow>,
         activeNodes: List<TreeNodeRow>,
         documents: List<DocumentRow>,
-        tokenizer: (String) -> List<String>
+        tokenizer: (String) -> List<String>,
+        embeddings: Map<String, EmbeddingRow> = emptyMap(),
+        routingV2Enabled: Boolean = false
     ): PersonalizationModel {
         val now = LocalDateTime.now()
         val nodeLabelById = activeNodes.associate { it.id to it.label }
         val docById = documents.associateBy { it.id }
         val docScores = mutableMapOf<String, MutableMap<String, Double>>()
         val keywordScores = mutableMapOf<String, MutableMap<String, Double>>()
+        val entityScores = mutableMapOf<String, MutableMap<String, Double>>()
+        val vectorByDoc = if (routingV2Enabled) {
+            embeddings
+                .mapValues { (_, row) -> parseVector(row.vectorJson) }
+                .filterValues { it.isNotEmpty() }
+        } else {
+            emptyMap()
+        }
 
         feedbackEvents
-            .filter { it.eventType == "MOVE" }
+            .filter { it.eventType == "MOVE" || (routingV2Enabled && it.eventType == "RENAME") }
             .forEachIndexed { index, event ->
-                val payload = objectMapper.readValue(event.payloadJson, Map::class.java)
-                val docId = payload["document_id"]?.toString() ?: return@forEachIndexed
-                val toNodeId = payload["to_node_id"]?.toString() ?: return@forEachIndexed
-                val label = nodeLabelById[toNodeId] ?: return@forEachIndexed
-
                 val ageHours = ChronoUnit.HOURS.between(event.createdAt, now).coerceAtLeast(0)
                 val recencyWeight = treeProperties.personalizationDecay.pow(index.toDouble())
                 val timeWeight = exp(-ageHours.toDouble() / 72.0)
                 val weight = recencyWeight * timeWeight
+                val payload = objectMapper.readValue(event.payloadJson, Map::class.java)
 
-                docScores.getOrPut(docId) { mutableMapOf() }[label] =
-                    (docScores[docId]?.get(label) ?: 0.0) + weight
+                if (event.eventType == "MOVE") {
+                    val docId = payload["document_id"]?.toString() ?: return@forEachIndexed
+                    val toNodeId = payload["to_node_id"]?.toString() ?: return@forEachIndexed
+                    val label = nodeLabelById[toNodeId] ?: return@forEachIndexed
 
-                val sourceDoc = docById[docId] ?: return@forEachIndexed
-                tokenizer(sourceDoc.title + " " + (sourceDoc.bodyText ?: ""))
-                    .take(12)
-                    .forEach { token ->
-                        keywordScores.getOrPut(token) { mutableMapOf() }[label] =
-                            (keywordScores[token]?.get(label) ?: 0.0) + weight
+                    addScore(docScores, docId, label, weight * 1.4)
+                    val sourceDoc = docById[docId] ?: return@forEachIndexed
+                    val sourceText = sourceDoc.title + " " + (sourceDoc.bodyText ?: "")
+                    tokenizer(sourceText)
+                        .take(16)
+                        .forEach { token ->
+                            addScore(keywordScores, token, label, weight)
+                        }
+                    extractEntityTokens(sourceText)
+                        .take(16)
+                        .forEach { entity ->
+                            addScore(entityScores, entity, label, weight * 0.9)
+                        }
+
+                    if (routingV2Enabled && vectorByDoc.isNotEmpty()) {
+                        propagateEmbeddingSignal(
+                            sourceDocId = docId,
+                            label = label,
+                            baseWeight = weight,
+                            vectorByDoc = vectorByDoc,
+                            docScores = docScores
+                        )
                     }
+                    return@forEachIndexed
+                }
+
+                val newLabel = payload["new_label"]?.toString()?.trim().orEmpty()
+                if (newLabel.isBlank()) {
+                    return@forEachIndexed
+                }
+                val oldLabel = payload["old_label"]?.toString()?.trim().orEmpty()
+                tokenizer(newLabel)
+                    .take(8)
+                    .forEach { token -> addScore(keywordScores, token, newLabel, weight * 0.8) }
+                if (oldLabel.isNotBlank()) {
+                    tokenizer(oldLabel)
+                        .take(8)
+                        .forEach { token -> addScore(keywordScores, token, newLabel, weight * 0.4) }
+                }
             }
 
         val immutableDocScores = docScores.mapValues { (_, scores) -> scores.toMap() }
         val immutableKeywordScores = keywordScores.mapValues { (_, scores) -> scores.toMap() }
+        val immutableEntityScores = entityScores.mapValues { (_, scores) -> scores.toMap() }
 
         return PersonalizationModel(
             docLabelScores = immutableDocScores,
             keywordLabelScores = immutableKeywordScores,
+            entityLabelScores = immutableEntityScores,
             minScore = treeProperties.personalizationMinScore
         )
+    }
+
+    private fun parseVector(vectorJson: String): List<Double> {
+        return runCatching {
+            objectMapper.readValue(vectorJson, List::class.java)
+                .mapNotNull { number -> (number as? Number)?.toDouble() }
+        }.getOrElse { emptyList() }
+    }
+
+    private fun addScore(
+        target: MutableMap<String, MutableMap<String, Double>>,
+        key: String,
+        label: String,
+        weight: Double
+    ) {
+        if (key.isBlank() || label.isBlank() || weight <= 0.0) {
+            return
+        }
+        target.getOrPut(key) { mutableMapOf() }[label] =
+            (target[key]?.get(label) ?: 0.0) + weight
+    }
+
+    private fun extractEntityTokens(text: String): List<String> {
+        return text
+            .split(Regex("[^\\p{L}\\p{N}_-]+"))
+            .map { it.trim().lowercase(Locale.ROOT) }
+            .filter { it.length >= 3 }
+            .distinct()
+    }
+
+    private fun propagateEmbeddingSignal(
+        sourceDocId: String,
+        label: String,
+        baseWeight: Double,
+        vectorByDoc: Map<String, List<Double>>,
+        docScores: MutableMap<String, MutableMap<String, Double>>
+    ) {
+        val source = vectorByDoc[sourceDocId] ?: return
+        vectorByDoc.forEach { (candidateId, candidateVector) ->
+            if (candidateId == sourceDocId || candidateVector.isEmpty()) {
+                return@forEach
+            }
+            val similarity = cosine(source, candidateVector)
+            if (similarity < 0.72) {
+                return@forEach
+            }
+            val propagatedWeight = baseWeight * similarity.coerceAtMost(1.0) * 0.6
+            addScore(docScores, candidateId, label, propagatedWeight)
+        }
+    }
+
+    private fun cosine(a: List<Double>, b: List<Double>): Double {
+        val size = minOf(a.size, b.size)
+        if (size == 0) {
+            return 0.0
+        }
+        var dot = 0.0
+        var an = 0.0
+        var bn = 0.0
+        for (index in 0 until size) {
+            dot += a[index] * b[index]
+            an += a[index] * a[index]
+            bn += b[index] * b[index]
+        }
+        if (an == 0.0 || bn == 0.0) {
+            return 0.0
+        }
+        return dot / (sqrt(an) * sqrt(bn))
     }
 }

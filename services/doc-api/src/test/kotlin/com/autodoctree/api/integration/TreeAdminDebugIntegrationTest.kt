@@ -1,0 +1,225 @@
+package com.autodoctree.api.integration
+
+import com.autodoctree.api.db.DocumentRepository
+import com.autodoctree.api.db.PipelineStatusRepository
+import com.autodoctree.api.db.TreeRepository
+import com.autodoctree.api.db.UserRepository
+import com.autodoctree.api.db.WorkspaceRepository
+import com.autodoctree.api.domain.TreeService
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
+import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.http.MediaType
+import org.springframework.test.context.ActiveProfiles
+import org.springframework.test.context.TestPropertySource
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+
+@SpringBootTest
+@AutoConfigureMockMvc
+@ActiveProfiles("test")
+@TestPropertySource(
+    properties = [
+        "feature.user-rules-v1=true",
+        "feature.feedback-routing-v2=true",
+        "feature.admin-tree-debug=true"
+    ]
+)
+class TreeAdminDebugIntegrationTest {
+
+    @Autowired
+    private lateinit var mockMvc: MockMvc
+
+    @Autowired
+    private lateinit var objectMapper: ObjectMapper
+
+    @Autowired
+    private lateinit var userRepository: UserRepository
+
+    @Autowired
+    private lateinit var workspaceRepository: WorkspaceRepository
+
+    @Autowired
+    private lateinit var documentRepository: DocumentRepository
+
+    @Autowired
+    private lateinit var pipelineStatusRepository: PipelineStatusRepository
+
+    @Autowired
+    private lateinit var treeRepository: TreeRepository
+
+    @Autowired
+    private lateinit var treeService: TreeService
+
+    private lateinit var ownerId: String
+    private lateinit var workspaceId: String
+    private lateinit var token: String
+    private lateinit var memberToken: String
+    private lateinit var debugDocId: String
+
+    @BeforeEach
+    fun setup() {
+        val owner = userRepository.findByEmail("owner@autodoc.local")
+            ?: error("seed owner must exist")
+        ownerId = owner.id
+        workspaceId = workspaceRepository.listByUser(ownerId).firstOrNull()?.id
+            ?: error("seed workspace must exist")
+        token = login("owner@autodoc.local", "password")
+        memberToken = login("member@autodoc.local", "password")
+
+        val docs = documentRepository.listByWorkspace(workspaceId, null, null, 0, 200)
+        if (docs.size < 2) {
+            createDoc("관리자 디버그 문서 A", "과학 연구와 실험 분석")
+            createDoc("관리자 디버그 문서 B", "과학 실험 노트와 연구 계획")
+        }
+        debugDocId = documentRepository.listByWorkspace(workspaceId, null, null, 0, 1).first().id
+        treeService.rebuildWorkspace(workspaceId, ownerId, manual = true)
+    }
+
+    @Test
+    fun `admin debug neighbors returns signal breakdown contract`() {
+        mockMvc.perform(
+            get("/api/v1/admin/tree/debug/neighbors")
+                .param("document_id", debugDocId)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.document_id").value(debugDocId))
+            .andExpect(jsonPath("$.neighbors").isArray)
+            .andExpect(jsonPath("$.neighbors[0].neighbor_doc_id").exists())
+            .andExpect(jsonPath("$.neighbors[0].title").exists())
+            .andExpect(jsonPath("$.neighbors[0].lex_sim").exists())
+            .andExpect(jsonPath("$.neighbors[0].entity_overlap").exists())
+            .andExpect(jsonPath("$.neighbors[0].final_sim").exists())
+            .andExpect(jsonPath("$.neighbors[0].gate_flags.lexical_gate_passed").exists())
+    }
+
+    @Test
+    fun `member role cannot access admin debug endpoint`() {
+        mockMvc.perform(
+            get("/api/v1/admin/tree/debug/neighbors")
+                .param("document_id", debugDocId)
+                .header("Authorization", "Bearer $memberToken")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isForbidden)
+    }
+
+    @Test
+    fun `user rule forces target label on next rebuild`() {
+        val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
+        val targetNode = treeRepository.listNodes(workspaceId, active.id).firstOrNull { it.depth >= 1 && it.label != "AutoDoc" }
+            ?: error("target node missing")
+        val uniqueKeyword = "규칙강제키워드"
+        val forcedDoc = createDoc("$uniqueKeyword 문서", "규칙 강제 라우팅 확인")
+
+        mockMvc.perform(
+            post("/api/v1/admin/tree/rules")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "rule_type" to "TITLE_CONTAINS",
+                            "rule_value" to uniqueKeyword,
+                            "node_id" to targetNode.id
+                        )
+                    )
+                )
+        ).andExpect(status().isOk)
+
+        treeService.rebuildWorkspace(workspaceId, ownerId, manual = true)
+
+        val activeTree = mockMvc.perform(
+            get("/api/v1/tree/active")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+        val root = objectMapper.readTree(activeTree)
+        val forcedNode = findNodeContainingDoc(root, forcedDoc.id)
+        assertTrue(
+            forcedNode?.path("label")?.asText() == targetNode.label,
+            "Expected forced document to land on label='${targetNode.label}', but got node=$forcedNode"
+        )
+    }
+
+    @Test
+    fun `locked node keeps label and parent label across rebuild`() {
+        val beforeSnapshot = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
+        val beforeNodes = treeRepository.listNodes(workspaceId, beforeSnapshot.id)
+        val target = beforeNodes.firstOrNull { it.depth >= 1 && it.label != "AutoDoc" } ?: error("lock target missing")
+        val beforeParentLabel = beforeNodes.firstOrNull { it.id == target.parentId }?.label ?: "AutoDoc"
+
+        mockMvc.perform(
+            post("/api/v1/tree/nodes/${target.id}/lock")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(objectMapper.writeValueAsString(mapOf("locked" to true)))
+        ).andExpect(status().isNoContent)
+
+        treeService.rebuildWorkspace(workspaceId, ownerId, manual = true)
+
+        val afterSnapshot = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing after rebuild")
+        val afterNodes = treeRepository.listNodes(workspaceId, afterSnapshot.id)
+        val lockedAfter = afterNodes.firstOrNull { it.label == target.label && it.locked }
+        assertTrue(lockedAfter != null, "Locked node label must remain after rebuild")
+        val afterParentLabel = afterNodes.firstOrNull { it.id == lockedAfter?.parentId }?.label ?: "AutoDoc"
+        assertEquals(beforeParentLabel, afterParentLabel)
+    }
+
+    private fun findNodeContainingDoc(root: JsonNode, documentId: String): JsonNode? {
+        val nodes = root.path("nodes")
+        if (!nodes.isArray) {
+            return null
+        }
+        return nodes.firstOrNull { node ->
+            node.path("documents").any { it.asText() == documentId }
+        }
+    }
+
+    private fun createDoc(title: String, body: String): com.autodoctree.api.db.DocumentRow {
+        val created = documentRepository.create(
+            workspaceId = workspaceId,
+            title = title,
+            bodyMarkdown = body,
+            bodyText = body,
+            sourceType = "EDITOR",
+            createdBy = ownerId
+        )
+        pipelineStatusRepository.create(workspaceId, created.id)
+        return created
+    }
+
+    private fun login(email: String, password: String): String {
+        val response = mockMvc.perform(
+            post("/api/v1/auth/login")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "email" to email,
+                            "password" to password
+                        )
+                    )
+                )
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+
+        return objectMapper.readTree(response).path("access_token").asText()
+    }
+}

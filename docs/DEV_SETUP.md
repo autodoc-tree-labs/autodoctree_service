@@ -83,8 +83,16 @@ Important flags:
 - `feature.nori-tokenizer`
 - `feature.label-quality-filter`
 - `feature.community-clustering`
+- `feature.feedback-routing-v2`
+- `feature.user-rules-v1`
+- `feature.admin-tree-debug`
 - `security.os-tenant-assert`
 - `TREE_NEIGHBOR_MIN_SIMILARITY` (기본 `0.8`, 값이 높을수록 트리 노드가 더 잘 분리됨)
+
+관리자 트리 디버그/룰 기능을 로컬에서 켜려면:
+```bash
+FEATURE_USER_RULES_V1=true FEATURE_ADMIN_TREE_DEBUG=true ./gradlew -p services :doc-api:bootRun
+```
 
 ## 5-1. OpenSearch ko_nori analyzer check
 `_index_template`는 서버 시작 시 자동 갱신됩니다. analyzer 확인:

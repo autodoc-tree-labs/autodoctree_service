@@ -281,6 +281,59 @@ class TreeAlgorithmsTest {
         assertFalse(model.hasSignalFor("missing-doc"))
     }
 
+    @Test
+    fun `personalization routing v2 propagates by embedding neighborhood`() {
+        val labeler = testLabeler()
+        val engine = TreePersonalizationEngine(
+            objectMapper = objectMapper,
+            treeProperties = testTreeProperties()
+        )
+        val docs = listOf(
+            doc("doc-a", "finance invoice settlement"),
+            doc("doc-b", "invoice settlement monthly"),
+            doc("doc-c", "football score highlights")
+        )
+        val node = TreeNodeRow(
+            id = "node-1",
+            workspaceId = "ws-a",
+            snapshotId = "snap-1",
+            parentId = "root",
+            label = "finance",
+            depth = 2,
+            locked = false,
+            createdAt = LocalDateTime.now()
+        )
+        val moveEvent = FeedbackEventRow(
+            id = "evt-1",
+            workspaceId = "ws-a",
+            userId = "u-1",
+            eventType = "MOVE",
+            payloadJson = objectMapper.writeValueAsString(
+                mapOf(
+                    "document_id" to "doc-a",
+                    "to_node_id" to "node-1"
+                )
+            ),
+            createdAt = LocalDateTime.now()
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(0.95, 0.05, 0.0)),
+            "doc-b" to embedding("doc-b", listOf(0.92, 0.08, 0.0)),
+            "doc-c" to embedding("doc-c", listOf(0.01, 0.04, 0.95))
+        )
+
+        val model = engine.buildModel(
+            feedbackEvents = listOf(moveEvent),
+            activeNodes = listOf(node),
+            documents = docs,
+            tokenizer = labeler::tokenize,
+            embeddings = embeddings,
+            routingV2Enabled = true
+        )
+
+        assertEquals("finance", model.preferredLabelFor(docs[1], labeler::tokenize))
+    }
+
     private fun testLabeler(registry: SimpleMeterRegistry = SimpleMeterRegistry()): TreeLabeler {
         return TreeLabeler(
             tokenizer = FallbackTokenizer(),

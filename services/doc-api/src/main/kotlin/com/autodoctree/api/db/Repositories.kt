@@ -170,6 +170,17 @@ data class FeedbackEventRow(
     val createdAt: LocalDateTime
 )
 
+data class UserRuleRow(
+    val id: String,
+    val workspaceId: String,
+    val ruleType: String,
+    val ruleValue: String,
+    val nodeId: String,
+    val enabled: Boolean,
+    val createdBy: String,
+    val createdAt: LocalDateTime
+)
+
 data class AuditLogRow(
     val id: String,
     val workspaceId: String,
@@ -1378,6 +1389,63 @@ class FeedbackRepository(private val jdbcTemplate: JdbcTemplate) {
         workspaceId,
         limit
     )
+}
+
+@Repository
+class UserRuleRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<UserRuleRow> { rs: ResultSet, _: Int ->
+        UserRuleRow(
+            id = rs.getString("id"),
+            workspaceId = rs.getString("workspace_id"),
+            ruleType = rs.getString("rule_type"),
+            ruleValue = rs.getString("rule_value"),
+            nodeId = rs.getString("node_id"),
+            enabled = rs.getBoolean("enabled"),
+            createdBy = rs.getString("created_by"),
+            createdAt = rs.getTimestamp("created_at").toLocalDateTime()
+        )
+    }
+
+    fun create(
+        workspaceId: String,
+        ruleType: String,
+        ruleValue: String,
+        nodeId: String,
+        createdBy: String
+    ): UserRuleRow {
+        val id = UUID.randomUUID().toString()
+        val now = LocalDateTime.now()
+        jdbcTemplate.update(
+            """
+            INSERT INTO user_rule(
+                id, workspace_id, rule_type, rule_value, node_id, enabled, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+            id,
+            workspaceId,
+            ruleType,
+            ruleValue,
+            nodeId,
+            true,
+            createdBy,
+            now
+        )
+        return UserRuleRow(id, workspaceId, ruleType, ruleValue, nodeId, true, createdBy, now)
+    }
+
+    fun listByWorkspace(workspaceId: String): List<UserRuleRow> = jdbcTemplate.query(
+        "SELECT * FROM user_rule WHERE workspace_id = ? AND enabled = true ORDER BY created_at DESC",
+        mapper,
+        workspaceId
+    )
+
+    fun delete(workspaceId: String, ruleId: String) {
+        jdbcTemplate.update(
+            "DELETE FROM user_rule WHERE workspace_id = ? AND id = ?",
+            workspaceId,
+            ruleId
+        )
+    }
 }
 
 @Repository

@@ -368,6 +368,51 @@ class AdminController(
         val context = workspaceContextResolver.resolve(request)
         return adminService.listAudit(context, type)
     }
+
+    @GetMapping("/tree/debug/neighbors")
+    fun debugNeighbors(
+        request: HttpServletRequest,
+        @RequestParam(name = "document_id") documentId: String
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.debugNeighbors(context, documentId)
+    }
+
+    @GetMapping("/tree/debug/cluster-stats")
+    fun clusterStats(request: HttpServletRequest): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.clusterStats(context)
+    }
+
+    @GetMapping("/tree/rules")
+    fun listUserRules(request: HttpServletRequest): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.listUserRules(context)
+    }
+
+    @PostMapping("/tree/rules")
+    fun createUserRule(
+        request: HttpServletRequest,
+        @Valid @RequestBody body: CreateUserRuleRequest
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.createUserRule(
+            context = context,
+            ruleType = body.ruleType,
+            ruleValue = body.ruleValue,
+            nodeId = body.nodeId
+        )
+    }
+
+    @DeleteMapping("/tree/rules/{ruleId}")
+    fun deleteUserRule(
+        request: HttpServletRequest,
+        @PathVariable ruleId: String
+    ): ResponseEntity<Void> {
+        val context = workspaceContextResolver.resolve(request)
+        adminService.deleteUserRule(context, ruleId)
+        return ResponseEntity.noContent().build()
+    }
 }
 
 data class LoginRequest(
@@ -440,4 +485,10 @@ data class RenameRequest(
 data class RetryRequest(
     @field:NotBlank val documentId: String,
     @field:NotBlank val stage: String
+)
+
+data class CreateUserRuleRequest(
+    @field:NotBlank val ruleType: String,
+    @field:NotBlank val ruleValue: String,
+    @field:NotBlank val nodeId: String
 )
