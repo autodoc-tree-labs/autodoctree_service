@@ -199,9 +199,16 @@ class TreeAlgorithmsTest {
             treeProperties = TreeProperties(
                 neighborTopK = 3,
                 neighborMinSimilarity = 0.0,
+                neighborNormalize = true,
                 maxClusterSize = 10,
+                minClusterSize = 2,
+                communityResolution = 1.0,
                 personalizationDecay = 0.9,
-                personalizationMinScore = 0.2
+                personalizationMinScore = 0.2,
+                fusionSemanticWeight = 0.8,
+                fusionLexicalWeight = 0.2,
+                fusionLexicalGate = 0.35,
+                otherClusterScoreThreshold = 0.32
             )
         )
 
@@ -272,6 +279,7 @@ class TreeAlgorithmsTest {
             documentId = documentId,
             targetType = "DOCUMENT",
             targetId = documentId,
+            inputHash = "hash-$documentId-$modelVersion",
             vectorJson = objectMapper.writeValueAsString(vector),
             modelVersion = modelVersion,
             createdAt = LocalDateTime.now()

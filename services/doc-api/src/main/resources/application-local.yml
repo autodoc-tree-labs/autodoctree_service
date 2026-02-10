@@ -8,6 +8,8 @@ feature:
   auto-tree: true
   explain: true
   hybrid-search: false
+  embedding-ollama: ${FEATURE_EMBEDDING_OLLAMA:false}
+  nori-tokenizer: ${FEATURE_NORI_TOKENIZER:true}
 
 search:
   backend: ${SEARCH_BACKEND:opensearch}

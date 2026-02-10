@@ -20,7 +20,7 @@
 - `web-admin`: 5173
 - `web-user`: 5174
 - `doc-api`: 8080 (권장)
-- (선택) OpenSearch: 59200, Redis: 56379, Postgres: 5432, MinIO: 59000/59001
+- (선택) OpenSearch: 59200, Redis: 56379, Postgres: 5432, MinIO: 59000/59001, Ollama: 11434 (`--profile llm`)
 
 ## Quickstart
 
@@ -28,6 +28,12 @@
 ```bash
 docker compose up -d
 docker compose ps
+```
+
+Optional offline embedding runtime (Ollama):
+```bash
+docker compose --profile llm up -d ollama
+docker compose --profile llm exec ollama ollama pull bge-m3
 ```
 
 2) backend (IntelliJ)

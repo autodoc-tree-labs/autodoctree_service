@@ -18,6 +18,7 @@ import com.autodoctree.api.infra.NotFoundException
 import com.autodoctree.api.infra.requireEditor
 import com.autodoctree.api.infra.requireOwner
 import com.autodoctree.api.tenant.WorkspaceContext
+import com.autodoctree.api.worker.EmbeddingProvider
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -37,6 +38,7 @@ class TreeService(
     private val treeClusterer: TreeClusterer,
     private val treeLabeler: TreeLabeler,
     private val treePersonalizationEngine: TreePersonalizationEngine,
+    private val embeddingProvider: EmbeddingProvider,
     private val rebuildDebounceQueue: RebuildDebounceQueue
 ) {
 
@@ -96,7 +98,9 @@ class TreeService(
             }
         }
 
-        val embeddingByDocumentId = embeddingRepository.listDocEmbeddings(workspaceId, "local-stub-v1").associateBy { it.documentId }
+        val embeddingByDocumentId = embeddingRepository
+            .listDocEmbeddings(workspaceId, embeddingProvider.modelVersion())
+            .associateBy { it.documentId }
         val remaining = documents.filterNot { assignment.containsKey(it.id) }
         if (remaining.isNotEmpty()) {
             val graph = neighborBuilder.build(

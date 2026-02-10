@@ -73,7 +73,21 @@ services:
       mc mb --ignore-existing local/autodoc;
       exit 0;'
 
+  ollama:
+    image: ollama/ollama:0.5.7
+    profiles: ["llm"]
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:11434/api/tags >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ollama-data:/root/.ollama
+
 volumes:
   postgres-data:
   opensearch-data:
   minio-data:
+  ollama-data:

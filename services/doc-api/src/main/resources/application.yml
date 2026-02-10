@@ -54,6 +54,13 @@ feature:
   auto-tree: true
   explain: true
   hybrid-search: false
+  embedding-ollama: ${FEATURE_EMBEDDING_OLLAMA:false}
+  label-quality-filter: ${FEATURE_LABEL_QUALITY_FILTER:true}
+  community-clustering: ${FEATURE_COMMUNITY_CLUSTERING:true}
+  nori-tokenizer: ${FEATURE_NORI_TOKENIZER:true}
+  feedback-routing-v2: ${FEATURE_FEEDBACK_ROUTING_V2:true}
+  user-rules-v1: ${FEATURE_USER_RULES_V1:false}
+  admin-tree-debug: ${FEATURE_ADMIN_TREE_DEBUG:true}
 
 security:
   os-tenant-assert: true
@@ -66,6 +73,31 @@ worker:
 tree:
   neighbor-top-k: ${TREE_NEIGHBOR_TOP_K:5}
   neighbor-min-similarity: ${TREE_NEIGHBOR_MIN_SIMILARITY:0.25}
+  neighbor-normalize: ${TREE_NEIGHBOR_NORMALIZE:true}
   max-cluster-size: ${TREE_MAX_CLUSTER_SIZE:20}
+  min-cluster-size: ${TREE_MIN_CLUSTER_SIZE:2}
+  community-resolution: ${TREE_COMMUNITY_RESOLUTION:1.0}
   personalization-decay: ${TREE_PERSONALIZATION_DECAY:0.85}
   personalization-min-score: ${TREE_PERSONALIZATION_MIN_SCORE:1.2}
+  fusion-semantic-weight: ${TREE_FUSION_SEMANTIC_WEIGHT:0.8}
+  fusion-lexical-weight: ${TREE_FUSION_LEXICAL_WEIGHT:0.2}
+  fusion-lexical-gate: ${TREE_FUSION_LEXICAL_GATE:0.35}
+  other-cluster-score-threshold: ${TREE_OTHER_CLUSTER_SCORE_THRESHOLD:0.32}
+
+embedding:
+  provider: ${EMBEDDING_PROVIDER:stub}
+  input:
+    max-chars: ${EMBEDDING_INPUT_MAX_CHARS:4000}
+    head-chars: ${EMBEDDING_INPUT_HEAD_CHARS:2400}
+    tail-chars: ${EMBEDDING_INPUT_TAIL_CHARS:1200}
+    section-heading-limit: ${EMBEDDING_INPUT_SECTION_HEADING_LIMIT:6}
+    section-count-limit: ${EMBEDDING_INPUT_SECTION_COUNT_LIMIT:24}
+  ollama:
+    base-url: ${EMBEDDING_OLLAMA_BASE_URL:http://localhost:11434}
+    model: ${EMBEDDING_OLLAMA_MODEL:bge-m3}
+    timeout-ms: ${EMBEDDING_OLLAMA_TIMEOUT_MS:5000}
+    batch-size: ${EMBEDDING_OLLAMA_BATCH_SIZE:32}
+    max-retries: ${EMBEDDING_OLLAMA_MAX_RETRIES:2}
+    retry-backoff-ms: ${EMBEDDING_OLLAMA_RETRY_BACKOFF_MS:300}
+    circuit-failure-threshold: ${EMBEDDING_OLLAMA_CIRCUIT_FAILURE_THRESHOLD:3}
+    circuit-open-ms: ${EMBEDDING_OLLAMA_CIRCUIT_OPEN_MS:15000}

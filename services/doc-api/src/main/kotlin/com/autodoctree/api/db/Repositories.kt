@@ -95,6 +95,7 @@ data class EmbeddingRow(
     val documentId: String,
     val targetType: String,
     val targetId: String,
+    val inputHash: String,
     val vectorJson: String,
     val modelVersion: String,
     val createdAt: LocalDateTime
@@ -773,6 +774,7 @@ class EmbeddingRepository(private val jdbcTemplate: JdbcTemplate) {
             documentId = rs.getString("document_id"),
             targetType = rs.getString("target_type"),
             targetId = rs.getString("target_id"),
+            inputHash = rs.getString("input_hash"),
             vectorJson = rs.getString("vector_json"),
             modelVersion = rs.getString("model_version"),
             createdAt = rs.getTimestamp("created_at").toLocalDateTime()
@@ -784,6 +786,7 @@ class EmbeddingRepository(private val jdbcTemplate: JdbcTemplate) {
         documentId: String,
         targetType: String,
         targetId: String,
+        inputHash: String,
         vectorJson: String,
         modelVersion: String
     ) {
@@ -792,14 +795,15 @@ class EmbeddingRepository(private val jdbcTemplate: JdbcTemplate) {
             jdbcTemplate.update(
                 """
                 INSERT INTO embeddings(
-                    id, workspace_id, document_id, target_type, target_id, vector_json, model_version, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, workspace_id, document_id, target_type, target_id, input_hash, vector_json, model_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """.trimIndent(),
                 UUID.randomUUID().toString(),
                 workspaceId,
                 documentId,
                 targetType,
                 targetId,
+                inputHash,
                 vectorJson,
                 modelVersion,
                 now
@@ -809,17 +813,39 @@ class EmbeddingRepository(private val jdbcTemplate: JdbcTemplate) {
                 """
                 UPDATE embeddings
                 SET vector_json = ?, created_at = ?
-                WHERE workspace_id = ? AND target_type = ? AND target_id = ? AND model_version = ?
+                WHERE workspace_id = ? AND target_type = ? AND target_id = ? AND model_version = ? AND input_hash = ?
                 """.trimIndent(),
                 vectorJson,
                 now,
                 workspaceId,
                 targetType,
                 targetId,
-                modelVersion
+                modelVersion,
+                inputHash
             )
         }
     }
+
+    fun findByInputHash(
+        workspaceId: String,
+        targetType: String,
+        targetId: String,
+        modelVersion: String,
+        inputHash: String
+    ): EmbeddingRow? = jdbcTemplate.queryOneOrNull(
+        """
+        SELECT * FROM embeddings
+        WHERE workspace_id = ? AND target_type = ? AND target_id = ? AND model_version = ? AND input_hash = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """.trimIndent(),
+        mapper,
+        workspaceId,
+        targetType,
+        targetId,
+        modelVersion,
+        inputHash
+    )
 
     fun findDocEmbedding(workspaceId: String, documentId: String, modelVersion: String): EmbeddingRow? = jdbcTemplate.queryOneOrNull(
         """
