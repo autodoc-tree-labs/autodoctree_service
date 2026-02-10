@@ -36,7 +36,7 @@ auth:
   refresh-token-ttl-seconds: ${DOC_API_REFRESH_TOKEN_TTL_SECONDS:1209600}
 
 storage:
-  endpoint: ${S3_ENDPOINT:http://localhost:9000}
+  endpoint: ${S3_ENDPOINT:http://localhost:59000}
   access-key: ${S3_ACCESS_KEY:minio}
   secret-key: ${S3_SECRET_KEY:minio123}
   bucket: ${S3_BUCKET:autodoc}
@@ -65,6 +65,7 @@ worker:
 
 tree:
   neighbor-top-k: ${TREE_NEIGHBOR_TOP_K:5}
+  neighbor-min-similarity: ${TREE_NEIGHBOR_MIN_SIMILARITY:0.25}
   max-cluster-size: ${TREE_MAX_CLUSTER_SIZE:20}
   personalization-decay: ${TREE_PERSONALIZATION_DECAY:0.85}
   personalization-min-score: ${TREE_PERSONALIZATION_MIN_SCORE:1.2}

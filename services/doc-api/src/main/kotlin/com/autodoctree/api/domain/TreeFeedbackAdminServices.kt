@@ -103,7 +103,8 @@ class TreeService(
                 workspaceId = workspaceId,
                 documents = remaining,
                 embeddings = embeddingByDocumentId,
-                topK = treeProperties.neighborTopK
+                topK = treeProperties.neighborTopK,
+                minSimilarity = treeProperties.neighborMinSimilarity
             )
 
             val clusters = treeClusterer.cluster(
@@ -197,6 +198,10 @@ class TreeService(
             val locked = lockedNodes.any { it.label == label }
             val topLabel = topLabelByLeaf[label] ?: treeLabeler.topLevelLabel(label)
             val parent = topNodes[topLabel]
+            if (!locked && parent != null && label == topLabel) {
+                labelToNode[label] = parent
+                return@forEach
+            }
             val node = treeRepository.insertNode(
                 workspaceId = workspaceId,
                 snapshotId = snapshot.id,
@@ -250,17 +255,25 @@ class TreeService(
             ?: return mapOf("snapshot_id" to null, "status" to "EMPTY", "nodes" to emptyList<Any>())
         val nodes = treeRepository.listNodes(context.workspaceId, active.id)
         val memberships = treeRepository.listMemberships(context.workspaceId, active.id)
+        val documentsById = documentRepository.listWorkspaceDocuments(context.workspaceId).associateBy { it.id }
         val docsByNode = memberships.groupBy { it.nodeId }.mapValues { it.value.map(TreeMembershipRow::documentId) }
         return mapOf(
             "snapshot_id" to active.id,
             "status" to active.status,
             "nodes" to nodes.map {
+                val nodeDocumentIds = docsByNode[it.id] ?: emptyList<String>()
                 mapOf(
                     "id" to it.id,
                     "parent_id" to it.parentId,
                     "label" to it.label,
                     "locked" to it.locked,
-                    "documents" to (docsByNode[it.id] ?: emptyList<String>())
+                    "documents" to nodeDocumentIds,
+                    "document_summaries" to nodeDocumentIds.map { documentId ->
+                        mapOf(
+                            "id" to documentId,
+                            "title" to (documentsById[documentId]?.title ?: documentId)
+                        )
+                    }
                 )
             }
         )

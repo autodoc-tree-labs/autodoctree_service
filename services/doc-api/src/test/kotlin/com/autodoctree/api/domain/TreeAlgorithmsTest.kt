@@ -21,7 +21,7 @@ class TreeAlgorithmsTest {
     @Test
     fun `neighbor builder returns bounded topK adjacency`() {
         val registry = SimpleMeterRegistry()
-        val builder = NeighborBuilder(objectMapper, registry)
+        val builder = NeighborBuilder(objectMapper, TreeLabeler(), registry)
         val docs = listOf(
             doc("doc-a", "alpha"),
             doc("doc-b", "beta"),
@@ -33,10 +33,74 @@ class TreeAlgorithmsTest {
             "doc-c" to embedding("doc-c", listOf(0.0, 1.0))
         )
 
-        val graph = builder.build("ws-a", docs, embeddings, topK = 1)
+        val graph = builder.build("ws-a", docs, embeddings, topK = 1, minSimilarity = 0.0)
 
         assertEquals(3, graph.adjacency.size)
         assertTrue(graph.adjacency.values.all { it.size <= 1 })
+    }
+
+    @Test
+    fun `neighbor builder drops links below min similarity`() {
+        val registry = SimpleMeterRegistry()
+        val builder = NeighborBuilder(objectMapper, TreeLabeler(), registry)
+        val docs = listOf(
+            doc("doc-a", "alpha"),
+            doc("doc-b", "beta"),
+            doc("doc-c", "gamma")
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(1.0, 0.0)),
+            "doc-b" to embedding("doc-b", listOf(0.9, 0.1)),
+            "doc-c" to embedding("doc-c", listOf(0.0, 1.0))
+        )
+
+        val graph = builder.build("ws-a", docs, embeddings, topK = 3, minSimilarity = 0.9)
+
+        assertEquals(listOf("doc-b"), graph.adjacency["doc-a"]?.map { it.documentId })
+        assertEquals(listOf("doc-a"), graph.adjacency["doc-b"]?.map { it.documentId })
+        assertTrue(graph.adjacency["doc-c"].isNullOrEmpty())
+    }
+
+    @Test
+    fun `neighbor builder uses lexical fallback for local stub embeddings`() {
+        val registry = SimpleMeterRegistry()
+        val builder = NeighborBuilder(objectMapper, TreeLabeler(), registry)
+        val docs = listOf(
+            doc("doc-a", "사회 연구"),
+            doc("doc-b", "과학 연구"),
+            doc("doc-c", "축구 경기")
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(0.1, 0.9), modelVersion = "local-stub-v1"),
+            "doc-b" to embedding("doc-b", listOf(0.9, 0.1), modelVersion = "local-stub-v1"),
+            "doc-c" to embedding("doc-c", listOf(0.2, 0.8), modelVersion = "local-stub-v1")
+        )
+
+        val graph = builder.build("ws-a", docs, embeddings, topK = 2, minSimilarity = 0.2)
+
+        assertTrue(graph.adjacency["doc-a"].orEmpty().any { it.documentId == "doc-b" })
+        assertFalse(graph.adjacency["doc-a"].orEmpty().any { it.documentId == "doc-c" })
+    }
+
+    @Test
+    fun `neighbor builder unifies korean particle variants`() {
+        val registry = SimpleMeterRegistry()
+        val builder = NeighborBuilder(objectMapper, TreeLabeler(), registry)
+        val docs = listOf(
+            doc("doc-a", "섹스"),
+            doc("doc-b", "섹스와 성"),
+            doc("doc-c", "축구 경기")
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(0.1, 0.9), modelVersion = "local-stub-v1"),
+            "doc-b" to embedding("doc-b", listOf(0.9, 0.1), modelVersion = "local-stub-v1"),
+            "doc-c" to embedding("doc-c", listOf(0.2, 0.8), modelVersion = "local-stub-v1")
+        )
+
+        val graph = builder.build("ws-a", docs, embeddings, topK = 2, minSimilarity = 0.25)
+
+        assertTrue(graph.adjacency["doc-a"].orEmpty().any { it.documentId == "doc-b" })
+        assertFalse(graph.adjacency["doc-a"].orEmpty().any { it.documentId == "doc-c" })
     }
 
     @Test
@@ -74,12 +138,67 @@ class TreeAlgorithmsTest {
     }
 
     @Test
+    fun `labeler keeps labels conservative for mixed clusters`() {
+        val labeler = TreeLabeler()
+        val docs = listOf(
+            doc("doc-a", "사회 연구"),
+            doc("doc-b", "과학 연구"),
+            doc("doc-c", "문학 연구")
+        )
+        val clusters = listOf(TreeCluster("cluster-1", docs.map { it.id }))
+
+        val labels = labeler.labelClusters(docs, clusters)
+
+        assertEquals("연구", labels["cluster-1"])
+    }
+
+    @Test
+    fun `labeler removes numeric noise from singleton labels`() {
+        val labeler = TreeLabeler()
+        val docs = listOf(doc("doc-a", "runtime 1770532490 open"))
+        val clusters = listOf(TreeCluster("cluster-1", listOf("doc-a")))
+
+        val label = labeler.labelClusters(docs, clusters)["cluster-1"] ?: ""
+
+        assertFalse(label.contains("1770532490"))
+        assertFalse(label.contains("--"))
+    }
+
+    @Test
+    fun `labeler tokenizes korean text`() {
+        val labeler = TreeLabeler()
+
+        val tokens = labeler.tokenize("사회 연구 문서 자동 분류 테스트")
+
+        assertTrue(tokens.contains("사회"))
+        assertTrue(tokens.contains("연구"))
+        assertTrue(tokens.contains("자동"))
+        assertFalse(tokens.contains("문서"))
+        assertFalse(tokens.contains("테스트"))
+    }
+
+    @Test
+    fun `labeler normalizes korean particles`() {
+        val labeler = TreeLabeler()
+
+        val tokens = labeler.tokenize("섹스와 과학은 연구를 다룹니다")
+
+        assertTrue(tokens.contains("섹스"))
+        assertFalse(tokens.contains("섹스와"))
+        assertTrue(tokens.contains("과학"))
+        assertFalse(tokens.contains("과학은"))
+        assertTrue(tokens.contains("연구"))
+        assertFalse(tokens.contains("연구를"))
+    }
+
+    @Test
     fun `personalization model prefers moved label for similar text`() {
         val labeler = TreeLabeler()
         val engine = TreePersonalizationEngine(
             objectMapper = objectMapper,
             treeProperties = TreeProperties(
                 neighborTopK = 3,
+                neighborMinSimilarity = 0.0,
                 maxClusterSize = 10,
                 personalizationDecay = 0.9,
                 personalizationMinScore = 0.2
@@ -146,7 +265,7 @@ class TreeAlgorithmsTest {
         )
     }
 
-    private fun embedding(documentId: String, vector: List<Double>): EmbeddingRow {
+    private fun embedding(documentId: String, vector: List<Double>, modelVersion: String = "test-model-v1"): EmbeddingRow {
         return EmbeddingRow(
             id = "emb-$documentId",
             workspaceId = "ws-a",
@@ -154,7 +273,7 @@ class TreeAlgorithmsTest {
             targetType = "DOCUMENT",
             targetId = documentId,
             vectorJson = objectMapper.writeValueAsString(vector),
-            modelVersion = "local-stub-v1",
+            modelVersion = modelVersion,
             createdAt = LocalDateTime.now()
         )
     }

@@ -1,6 +1,6 @@
 # Backlog Status Audit
 
-Last updated: 2026-02-08
+Last updated: 2026-02-10
 
 Status legend:
 - DONE: implemented and validated in current codebase/tests
@@ -16,6 +16,7 @@ Status legend:
 | I-0104 | DONE | `docs/DEV_SETUP.md` and `tools/http/*.http` smoke scripts added |
 | I-0105 | DONE | JSON structured logging + worker metrics + sensitive-log guard tests added |
 | I-0106 | DONE | Config/env template + feature flags baseline added |
+| I-0107 | DONE | Local MinIO endpoint defaults aligned (59000/59001), docs synced, upload error diagnostics improved |
 
 ## Backend (B)
 | Ticket | Status | Notes |
@@ -54,6 +55,7 @@ Status legend:
 | B-0504 | DONE | stability policy via moved ratio -> ACTIVE/RECOMMENDED |
 | B-0505 | DONE | workspace-level debounce/coalesce queue integrated into worker with coalescing test |
 | B-0510 | DONE | multi-tenant negative integration suite for doc/list/search/tree/explain/presign/complete/admin |
+| B-0511 | DONE | Korean-aware tree tokenization + neighbor similarity cutoff (`tree.neighbor-min-similarity`) |
 
 ## Web User (U)
 | Ticket | Status | Notes |

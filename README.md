@@ -20,7 +20,7 @@
 - `web-admin`: 5173
 - `web-user`: 5174
 - `doc-api`: 8080 (권장)
-- (선택) OpenSearch: 59200, Redis: 56379, Postgres: 5432, MinIO: 9000/9001
+- (선택) OpenSearch: 59200, Redis: 56379, Postgres: 5432, MinIO: 59000/59001
 
 ## Quickstart
 

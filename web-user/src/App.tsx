@@ -13,7 +13,19 @@ type AuthResponse = {
 type WorkspaceListResponse = { items: Workspace[] };
 type DocumentListResponse = { items: DocumentItem[]; page: number; size: number; total: number };
 type SearchResponse = { items: Array<{ document_id: string; title: string; score: number }> };
-type TreeNode = { id: string; parent_id: string | null; label: string; locked: boolean; documents: string[] };
+type TreeNodeDocumentSummary = {
+  id: string;
+  title: string;
+};
+
+type TreeNode = {
+  id: string;
+  parent_id: string | null;
+  label: string;
+  locked: boolean;
+  documents: string[];
+  document_summaries?: TreeNodeDocumentSummary[];
+};
 type TreeActiveResponse = {
   snapshot_id: string | null;
   status: string;
@@ -35,18 +47,73 @@ type UiError = {
   status: number | null;
 };
 
+type UiNoticeTone = "info" | "success";
+
+type UiNotice = {
+  message: string;
+  tone: UiNoticeTone;
+};
+
 type StatusTone = "neutral" | "good" | "warn" | "bad";
+
+const STATUS_TEXT: Record<string, string> = {
+  DONE: "완료",
+  SUCCESS: "성공",
+  RUNNING: "진행 중",
+  PROCESSING: "처리 중",
+  PENDING: "대기",
+  FAILED: "실패",
+  ERROR: "오류"
+};
+
+const ROLE_TEXT: Record<string, string> = {
+  OWNER: "소유자",
+  MEMBER: "멤버",
+  VIEWER: "조회자"
+};
+
+const ERROR_MESSAGE_TEXT: Array<[string, string]> = [
+  ["X-Workspace-Id header is required", "워크스페이스 헤더(X-Workspace-Id)가 필요합니다."],
+  ["Failed to fetch", "서버 연결에 실패했습니다. 백엔드 실행과 CORS 설정을 확인하세요."],
+  ["NetworkError when attempting to fetch resource", "서버 연결에 실패했습니다. 네트워크 상태를 확인하세요."],
+  ["Load failed", "서버 연결에 실패했습니다."],
+  ["Network request failed", "네트워크 요청에 실패했습니다."],
+  ["Unauthorized", "인증이 필요합니다."],
+  ["Forbidden", "권한이 없습니다."],
+  ["Not Found", "요청한 리소스를 찾을 수 없습니다."]
+];
+
+const hasHangul = (value: string): boolean => /[가-힣]/.test(value);
+
+const localizeErrorMessage = (message: string, fallback: string): string => {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  for (const [needle, translated] of ERROR_MESSAGE_TEXT) {
+    if (trimmed.includes(needle)) {
+      return translated;
+    }
+  }
+
+  if (hasHangul(trimmed)) {
+    return trimmed;
+  }
+
+  return fallback;
+};
 
 const toUiError = (error: unknown, fallback: string): UiError => {
   if (error instanceof ApiError) {
     return {
-      message: error.message,
+      message: localizeErrorMessage(error.message, fallback),
       status: error.status
     };
   }
   if (error instanceof Error) {
     return {
-      message: error.message || fallback,
+      message: localizeErrorMessage(error.message, fallback),
       status: null
     };
   }
@@ -70,8 +137,12 @@ const statusTone = (value: string): StatusTone => {
   return "neutral";
 };
 
+const statusText = (value: string): string => STATUS_TEXT[value.trim().toUpperCase()] ?? value;
+
+const roleText = (value: string): string => ROLE_TEXT[value.trim().toUpperCase()] ?? value;
+
 function StatusChip({ label, value }: { label: string; value: string }) {
-  return <span className={`status-chip status-chip-${statusTone(value)}`}>{label}: {value}</span>;
+  return <span className={`status-chip status-chip-${statusTone(value)}`}>{label}: {statusText(value)}</span>;
 }
 
 function PageHeader({ title, subtitle, action }: { title: string; subtitle: string; action?: React.ReactNode }) {
@@ -99,9 +170,9 @@ function EmptyState({ title, description, action }: { title: string; description
 function WorkspaceRequiredHint() {
   return (
     <EmptyState
-      title="Select a workspace first"
-      description="Tenant-scoped pages need an active workspace to attach the X-Workspace-Id header."
-      action={<NavLink className="btn btn-primary" to="/workspace">Go to workspace</NavLink>}
+      title="워크스페이스를 먼저 선택하세요"
+      description="테넌트 범위 페이지는 활성 워크스페이스를 선택해야 접근할 수 있습니다."
+      action={<NavLink className="btn btn-primary" to="/workspace">워크스페이스로 이동</NavLink>}
     />
   );
 }
@@ -117,7 +188,7 @@ function ErrorPanel({ error, onRetry }: { error: UiError | null; onRetry?: () =>
     <div className="error-panel" role="alert">
       <div>
         <strong>{error.message}</strong>
-        {error.status ? <span className="error-code">HTTP {error.status}</span> : null}
+        {error.status ? <span className="error-code">상태코드 {error.status}</span> : null}
       </div>
       {canRetry ? (
         <button
@@ -127,23 +198,47 @@ function ErrorPanel({ error, onRetry }: { error: UiError | null; onRetry?: () =>
           }}
           type="button"
         >
-          Retry
+          재시도
         </button>
       ) : null}
     </div>
   );
 }
 
+function NoticePanel({ notice }: { notice: UiNotice | null }) {
+  if (!notice) {
+    return null;
+  }
+
+  return (
+    <div className={`notice-panel notice-panel-${notice.tone}`} role="status" aria-live="polite">
+      <strong>{notice.message}</strong>
+    </div>
+  );
+}
+
 const moveDocumentInTree = (tree: TreeActiveResponse, documentId: string, fromNodeId: string | null, toNodeId: string): TreeActiveResponse => {
+  const movedSummary =
+    tree.nodes
+      .flatMap((node) => node.document_summaries ?? [])
+      .find((summary) => summary.id === documentId) ?? null;
+
   return {
     ...tree,
     nodes: tree.nodes.map((node) => {
       const removeFromNode = fromNodeId ? node.id === fromNodeId : true;
       const withoutDoc = removeFromNode ? node.documents.filter((docId) => docId !== documentId) : node.documents;
+      const withoutSummaries = removeFromNode
+        ? node.document_summaries?.filter((summary) => summary.id !== documentId)
+        : node.document_summaries;
       if (node.id === toNodeId && !withoutDoc.includes(documentId)) {
-        return { ...node, documents: [...withoutDoc, documentId] };
+        const nextSummaries = withoutSummaries ? [...withoutSummaries] : withoutSummaries;
+        if (nextSummaries && movedSummary && !nextSummaries.some((summary) => summary.id === documentId)) {
+          nextSummaries.push(movedSummary);
+        }
+        return { ...node, documents: [...withoutDoc, documentId], document_summaries: nextSummaries };
       }
-      return { ...node, documents: withoutDoc };
+      return { ...node, documents: withoutDoc, document_summaries: withoutSummaries };
     })
   };
 };
@@ -163,33 +258,33 @@ function Layout({ children }: { children: React.ReactNode }) {
     <div className="app-shell">
       <header className="panel panel-compact topbar">
         <div className="brand">
-          <span className="brand-mark">A</span>
+          <span className="brand-mark">오</span>
           <div className="brand-text">
-            <strong>AutoDoc Tree</strong>
-            <span>User Console</span>
+            <strong>오토독 트리</strong>
+            <span>사용자 콘솔</span>
           </div>
         </div>
 
         <div className="workspace-chip" title={state.workspaceId ?? undefined}>
-          <span>Workspace</span>
-          <strong>{state.workspaceName ?? "Not selected"}</strong>
+          <span>워크스페이스</span>
+          <strong>{state.workspaceName ?? "미선택"}</strong>
         </div>
 
-        <nav className="top-nav" aria-label="Main navigation">
+        <nav className="top-nav" aria-label="메인 내비게이션">
           <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/workspace">
-            Workspace
+            워크스페이스
           </NavLink>
           <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/inbox">
-            Inbox
+            문서함
           </NavLink>
           <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/editor">
-            Editor
+            에디터
           </NavLink>
           <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/search">
-            Search
+            검색
           </NavLink>
           <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/tree">
-            Tree
+            트리
           </NavLink>
         </nav>
 
@@ -201,7 +296,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           }}
           type="button"
         >
-          Logout
+          로그아웃
         </button>
       </header>
 
@@ -211,8 +306,8 @@ function Layout({ children }: { children: React.ReactNode }) {
 }
 
 function LoginPage() {
-  const [email, setEmail] = useState("owner@autodoc.local");
-  const [password, setPassword] = useState("password");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<UiError | null>(null);
   const { setTokens } = useSession();
   const navigate = useNavigate();
@@ -235,48 +330,48 @@ function LoginPage() {
           event.preventDefault();
           setError(null);
           try {
-            const response = await api.request<AuthResponse>("/auth/login", {
-              method: "POST",
-              body: JSON.stringify({ email, password })
-            });
-            setTokens(response.access_token, response.refresh_token);
-            navigate("/workspace");
-          } catch (e) {
-            setError(toUiError(e, "login failed"));
-          }
-        }}
-      >
-        <div className="auth-eyebrow">AutoDoc Tree</div>
-        <h1 className="auth-title">Welcome back</h1>
-        <p className="auth-subtitle">Sign in with your workspace account to organize documents automatically.</p>
+          const response = await api.request<AuthResponse>("/auth/login", {
+            method: "POST",
+            body: JSON.stringify({ email, password })
+          });
+          setTokens(response.access_token, response.refresh_token);
+          navigate("/workspace");
+        } catch (e) {
+          setError(toUiError(e, "로그인에 실패했습니다"));
+        }
+      }}
+    >
+      <div className="auth-eyebrow">오토독 트리</div>
+      <h1 className="auth-title">다시 오신 것을 환영합니다</h1>
+      <p className="auth-subtitle">워크스페이스 계정으로 로그인해 문서를 자동으로 정리하세요.</p>
 
-        <label className="field-label" htmlFor="login-email">
-          Email
-        </label>
+      <label className="field-label" htmlFor="login-email">
+          이메일
+      </label>
         <input
           className="field-input"
           id="login-email"
           onChange={(e) => setEmail(e.target.value)}
-          placeholder="owner@autodoc.local"
+          placeholder="이메일 주소"
           type="email"
           value={email}
         />
 
-        <label className="field-label" htmlFor="login-password">
-          Password
-        </label>
+      <label className="field-label" htmlFor="login-password">
+          비밀번호
+      </label>
         <input
           className="field-input"
           id="login-password"
           onChange={(e) => setPassword(e.target.value)}
-          placeholder="password"
+          placeholder="비밀번호"
           type="password"
           value={password}
         />
 
-        <button className="btn btn-primary btn-block" type="submit">
-          Sign in
-        </button>
+      <button className="btn btn-primary btn-block" type="submit">
+          로그인
+      </button>
 
         <ErrorPanel error={error} />
       </form>
@@ -331,7 +426,7 @@ export default function App() {
 
   function WorkspacePage() {
     const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-    const [name, setName] = useState("My Workspace");
+    const [name, setName] = useState("내 워크스페이스");
     const [error, setError] = useState<UiError | null>(null);
 
     const loadWorkspaces = useCallback(async () => {
@@ -340,7 +435,7 @@ export default function App() {
         const response = await api.request<WorkspaceListResponse>("/workspaces");
         setWorkspaces(response.items);
       } catch (e) {
-        setError(toUiError(e, "failed to load workspaces"));
+        setError(toUiError(e, "워크스페이스 목록을 불러오지 못했습니다"));
       }
     }, [api]);
 
@@ -351,7 +446,7 @@ export default function App() {
     return (
       <Layout>
         <section className="panel">
-          <PageHeader title="Workspace" subtitle="Choose the tenant context before browsing or editing documents." />
+          <PageHeader title="워크스페이스" subtitle="문서를 탐색하거나 편집하기 전에 테넌트 컨텍스트를 선택하세요." />
           <ErrorPanel
             error={error}
             onRetry={() => {
@@ -362,7 +457,7 @@ export default function App() {
           <div className="field-row">
             <div className="field-grow">
               <label className="field-label" htmlFor="workspace-name">
-                New workspace name
+                새 워크스페이스 이름
               </label>
               <input className="field-input" id="workspace-name" onChange={(e) => setName(e.target.value)} value={name} />
             </div>
@@ -376,17 +471,17 @@ export default function App() {
                   });
                   await loadWorkspaces();
                 } catch (e) {
-                  setError(toUiError(e, "failed to create workspace"));
+                  setError(toUiError(e, "워크스페이스 생성에 실패했습니다"));
                 }
               }}
               type="button"
             >
-              Create workspace
+              워크스페이스 생성
             </button>
           </div>
 
           {workspaces.length === 0 ? (
-            <EmptyState title="No workspace yet" description="Create one to start organizing documents." />
+            <EmptyState title="워크스페이스가 없습니다" description="워크스페이스를 만들어 문서 정리를 시작하세요." />
           ) : (
             <ul className="workspace-list">
               {workspaces.map((ws) => {
@@ -396,8 +491,8 @@ export default function App() {
                   <li className={`workspace-item${isSelected ? " is-selected" : ""}`} key={ws.id}>
                     <button className="workspace-button" onClick={() => setWorkspace(ws.id, ws.name)} type="button">
                       <span className="workspace-name">{ws.name}</span>
-                      <span className={`role-badge role-${roleName}`}>{ws.role}</span>
-                      {isSelected ? <span className="workspace-current">Current</span> : null}
+                      <span className={`role-badge role-${roleName}`}>{roleText(ws.role)}</span>
+                      {isSelected ? <span className="workspace-current">사용 중</span> : null}
                     </button>
                   </li>
                 );
@@ -419,7 +514,7 @@ export default function App() {
         const response = await api.request<DocumentListResponse>("/documents?page=0&size=20", {}, true);
         setDocuments(response.items);
       } catch (e) {
-        setError(toUiError(e, "failed to load documents"));
+        setError(toUiError(e, "문서 목록을 불러오지 못했습니다"));
       }
     }, [api]);
 
@@ -434,7 +529,7 @@ export default function App() {
     return (
       <Layout>
         <section className="panel">
-          <PageHeader title="Inbox" subtitle="Recently ingested documents and pipeline progress by stage." />
+          <PageHeader title="문서함" subtitle="최근 수집된 문서와 파이프라인 단계별 진행 상태를 확인하세요." />
           {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
           <ErrorPanel
             error={error}
@@ -444,7 +539,7 @@ export default function App() {
           />
 
           {state.workspaceId && documents.length === 0 ? (
-            <EmptyState title="No documents yet" description="Create or upload a document from the Editor tab." />
+            <EmptyState title="문서가 없습니다" description="에디터 탭에서 문서를 작성하거나 업로드하세요." />
           ) : null}
 
           <div className="doc-grid">
@@ -454,13 +549,13 @@ export default function App() {
                   <Link className="doc-link" to={`/documents/${doc.id}`}>
                     {doc.title}
                   </Link>
-                  <StatusChip label="Status" value={doc.status} />
+                  <StatusChip label="상태" value={doc.status} />
                 </div>
                 <div className="pipeline-grid">
-                  <StatusChip label="Ingest" value={doc.pipeline_status.ingest} />
-                  <StatusChip label="Embed" value={doc.pipeline_status.embed} />
-                  <StatusChip label="Index" value={doc.pipeline_status.index} />
-                  <StatusChip label="Tree" value={doc.pipeline_status.tree} />
+                  <StatusChip label="수집" value={doc.pipeline_status.ingest} />
+                  <StatusChip label="임베딩" value={doc.pipeline_status.embed} />
+                  <StatusChip label="인덱스" value={doc.pipeline_status.index} />
+                  <StatusChip label="트리" value={doc.pipeline_status.tree} />
                 </div>
               </article>
             ))}
@@ -471,26 +566,26 @@ export default function App() {
   }
 
   function EditorPage() {
-    const [title, setTitle] = useState("Draft title");
-    const [body, setBody] = useState("# Note\n\ncontent");
+    const [title, setTitle] = useState("초안 제목");
+    const [body, setBody] = useState("# 메모\n\n내용");
     const [error, setError] = useState<UiError | null>(null);
     const navigate = useNavigate();
 
     return (
       <Layout>
         <section className="panel">
-          <PageHeader title="Editor" subtitle="Create markdown docs and push them into the processing pipeline." />
+          <PageHeader title="에디터" subtitle="마크다운 문서를 작성해 파이프라인으로 전송하세요." />
           {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
           <ErrorPanel error={error} />
 
           <div className="field-stack">
             <label className="field-label" htmlFor="editor-title">
-              Title
+              제목
             </label>
-            <input className="field-input" id="editor-title" onChange={(e) => setTitle(e.target.value)} placeholder="Document title" value={title} />
+            <input className="field-input" id="editor-title" onChange={(e) => setTitle(e.target.value)} placeholder="문서 제목" value={title} />
 
             <label className="field-label" htmlFor="editor-body">
-              Body (Markdown)
+              본문 (Markdown)
             </label>
             <textarea className="field-textarea editor-textarea" id="editor-body" onChange={(e) => setBody(e.target.value)} rows={14} value={body} />
 
@@ -515,12 +610,12 @@ export default function App() {
                     );
                     navigate(`/documents/${created.id}`);
                   } catch (e) {
-                    setError(toUiError(e, "failed to save document"));
+                    setError(toUiError(e, "문서 저장에 실패했습니다"));
                   }
                 }}
                 type="button"
               >
-                Save document
+                문서 저장
               </button>
             </div>
           </div>
@@ -550,7 +645,7 @@ export default function App() {
         setDoc(payload);
         setDocumentError(null);
       } catch (e) {
-        setDocumentError(toUiError(e, "failed to load document"));
+        setDocumentError(toUiError(e, "문서를 불러오지 못했습니다"));
       }
     }, [api, params.documentId, state.workspaceId]);
 
@@ -578,6 +673,14 @@ export default function App() {
           true
         );
 
+        const uploadOrigin = (() => {
+          try {
+            return new URL(presign.upload_url).origin;
+          } catch {
+            return "스토리지 서버";
+          }
+        })();
+
         await new Promise<void>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           xhr.open("PUT", presign.upload_url);
@@ -589,13 +692,14 @@ export default function App() {
             const percent = Math.round((event.loaded / event.total) * 100);
             setUploadProgress(percent);
           };
-          xhr.onerror = () => reject(new Error("upload failed"));
+          xhr.onerror = () =>
+            reject(new Error(`스토리지 업로드 연결에 실패했습니다 (${uploadOrigin}). S3_ENDPOINT 또는 CORS 설정을 확인하세요.`));
           xhr.onload = () => {
             if (xhr.status >= 200 && xhr.status < 300) {
               setUploadProgress(100);
               resolve();
             } else {
-              reject(new Error(`upload failed: ${xhr.status}`));
+              reject(new Error(`스토리지 업로드 응답 오류(${xhr.status})가 발생했습니다. 엔드포인트(${uploadOrigin})를 확인하세요.`));
             }
           };
           xhr.send(uploadFile);
@@ -612,7 +716,7 @@ export default function App() {
 
         await loadDocument();
       } catch (e) {
-        setUploadError(toUiError(e, "upload failed"));
+        setUploadError(toUiError(e, "업로드에 실패했습니다"));
       } finally {
         setUploading(false);
       }
@@ -633,7 +737,7 @@ export default function App() {
         const payload = await api.request<ExplainResponse>(`/documents/${params.documentId}/explain`, {}, true);
         setExplain(payload);
       } catch (e) {
-        setExplainError(toUiError(e, "failed to load explain"));
+        setExplainError(toUiError(e, "설명 정보를 불러오지 못했습니다"));
       } finally {
         setExplainLoading(false);
       }
@@ -662,8 +766,8 @@ export default function App() {
       <Layout>
         <section className="panel">
           <PageHeader
-            title={doc?.title ?? "Document detail"}
-            subtitle="Inspect processing stages, attachments, and explain rationale for placement."
+            title={doc?.title ?? "문서 상세"}
+            subtitle="처리 단계, 첨부파일, 배치 근거를 확인하세요."
           />
           {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
           <ErrorPanel
@@ -676,37 +780,37 @@ export default function App() {
           {doc ? (
             <div className="document-meta-grid">
               <div className="meta-block">
-                <span className="meta-label">Document ID</span>
+                <span className="meta-label">문서 식별자</span>
                 <code>{doc.id}</code>
               </div>
               <div className="meta-block">
-                <span className="meta-label">Status</span>
-                <StatusChip label="Doc" value={doc.status} />
+                <span className="meta-label">상태</span>
+                <StatusChip label="문서" value={doc.status} />
               </div>
               <div className="meta-block meta-block-wide">
-                <span className="meta-label">Pipeline</span>
+                <span className="meta-label">파이프라인</span>
                 <div className="pipeline-grid">
-                  <StatusChip label="Ingest" value={doc.pipeline_status.ingest} />
-                  <StatusChip label="Embed" value={doc.pipeline_status.embed} />
-                  <StatusChip label="Index" value={doc.pipeline_status.index} />
-                  <StatusChip label="Tree" value={doc.pipeline_status.tree} />
+                  <StatusChip label="수집" value={doc.pipeline_status.ingest} />
+                  <StatusChip label="임베딩" value={doc.pipeline_status.embed} />
+                  <StatusChip label="인덱스" value={doc.pipeline_status.index} />
+                  <StatusChip label="트리" value={doc.pipeline_status.tree} />
                 </div>
               </div>
               {doc.pipeline_status.failure_reason ? (
                 <div className="meta-block meta-block-wide meta-warning">
-                  <span className="meta-label">Failure reason</span>
+                  <span className="meta-label">실패 사유</span>
                   <span>{doc.pipeline_status.failure_reason}</span>
                 </div>
               ) : null}
               <div className="meta-block meta-block-wide">
-                <span className="meta-label">Attachments ({doc.attachments.length})</span>
+                <span className="meta-label">첨부파일 ({doc.attachments.length})</span>
                 {doc.attachments.length === 0 ? (
-                  <span className="muted">No attachments yet.</span>
+                  <span className="muted">첨부파일이 없습니다.</span>
                 ) : (
                   <ul className="simple-list">
                     {doc.attachments.map((attachment) => (
                       <li key={attachment.id}>
-                        <code>{attachment.id}</code> ({attachment.content_type}, {attachment.size} bytes)
+                        <code>{attachment.id}</code> ({attachment.content_type}, {attachment.size} 바이트)
                       </li>
                     ))}
                   </ul>
@@ -714,13 +818,13 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <p className="muted">Loading document...</p>
+            <p className="muted">문서를 불러오는 중입니다...</p>
           )}
         </section>
 
         <section className="panel">
-          <h2 className="section-title">Attachment upload</h2>
-          <p className="section-subtitle">Drag a file or choose one to attach to this document.</p>
+          <h2 className="section-title">첨부파일 업로드</h2>
+          <p className="section-subtitle">파일을 끌어 놓거나 선택해 문서에 첨부하세요.</p>
 
           <div
             className="dropzone"
@@ -731,11 +835,11 @@ export default function App() {
               setUploadFile(dropped);
             }}
           >
-            Drop file here
+            여기에 파일을 놓으세요
           </div>
 
           <input className="field-input" onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)} type="file" />
-          <p className="muted">Selected: {uploadFile ? `${uploadFile.name} (${uploadFile.size} bytes)` : "none"}</p>
+          <p className="muted">선택 파일: {uploadFile ? `${uploadFile.name} (${uploadFile.size} 바이트)` : "없음"}</p>
 
           <div className="progress-row">
             <div className="progress-track">
@@ -758,11 +862,11 @@ export default function App() {
               onClick={() => void uploadSelectedFile()}
               type="button"
             >
-              {uploading ? "Uploading..." : "Upload"}
+              {uploading ? "업로드 중..." : "업로드"}
             </button>
             {uploadError ? (
               <button className="btn btn-secondary" onClick={() => void uploadSelectedFile()} type="button">
-                Retry upload
+                업로드 재시도
               </button>
             ) : null}
           </div>
@@ -771,8 +875,8 @@ export default function App() {
         <section className="panel">
           <div className="section-header-inline">
             <div>
-              <h2 className="section-title">Explain</h2>
-              <p className="section-subtitle">See why the document is placed into a specific tree node.</p>
+              <h2 className="section-title">배치 설명</h2>
+              <p className="section-subtitle">문서가 특정 노드에 배치된 이유를 확인하세요.</p>
             </div>
             <button
               className="btn btn-secondary"
@@ -780,7 +884,7 @@ export default function App() {
               onClick={() => void loadExplain()}
               type="button"
             >
-              {explainLoading ? "Loading..." : explain ? "Refresh explain" : "Load explain"}
+              {explainLoading ? "불러오는 중..." : explain ? "설명 새로고침" : "설명 불러오기"}
             </button>
           </div>
           <ErrorPanel
@@ -793,7 +897,7 @@ export default function App() {
           {explain ? (
             <div className="explain-grid">
               <div className="explain-block">
-                <h3>Keywords</h3>
+                <h3>키워드</h3>
                 {(explain.rationale?.keywords ?? []).length ? (
                   <ul className="simple-list">
                     {(explain.rationale?.keywords ?? []).map((keyword) => (
@@ -801,12 +905,12 @@ export default function App() {
                     ))}
                   </ul>
                 ) : (
-                  <p className="muted">No keywords available.</p>
+                  <p className="muted">키워드 정보가 없습니다.</p>
                 )}
               </div>
 
               <div className="explain-block">
-                <h3>Similar docs</h3>
+                <h3>유사 문서</h3>
                 {(explain.rationale?.similar_docs ?? []).length ? (
                   <ul className="simple-list">
                     {(explain.rationale?.similar_docs ?? []).map((related) => (
@@ -819,12 +923,12 @@ export default function App() {
                     ))}
                   </ul>
                 ) : (
-                  <p className="muted">No similar docs available.</p>
+                  <p className="muted">유사 문서가 없습니다.</p>
                 )}
               </div>
 
               <div className="explain-block">
-                <h3>Signals</h3>
+                <h3>신호</h3>
                 {(explain.rationale?.signals ?? []).length ? (
                   <ul className="simple-list">
                     {(explain.rationale?.signals ?? []).map((signal) => (
@@ -832,12 +936,12 @@ export default function App() {
                     ))}
                   </ul>
                 ) : (
-                  <p className="muted">No signals available.</p>
+                  <p className="muted">신호 정보가 없습니다.</p>
                 )}
               </div>
             </div>
           ) : (
-            <p className="muted">Explain data not loaded yet.</p>
+            <p className="muted">설명 데이터가 아직 없습니다.</p>
           )}
         </section>
       </Layout>
@@ -858,14 +962,14 @@ export default function App() {
         const response = await api.request<SearchResponse>(`/search?q=${encodeURIComponent(q)}`, {}, true);
         setResults(response.items);
       } catch (e) {
-        setError(toUiError(e, "search failed"));
+        setError(toUiError(e, "검색에 실패했습니다"));
       }
     }, [api, q, state.workspaceId]);
 
     return (
       <Layout>
         <section className="panel">
-          <PageHeader title="Search" subtitle="BM25 search over workspace-scoped indexed content." />
+          <PageHeader title="검색" subtitle="워크스페이스 범위 검색 인덱스에서 문서를 찾습니다." />
           {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
           <ErrorPanel
             error={error}
@@ -881,14 +985,14 @@ export default function App() {
               void executeSearch();
             }}
           >
-            <input className="field-input" onChange={(e) => setQ(e.target.value)} placeholder="Search documents" value={q} />
+            <input className="field-input" onChange={(e) => setQ(e.target.value)} placeholder="문서 검색어 입력" value={q} />
             <button className="btn btn-primary" disabled={!state.workspaceId || !q.trim()} type="submit">
-              Search
+              검색
             </button>
           </form>
 
           {state.workspaceId && results.length === 0 && q.trim() ? (
-            <EmptyState title="No matches" description="Try broader keywords or check whether indexing is complete." />
+            <EmptyState title="검색 결과가 없습니다" description="검색어를 넓히거나 인덱싱 완료 여부를 확인하세요." />
           ) : null}
 
           <ul className="search-results">
@@ -897,7 +1001,7 @@ export default function App() {
                 <Link className="doc-link" to={`/documents/${item.document_id}`}>
                   {item.title}
                 </Link>
-                <span className="score-pill">Score {item.score.toFixed(2)}</span>
+                <span className="score-pill">점수 {item.score.toFixed(2)}</span>
               </li>
             ))}
           </ul>
@@ -915,11 +1019,13 @@ export default function App() {
     const [draggingDocId, setDraggingDocId] = useState<string | null>(null);
     const [dragSourceNodeId, setDragSourceNodeId] = useState<string | null>(null);
     const [treeError, setTreeError] = useState<UiError | null>(null);
+    const [treeNotice, setTreeNotice] = useState<UiNotice | null>(null);
 
     const refreshTree = useCallback(async () => {
       if (!state.workspaceId) {
         setTree(null);
         setSelectedNode(null);
+        setTreeNotice(null);
         return;
       }
 
@@ -929,7 +1035,8 @@ export default function App() {
         setSelectedNode((prev) => prev ?? payload.nodes[0]?.id ?? null);
         setTreeError(null);
       } catch (e) {
-        setTreeError(toUiError(e, "tree load failed"));
+        setTreeNotice(null);
+        setTreeError(toUiError(e, "트리 로드에 실패했습니다"));
       }
     }, [api, state.workspaceId]);
 
@@ -958,59 +1065,89 @@ export default function App() {
           await refreshTree();
         } catch (e) {
           setTree(snapshot);
-          setTreeError(toUiError(e, "move failed"));
+          setTreeError(toUiError(e, "이동에 실패했습니다"));
         }
       },
       [api, refreshTree, tree]
     );
 
     useEffect(() => {
+      setTreeNotice(null);
       void refreshTree();
     }, [refreshTree, state.workspaceId]);
 
     const selected = tree?.nodes.find((n) => n.id === selectedNode);
+    const selectedDocuments: TreeNodeDocumentSummary[] = selected
+      ? selected.document_summaries && selected.document_summaries.length > 0
+        ? selected.document_summaries
+        : selected.documents.map((documentId) => ({ id: documentId, title: documentId }))
+      : [];
 
     return (
       <Layout>
         <section className="panel">
           <PageHeader
-            title="Tree"
-            subtitle="Browse virtual folder snapshots, lock nodes, and submit move/rename feedback."
+            title="트리"
+            subtitle="가상 폴더 스냅샷을 탐색하고 잠금 및 이동/이름변경 피드백을 관리하세요."
             action={
               <div className="action-row">
                 <button
                   className="btn btn-secondary"
                   disabled={!state.workspaceId}
                   onClick={async () => {
+                    setTreeError(null);
+                    setTreeNotice({ tone: "info", message: "재빌드를 실행 중입니다..." });
                     try {
-                      await api.request("/tree/rebuild", { method: "POST", body: JSON.stringify({ mode: "DEBOUNCED" }) }, true);
+                      const rebuild = await api.request<{ snapshot_id: string | null; status: string; pending_count?: number }>(
+                        "/tree/rebuild",
+                        { method: "POST", body: JSON.stringify({ mode: "IMMEDIATE" }) },
+                        true
+                      );
                       await refreshTree();
+                      const normalized = rebuild.status.trim().toUpperCase();
+                      if (normalized === "ACTIVE") {
+                        setTreeNotice({ tone: "success", message: "재빌드가 완료되어 활성 트리를 갱신했습니다." });
+                      } else if (normalized === "RECOMMENDED") {
+                        setTreeNotice({ tone: "info", message: "재빌드가 완료되었습니다. 추천 스냅샷 적용으로 반영하세요." });
+                      } else if (normalized === "QUEUED") {
+                        const pending = typeof rebuild.pending_count === "number" ? ` (대기 ${rebuild.pending_count}건)` : "";
+                        setTreeNotice({ tone: "info", message: `재빌드 요청이 대기열에 등록되었습니다${pending}.` });
+                      } else {
+                        setTreeNotice({ tone: "success", message: `재빌드가 완료되었습니다 (${rebuild.status}).` });
+                      }
                     } catch (e) {
-                      setTreeError(toUiError(e, "rebuild failed"));
+                      setTreeNotice(null);
+                      setTreeError(toUiError(e, "재빌드에 실패했습니다"));
                     }
                   }}
                   type="button"
                 >
-                  Rebuild
+                  재빌드
                 </button>
                 <button
                   className="btn btn-primary"
                   disabled={!state.workspaceId}
                   onClick={async () => {
+                    setTreeError(null);
+                    setTreeNotice({ tone: "info", message: "추천 스냅샷을 확인하는 중입니다..." });
                     try {
                       const snaps = await api.request<{ items: Array<{ id: string; status: string }> }>("/tree/snapshots", {}, true);
                       const recommended = snaps.items.find((item) => item.status === "RECOMMENDED");
                       if (recommended) {
                         await api.request(`/tree/snapshots/${recommended.id}/activate`, { method: "POST", body: "{}" }, true);
                         await refreshTree();
+                        setTreeNotice({ tone: "success", message: "추천 스냅샷을 활성화했습니다." });
+                      } else {
+                        setTreeNotice({ tone: "info", message: "적용할 추천 스냅샷이 없습니다." });
                       }
                     } catch (e) {
-                      setTreeError(toUiError(e, "apply recommended failed"));
+                      setTreeNotice(null);
+                      setTreeError(toUiError(e, "추천 스냅샷 적용에 실패했습니다"));
                     }
                   }}
                   type="button"
                 >
-                  Apply recommended
+                  추천 스냅샷 적용
                 </button>
               </div>
             }
@@ -1023,10 +1160,11 @@ export default function App() {
               void refreshTree();
             }}
           />
+          <NoticePanel notice={treeNotice} />
 
           <div className="tree-layout">
             <div className="panel panel-soft">
-              <h2 className="section-title">Nodes</h2>
+              <h2 className="section-title">노드</h2>
               <ul className="tree-node-list">
                 {tree?.nodes.map((node) => (
                   <li
@@ -1048,7 +1186,7 @@ export default function App() {
                       type="button"
                     >
                       <span className="tree-node-label">{node.parent_id ? `↳ ${node.label}` : node.label}</span>
-                      {node.locked ? <span className="lock-badge">Locked</span> : null}
+                      {node.locked ? <span className="lock-badge">잠금</span> : null}
                     </button>
                     <button
                       className="btn btn-ghost btn-small"
@@ -1057,12 +1195,12 @@ export default function App() {
                           await api.request(`/tree/nodes/${node.id}/lock`, { method: "POST", body: JSON.stringify({ locked: !node.locked }) }, true);
                           await refreshTree();
                         } catch (e) {
-                          setTreeError(toUiError(e, "lock update failed"));
+                          setTreeError(toUiError(e, "잠금 상태 변경에 실패했습니다"));
                         }
                       }}
                       type="button"
                     >
-                      {node.locked ? "Unlock" : "Lock"}
+                      {node.locked ? "잠금 해제" : "잠금"}
                     </button>
                   </li>
                 ))}
@@ -1070,25 +1208,29 @@ export default function App() {
             </div>
 
             <div className="panel panel-soft">
-              <h2 className="section-title">Docs in selected node</h2>
-              {selected ? <p className="section-subtitle">Node: {selected.label}</p> : null}
-              <ul className="simple-list">
-                {(selected?.documents ?? []).map((documentId) => (
-                  <li key={documentId}>
+              <h2 className="section-title">선택 노드의 문서</h2>
+              {selected ? <p className="section-subtitle">노드: {selected.label}</p> : null}
+              <ul className="simple-list tree-doc-list">
+                {selectedDocuments.map((document) => (
+                  <li className="tree-doc-item" key={document.id}>
+                    <Link className="tree-doc-link" to={`/documents/${document.id}`}>
+                      <span className="drag-doc-title">{document.title}</span>
+                      {document.title !== document.id ? <span className="drag-doc-id">{document.id}</span> : null}
+                    </Link>
                     <button
-                      className="btn btn-ghost drag-doc-btn"
+                      className="btn btn-ghost btn-small"
                       draggable
                       onDragEnd={() => {
                         setDraggingDocId(null);
                         setDragSourceNodeId(null);
                       }}
                       onDragStart={() => {
-                        setDraggingDocId(documentId);
+                        setDraggingDocId(document.id);
                         setDragSourceNodeId(selectedNode);
                       }}
                       type="button"
                     >
-                      Drag {documentId}
+                      드래그 이동
                     </button>
                   </li>
                 ))}
@@ -1100,10 +1242,10 @@ export default function App() {
         <section className="panel">
           <div className="two-col-grid">
             <div>
-              <h2 className="section-title">Feedback move</h2>
-              <p className="section-subtitle">Move a document to the currently selected node.</p>
+              <h2 className="section-title">이동 피드백</h2>
+              <p className="section-subtitle">문서를 현재 선택한 노드로 이동합니다.</p>
               <div className="field-row">
-                <input className="field-input field-grow" onChange={(e) => setDocIdForMove(e.target.value)} placeholder="document id" value={docIdForMove} />
+                <input className="field-input field-grow" onChange={(e) => setDocIdForMove(e.target.value)} placeholder="문서 식별자" value={docIdForMove} />
                 <button
                   className="btn btn-secondary"
                   disabled={!selectedNode || !docIdForMove}
@@ -1115,18 +1257,18 @@ export default function App() {
                   }}
                   type="button"
                 >
-                  Move
+                  이동
                 </button>
               </div>
             </div>
 
             <div>
-              <h2 className="section-title">Rename node</h2>
-              <p className="section-subtitle">Update label text and sync to feedback API.</p>
+              <h2 className="section-title">노드 이름 변경</h2>
+              <p className="section-subtitle">라벨을 수정하고 피드백 서비스와 동기화합니다.</p>
               <div className="field-stack">
-                <input className="field-input" onChange={(e) => setRenameNodeId(e.target.value)} placeholder="node id" value={renameNodeId} />
+                <input className="field-input" onChange={(e) => setRenameNodeId(e.target.value)} placeholder="노드 식별자" value={renameNodeId} />
                 <div className="field-row">
-                  <input className="field-input field-grow" onChange={(e) => setNewLabel(e.target.value)} placeholder="new label" value={newLabel} />
+                  <input className="field-input field-grow" onChange={(e) => setNewLabel(e.target.value)} placeholder="새 라벨" value={newLabel} />
                   <button
                     className="btn btn-secondary"
                     disabled={!renameNodeId || !newLabel.trim()}
@@ -1154,12 +1296,12 @@ export default function App() {
                         if (snapshot) {
                           setTree(snapshot);
                         }
-                        setTreeError(toUiError(e, "rename failed"));
+                        setTreeError(toUiError(e, "이름 변경에 실패했습니다"));
                       }
                     }}
                     type="button"
                   >
-                    Rename
+                    이름 변경
                   </button>
                 </div>
               </div>

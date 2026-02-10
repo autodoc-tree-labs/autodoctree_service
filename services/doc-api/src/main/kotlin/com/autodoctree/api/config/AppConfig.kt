@@ -64,6 +64,7 @@ data class SecurityFlags(
 @ConfigurationProperties(prefix = "tree")
 data class TreeProperties(
     val neighborTopK: Int,
+    val neighborMinSimilarity: Double,
     val maxClusterSize: Int,
     val personalizationDecay: Double,
     val personalizationMinScore: Double

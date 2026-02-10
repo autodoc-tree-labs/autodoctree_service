@@ -32,6 +32,7 @@ worker:
 
 tree:
   neighbor-top-k: 3
+  neighbor-min-similarity: 0.0
   max-cluster-size: 8
   personalization-decay: 0.85
   personalization-min-score: 0.8
