@@ -20,22 +20,19 @@
 - `web-admin`: 5173
 - `web-user`: 5174
 - `doc-api`: 8080 (권장)
-- (선택) OpenSearch: 9200, Redis: 6379, Postgres: 5432, MinIO: 9000/9001
+- (선택) OpenSearch: 59200, Redis: 56379, Postgres: 5432, MinIO: 9000/9001
 
 ## Quickstart
 
 1) infra
 ```bash
-POSTGRES_PORT=55432 OPENSEARCH_PORT=59200 REDIS_PORT=56379 MINIO_PORT=59000 MINIO_CONSOLE_PORT=59001 docker compose up -d
+docker compose up -d
 docker compose ps
 ```
 
 2) backend (IntelliJ)
 - `services/doc-api` Run Config (`com.autodoctree.api.DocApiApplicationKt`)
-- example env:
-  - `DB_PORT=55432`
-  - `REDIS_PORT=56379`
-  - `S3_ENDPOINT=http://localhost:59000`
+- 기본 포트 기준 추가 env 없이 실행 가능
 
 3) front
 ```bash

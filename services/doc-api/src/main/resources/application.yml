@@ -19,7 +19,7 @@ spring:
   data:
     redis:
       host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
+      port: ${REDIS_PORT:56379}
 
 management:
   endpoints:
@@ -44,7 +44,7 @@ storage:
 
 search:
   backend: ${SEARCH_BACKEND:opensearch}
-  opensearch-url: ${OPENSEARCH_URL:http://localhost:9200}
+  opensearch-url: ${OPENSEARCH_URL:http://localhost:59200}
   username: ${OPENSEARCH_USERNAME:admin}
   password: ${OPENSEARCH_PASSWORD:admin}
   index-alias: ${OPENSEARCH_INDEX_ALIAS:docs-active}

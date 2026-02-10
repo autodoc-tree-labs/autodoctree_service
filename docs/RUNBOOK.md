@@ -10,19 +10,19 @@
 
 ### Verify alias + template
 ```bash
-curl -s http://localhost:9200/_index_template/docs-template | jq
-curl -s http://localhost:9200/_alias/docs-active | jq
+curl -s http://localhost:59200/_index_template/docs-template | jq
+curl -s http://localhost:59200/_alias/docs-active | jq
 ```
 
 ### Reindex to a new versioned index
 1. Create destination index (example `docs-v1-000002`)
 ```bash
-curl -s -X PUT http://localhost:9200/docs-v1-000002 -H 'Content-Type: application/json' -d '{}'
+curl -s -X PUT http://localhost:59200/docs-v1-000002 -H 'Content-Type: application/json' -d '{}'
 ```
 
 2. Reindex from current alias
 ```bash
-curl -s -X POST http://localhost:9200/_reindex -H 'Content-Type: application/json' -d '{
+curl -s -X POST http://localhost:59200/_reindex -H 'Content-Type: application/json' -d '{
   \"source\": { \"index\": \"docs-active\" },
   \"dest\": { \"index\": \"docs-v1-000002\" }
 }'
@@ -30,7 +30,7 @@ curl -s -X POST http://localhost:9200/_reindex -H 'Content-Type: application/jso
 
 3. Switch write alias to the new index
 ```bash
-curl -s -X POST http://localhost:9200/_aliases -H 'Content-Type: application/json' -d '{
+curl -s -X POST http://localhost:59200/_aliases -H 'Content-Type: application/json' -d '{
   \"actions\": [
     { \"add\": { \"index\": \"docs-v1-000001\", \"alias\": \"docs-active\", \"is_write_index\": false } },
     { \"add\": { \"index\": \"docs-v1-000002\", \"alias\": \"docs-active\", \"is_write_index\": true } }
@@ -40,7 +40,7 @@ curl -s -X POST http://localhost:9200/_aliases -H 'Content-Type: application/jso
 
 4. Validate search and index updates
 ```bash
-curl -s \"http://localhost:9200/docs-active/_search?q=workspace_id:YOUR_WORKSPACE_ID\" | jq '.hits.total'
+curl -s \"http://localhost:59200/docs-active/_search?q=workspace_id:YOUR_WORKSPACE_ID\" | jq '.hits.total'
 ```
 
 ### Rollback

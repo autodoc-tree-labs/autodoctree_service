@@ -14,13 +14,13 @@ docker compose ps
 
 If default ports are already in use, run with overrides:
 ```bash
-POSTGRES_PORT=55432 OPENSEARCH_PORT=59200 REDIS_PORT=56379 MINIO_PORT=59000 MINIO_CONSOLE_PORT=59001 docker compose up -d
+POSTGRES_PORT=55432 OPENSEARCH_PORT=59201 REDIS_PORT=56380 MINIO_PORT=59000 MINIO_CONSOLE_PORT=59001 docker compose up -d
 ```
 
 Services:
 - Postgres: `localhost:5432`
-- OpenSearch: `localhost:9200`
-- Redis: `localhost:6379`
+- OpenSearch: `localhost:59200`
+- Redis: `localhost:56379`
 - MinIO API: `localhost:9000`
 - MinIO Console: `localhost:9001`
 
