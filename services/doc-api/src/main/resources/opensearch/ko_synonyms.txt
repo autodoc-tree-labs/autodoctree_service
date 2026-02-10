@@ -1,0 +1,5 @@
+# canonical, synonyms
+문서,도큐먼트
+정리,분류,폴더링
+연구,리서치,research
+임베딩,벡터

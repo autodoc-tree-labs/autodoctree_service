@@ -1,6 +1,7 @@
 package com.autodoctree.api.domain
 
 import com.autodoctree.api.config.TreeProperties
+import com.autodoctree.api.config.FeatureFlags
 import com.autodoctree.api.db.DocumentRow
 import com.autodoctree.api.db.EmbeddingRow
 import com.autodoctree.api.db.FeedbackEventRow
@@ -21,7 +22,7 @@ class TreeAlgorithmsTest {
     @Test
     fun `neighbor builder returns bounded topK adjacency`() {
         val registry = SimpleMeterRegistry()
-        val builder = NeighborBuilder(objectMapper, TreeLabeler(), registry)
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
         val docs = listOf(
             doc("doc-a", "alpha"),
             doc("doc-b", "beta"),
@@ -42,7 +43,7 @@ class TreeAlgorithmsTest {
     @Test
     fun `neighbor builder drops links below min similarity`() {
         val registry = SimpleMeterRegistry()
-        val builder = NeighborBuilder(objectMapper, TreeLabeler(), registry)
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
         val docs = listOf(
             doc("doc-a", "alpha"),
             doc("doc-b", "beta"),
@@ -64,7 +65,7 @@ class TreeAlgorithmsTest {
     @Test
     fun `neighbor builder uses lexical fallback for local stub embeddings`() {
         val registry = SimpleMeterRegistry()
-        val builder = NeighborBuilder(objectMapper, TreeLabeler(), registry)
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
         val docs = listOf(
             doc("doc-a", "사회 연구"),
             doc("doc-b", "과학 연구"),
@@ -85,7 +86,7 @@ class TreeAlgorithmsTest {
     @Test
     fun `neighbor builder unifies korean particle variants`() {
         val registry = SimpleMeterRegistry()
-        val builder = NeighborBuilder(objectMapper, TreeLabeler(), registry)
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
         val docs = listOf(
             doc("doc-a", "섹스"),
             doc("doc-b", "섹스와 성"),
@@ -105,7 +106,7 @@ class TreeAlgorithmsTest {
 
     @Test
     fun `clusterer splits oversized component`() {
-        val clusterer = TreeClusterer(SimpleMeterRegistry())
+        val clusterer = testClusterer(SimpleMeterRegistry())
         val docs = (1..9).map { index -> doc("doc-$index", "document $index") }
         val adjacency = docs.associate { d ->
             d.id to docs.filter { it.id != d.id }.map { NeighborLink(it.id, 0.7) }
@@ -119,7 +120,7 @@ class TreeAlgorithmsTest {
 
     @Test
     fun `labeler returns non empty labels`() {
-        val labeler = TreeLabeler()
+        val labeler = testLabeler()
         val docs = listOf(
             doc("doc-a", "billing invoice payment"),
             doc("doc-b", "billing settlement payment"),
@@ -139,7 +140,7 @@ class TreeAlgorithmsTest {
 
     @Test
     fun `labeler keeps labels conservative for mixed clusters`() {
-        val labeler = TreeLabeler()
+        val labeler = testLabeler()
         val docs = listOf(
             doc("doc-a", "사회 연구"),
             doc("doc-b", "과학 연구"),
@@ -149,12 +150,15 @@ class TreeAlgorithmsTest {
 
         val labels = labeler.labelClusters(docs, clusters)
 
-        assertEquals("연구", labels["cluster-1"])
+        val label = labels["cluster-1"] ?: ""
+        assertTrue(label.contains("연구"))
+        assertFalse(label.contains("--"))
+        assertTrue(label.length <= 20)
     }
 
     @Test
     fun `labeler removes numeric noise from singleton labels`() {
-        val labeler = TreeLabeler()
+        val labeler = testLabeler()
         val docs = listOf(doc("doc-a", "runtime 1770532490 open"))
         val clusters = listOf(TreeCluster("cluster-1", listOf("doc-a")))
 
@@ -166,7 +170,7 @@ class TreeAlgorithmsTest {
 
     @Test
     fun `labeler tokenizes korean text`() {
-        val labeler = TreeLabeler()
+        val labeler = testLabeler()
 
         val tokens = labeler.tokenize("사회 연구 문서 자동 분류 테스트")
 
@@ -179,7 +183,7 @@ class TreeAlgorithmsTest {
 
     @Test
     fun `labeler normalizes korean particles`() {
-        val labeler = TreeLabeler()
+        val labeler = testLabeler()
 
         val tokens = labeler.tokenize("섹스와 과학은 연구를 다룹니다")
 
@@ -192,24 +196,47 @@ class TreeAlgorithmsTest {
     }
 
     @Test
+    fun `fallback tokenizer creates ngram candidates`() {
+        val tokenizer = FallbackTokenizer()
+
+        val tokens = tokenizer.tokenize("과학 연구 자동 분류")
+
+        assertTrue(tokens.contains("과학-연구"))
+        assertTrue(tokens.contains("연구-자동"))
+        assertTrue(tokens.contains("과학-연구-자동"))
+    }
+
+    @Test
+    fun `labeler filters forbidden terms from cluster label`() {
+        val labeler = testLabeler()
+        val docs = listOf(
+            doc("doc-a", "섹스 관련 자료"),
+            doc("doc-b", "섹스 연구 노트")
+        )
+        val clusters = listOf(TreeCluster("cluster-1", docs.map { it.id }))
+
+        val label = labeler.labelClusters(docs, clusters).getValue("cluster-1")
+
+        assertFalse(label.contains("섹스"))
+        assertTrue(label.isNotBlank())
+    }
+
+    @Test
+    fun `labeler merges similar labels`() {
+        val labeler = testLabeler()
+
+        val mapping = labeler.mergeSimilarLabels(listOf("연구", "리서치", "연구-문학"))
+
+        assertEquals(mapping["연구"], mapping["리서치"])
+        assertNotNull(mapping["연구-문학"])
+    }
+
+    @Test
     fun `personalization model prefers moved label for similar text`() {
-        val labeler = TreeLabeler()
+        val labeler = testLabeler()
         val engine = TreePersonalizationEngine(
             objectMapper = objectMapper,
-            treeProperties = TreeProperties(
-                neighborTopK = 3,
-                neighborMinSimilarity = 0.0,
-                neighborNormalize = true,
-                maxClusterSize = 10,
-                minClusterSize = 2,
-                communityResolution = 1.0,
-                personalizationDecay = 0.9,
-                personalizationMinScore = 0.2,
-                fusionSemanticWeight = 0.8,
-                fusionLexicalWeight = 0.2,
-                fusionLexicalGate = 0.35,
-                otherClusterScoreThreshold = 0.32
-            )
+            treeProperties = testTreeProperties()
         )
 
         val docs = listOf(
@@ -252,6 +279,54 @@ class TreeAlgorithmsTest {
         assertNotNull(preferred)
         assertEquals("billing", preferred)
         assertFalse(model.hasSignalFor("missing-doc"))
+    }
+
+    private fun testLabeler(registry: SimpleMeterRegistry = SimpleMeterRegistry()): TreeLabeler {
+        return TreeLabeler(
+            tokenizer = FallbackTokenizer(),
+            featureFlags = testFeatureFlags(),
+            meterRegistry = registry
+        )
+    }
+
+    private fun testClusterer(registry: SimpleMeterRegistry = SimpleMeterRegistry()): TreeClusterer {
+        return TreeClusterer(
+            treeProperties = testTreeProperties(),
+            featureFlags = testFeatureFlags(),
+            meterRegistry = registry
+        )
+    }
+
+    private fun testTreeProperties(): TreeProperties {
+        return TreeProperties(
+            neighborTopK = 3,
+            neighborMinSimilarity = 0.0,
+            neighborNormalize = true,
+            maxClusterSize = 10,
+            minClusterSize = 2,
+            communityResolution = 1.0,
+            personalizationDecay = 0.9,
+            personalizationMinScore = 0.2,
+            fusionSemanticWeight = 0.8,
+            fusionLexicalWeight = 0.2,
+            fusionLexicalGate = 0.35,
+            otherClusterScoreThreshold = 0.32
+        )
+    }
+
+    private fun testFeatureFlags(): FeatureFlags {
+        return FeatureFlags(
+            autoTree = true,
+            explain = true,
+            hybridSearch = false,
+            embeddingOllama = false,
+            labelQualityFilter = true,
+            communityClustering = true,
+            noriTokenizer = false,
+            feedbackRoutingV2 = true,
+            userRulesV1 = false,
+            adminTreeDebug = true
+        )
     }
 
     private fun doc(id: String, text: String): DocumentRow {

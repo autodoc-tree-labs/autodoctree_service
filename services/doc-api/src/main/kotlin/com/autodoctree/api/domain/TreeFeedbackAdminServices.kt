@@ -108,7 +108,11 @@ class TreeService(
                 documents = remaining,
                 embeddings = embeddingByDocumentId,
                 topK = treeProperties.neighborTopK,
-                minSimilarity = treeProperties.neighborMinSimilarity
+                minSimilarity = treeProperties.neighborMinSimilarity,
+                normalize = treeProperties.neighborNormalize,
+                semanticWeight = treeProperties.fusionSemanticWeight,
+                lexicalWeight = treeProperties.fusionLexicalWeight,
+                lexicalGate = treeProperties.fusionLexicalGate
             )
 
             val clusters = treeClusterer.cluster(
@@ -117,13 +121,15 @@ class TreeService(
                 maxClusterSize = treeProperties.maxClusterSize
             )
 
-            val labelsByCluster = treeLabeler.labelClusters(
+            val rawLabelsByCluster = treeLabeler.labelClusters(
                 workspaceDocuments = documents,
                 clusters = clusters
             )
+            val mergedLabelMap = treeLabeler.mergeSimilarLabels(rawLabelsByCluster.values)
 
             clusters.forEach { cluster ->
-                val label = labelsByCluster[cluster.id] ?: "general"
+                val rawLabel = rawLabelsByCluster[cluster.id] ?: "general"
+                val label = mergedLabelMap[rawLabel] ?: rawLabel
                 cluster.documentIds.forEach { docId ->
                     assignment[docId] = label
                 }

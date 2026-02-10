@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import jakarta.annotation.PostConstruct
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.core.io.ClassPathResource
 import org.springframework.stereotype.Component
 import java.net.URI
 import java.net.URLEncoder
@@ -115,6 +116,8 @@ class OpenSearchTenantSearchClient(
     private val missingFilterCounter = meterRegistry.counter("security.os_missing_tenant_filter_total")
     private val requestFailureCounter = meterRegistry.counter("search.opensearch.request_failure_total")
     private val baseUrl = searchProperties.opensearchUrl.trimEnd('/')
+    private val noriUserDictionaryRules = readResourceRules("opensearch/nori_userdict.txt")
+    private val synonymRules = readResourceRules("opensearch/ko_synonyms.txt")
 
     @PostConstruct
     fun bootstrap() {
@@ -234,19 +237,54 @@ class OpenSearchTenantSearchClient(
     }
 
     private fun ensureTemplate() {
+        val analysisSettings = mapOf(
+            "tokenizer" to mapOf(
+                "ko_nori_tokenizer" to mapOf(
+                    "type" to "nori_tokenizer",
+                    "decompound_mode" to "mixed",
+                    "user_dictionary_rules" to noriUserDictionaryRules
+                )
+            ),
+            "filter" to mapOf(
+                "ko_nori_pos_filter" to mapOf(
+                    "type" to "nori_part_of_speech",
+                    "stoptags" to listOf("E", "IC", "J", "MAG", "MAJ", "MM", "SP", "SSC", "SSO", "SC", "SE", "XPN", "XSA", "XSN", "XSV", "UNA", "NA", "VSV")
+                ),
+                "ko_synonym_filter" to mapOf(
+                    "type" to "synonym",
+                    "synonyms" to synonymRules
+                )
+            ),
+            "analyzer" to mapOf(
+                "ko_nori" to mapOf(
+                    "type" to "custom",
+                    "tokenizer" to "ko_nori_tokenizer",
+                    "filter" to listOf("lowercase", "ko_nori_pos_filter", "ko_synonym_filter")
+                )
+            )
+        )
         val templatePayload = mapOf(
             "index_patterns" to listOf("${searchAliasPrefix()}-v1-*"),
             "template" to mapOf(
                 "settings" to mapOf(
                     "number_of_shards" to 1,
-                    "number_of_replicas" to 0
+                    "number_of_replicas" to 0,
+                    "analysis" to analysisSettings
                 ),
                 "mappings" to mapOf(
                     "properties" to mapOf(
                         "workspace_id" to mapOf("type" to "keyword"),
                         "document_id" to mapOf("type" to "keyword"),
-                        "title" to mapOf("type" to "text"),
-                        "body" to mapOf("type" to "text"),
+                        "title" to mapOf(
+                            "type" to "text",
+                            "analyzer" to "ko_nori",
+                            "search_analyzer" to "ko_nori"
+                        ),
+                        "body" to mapOf(
+                            "type" to "text",
+                            "analyzer" to "ko_nori",
+                            "search_analyzer" to "ko_nori"
+                        ),
                         "created_at" to mapOf("type" to "date"),
                         "updated_at" to mapOf("type" to "date")
                     )
@@ -390,5 +428,18 @@ class OpenSearchTenantSearchClient(
         }
 
         return httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString())
+    }
+
+    private fun readResourceRules(path: String): List<String> {
+        val resource = ClassPathResource(path)
+        if (!resource.exists()) {
+            return emptyList()
+        }
+        return resource.inputStream.bufferedReader().useLines { lines ->
+            lines.map { it.trim() }
+                .filter { it.isNotBlank() }
+                .filterNot { it.startsWith("#") }
+                .toList()
+        }
     }
 }

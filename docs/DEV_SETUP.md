@@ -80,8 +80,25 @@ Important flags:
 - `feature.auto-tree`
 - `feature.explain`
 - `feature.hybrid-search`
+- `feature.nori-tokenizer`
+- `feature.label-quality-filter`
+- `feature.community-clustering`
 - `security.os-tenant-assert`
 - `TREE_NEIGHBOR_MIN_SIMILARITY` (기본 `0.8`, 값이 높을수록 트리 노드가 더 잘 분리됨)
+
+## 5-1. OpenSearch ko_nori analyzer check
+`_index_template`는 서버 시작 시 자동 갱신됩니다. analyzer 확인:
+```bash
+curl -s -X POST http://localhost:59200/_analyze \
+  -H 'Content-Type: application/json' \
+  -d '{"analyzer":"ko_nori","text":"사랑하는 문서를 자동 분류합니다"}'
+```
+
+템플릿 변경 후 재인덱싱이 필요하면:
+```bash
+curl -s -X DELETE http://localhost:59200/docs-active
+```
+그 뒤 `doc-api` 재시작 시 템플릿/인덱스/alias가 다시 bootstrap 됩니다.
 
 ## 6. Security notes
 - Do not log document body, extracted text, chunk text, or presigned URLs.
