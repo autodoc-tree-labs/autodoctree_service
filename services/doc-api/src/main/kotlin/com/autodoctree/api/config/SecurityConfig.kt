@@ -10,6 +10,9 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.config.http.SessionCreationPolicy
 import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
+import org.springframework.web.cors.CorsConfiguration
+import org.springframework.web.cors.CorsConfigurationSource
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource
 
 @Configuration
 @EnableWebSecurity
@@ -21,6 +24,7 @@ class SecurityConfig(
     @Bean
     fun securityFilterChain(http: HttpSecurity): SecurityFilterChain {
         http
+            .cors { }
             .csrf { it.disable() }
             .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
             .authorizeHttpRequests {
@@ -38,5 +42,21 @@ class SecurityConfig(
             .addFilterBefore(authFilter, UsernamePasswordAuthenticationFilter::class.java)
             .addFilterAfter(workspaceContextFilter, AuthFilter::class.java)
         return http.build()
+    }
+
+    @Bean
+    fun corsConfigurationSource(): CorsConfigurationSource {
+        val cors = CorsConfiguration().apply {
+            // Local web-admin/web-user dev servers.
+            allowedOriginPatterns = listOf("http://localhost:*", "http://127.0.0.1:*")
+            allowedMethods = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+            allowedHeaders = listOf("*")
+            exposedHeaders = listOf("X-Request-Id", "X-Trace-Id")
+            allowCredentials = true
+            maxAge = 3600
+        }
+        return UrlBasedCorsConfigurationSource().apply {
+            registerCorsConfiguration("/**", cors)
+        }
     }
 }
