@@ -24,6 +24,8 @@ search:
 
 security:
   os-tenant-assert: true
+  log-sanitizer-enabled: true
+  log-max-string-length: 240
 
 feature:
   embedding-ollama: false

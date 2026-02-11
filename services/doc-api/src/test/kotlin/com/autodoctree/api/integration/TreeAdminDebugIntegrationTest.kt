@@ -454,6 +454,48 @@ class TreeAdminDebugIntegrationTest {
     }
 
     @Test
+    fun `admin audit endpoint supports filter sort and structured payload`() {
+        mockMvc.perform(
+            post("/api/v1/admin/jobs/retry")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "document_id" to debugDocId,
+                            "stage" to "EMBED"
+                        )
+                    )
+                )
+        ).andExpect(status().isNoContent)
+
+        val response = mockMvc.perform(
+            get("/api/v1/admin/audit")
+                .param("type", "admin.retry")
+                .param("actor_user_id", ownerId)
+                .param("q", debugDocId)
+                .param("sort", "asc")
+                .param("limit", "20")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.sort").value("asc"))
+            .andExpect(jsonPath("$.items[0].action").value("admin.retry"))
+            .andExpect(jsonPath("$.items[0].payload.document_id").value(debugDocId))
+            .andReturn()
+            .response
+            .contentAsString
+
+        val items = objectMapper.readTree(response).path("items")
+        val matched = items.any { item ->
+            item.path("action").asText() == "admin.retry" &&
+                item.path("payload").path("document_id").asText() == debugDocId
+        }
+        assertTrue(matched, "Expected filtered audit list to include admin.retry payload")
+    }
+
+    @Test
     fun `question inbox can answer cluster choice question`() {
         val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
         val membership = treeRepository.findMembershipByDocInSnapshot(workspaceId, active.id, debugDocId)

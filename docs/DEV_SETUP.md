@@ -138,6 +138,8 @@ Important flags:
 - `feature.user-rules-v1`
 - `feature.admin-tree-debug`
 - `security.os-tenant-assert`
+- `security.log-sanitizer-enabled`
+- `security.log-max-string-length`
 - `TREE_NEIGHBOR_MIN_SIMILARITY` (기본 `0.8`, 값이 높을수록 트리 노드가 더 잘 분리됨)
 - `TREE_NEIGHBOR_MUTUAL_KNN_REQUIRED`
 - `TREE_NEIGHBOR_SNN_THRESHOLD`
@@ -202,3 +204,4 @@ curl -s -X DELETE http://localhost:59200/docs-active
 ## 6. Security notes
 - Do not log document body, extracted text, chunk text, or presigned URLs.
 - Tenant-scoped endpoints require `X-Workspace-Id`.
+- `SECURITY_LOG_SANITIZER_ENABLED=true` / `SECURITY_LOG_MAX_STRING_LENGTH=240`로 감사 로그 payload sanitization을 기본 강제한다.

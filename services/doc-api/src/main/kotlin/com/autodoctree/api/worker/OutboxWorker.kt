@@ -218,7 +218,7 @@ class OutboxWorker(
                 val text: String
                 val qualityFlags: Set<String>
                 if (!attachmentObjectKey.isNullOrBlank()) {
-                    val extracted = extractTextFromObject(attachmentObjectKey, attachmentContentType)
+                    val extracted = extractTextFromObject(workspaceId, attachmentObjectKey, attachmentContentType)
                     if (extracted.failureReason != null) {
                         throw IllegalStateException(extracted.failureReason)
                     }
@@ -408,8 +408,8 @@ class OutboxWorker(
         }
     }
 
-    private fun extractTextFromObject(objectKey: String, contentType: String?): ExtractionResult {
-        val bytes = s3StorageService.readObjectBytes(objectKey)
+    private fun extractTextFromObject(workspaceId: String, objectKey: String, contentType: String?): ExtractionResult {
+        val bytes = s3StorageService.readObjectBytes(workspaceId, objectKey)
         return textExtractor.extract(bytes, contentType)
     }
 }

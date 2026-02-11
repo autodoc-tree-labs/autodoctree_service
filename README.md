@@ -17,7 +17,7 @@
 - (옵션) concept prototype 기반 증분 선배치 + objective optimizer(변경비용 정규화)
 - Explain(왜 여기에?) + Drag&Drop 피드백(move/rename) + 개인화 v1(간단 규칙/가중치)
 - 멀티테넌시 격리: API/DB/OpenSearch/Redis/S3까지 **fail-closed**
-- 운영: 재처리/감사로그/관측성/런북
+- 운영: 재처리/감사로그(필터/정렬)/관측성/런북
 
 ## Ports (local)
 - `web-admin`: 5173

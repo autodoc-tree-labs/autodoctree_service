@@ -2871,12 +2871,15 @@ class AdminService(
     private val userRuleMatcher: UserRuleMatcher,
     private val treeProperties: TreeProperties,
     private val featureFlags: FeatureFlags,
+    private val objectMapper: ObjectMapper,
     private val meterRegistry: MeterRegistry
 ) {
     private val debugNeighborsCalledCounter = meterRegistry.counter("debug_neighbors_called_total")
     private val debugDocumentCalledCounter = meterRegistry.counter("debug_document_called_total")
     private val debugClusterCalledCounter = meterRegistry.counter("debug_cluster_called_total")
     private val debugRebuildCalledCounter = meterRegistry.counter("debug_rebuild_called_total")
+    private val auditListCounter = meterRegistry.counter("admin.audit.list_total")
+    private val auditListSizeSummary = meterRegistry.summary("admin.audit.list_size")
 
     fun listJobs(context: WorkspaceContext, documentId: String?): Map<String, Any?> {
         requireOwner(context)
@@ -2924,19 +2927,54 @@ class AdminService(
         auditService.write(context.workspaceId, context.userId, "admin.retry", payload)
     }
 
-    fun listAudit(context: WorkspaceContext, type: String?): Map<String, Any?> {
+    fun listAudit(
+        context: WorkspaceContext,
+        type: String?,
+        actorUserId: String?,
+        query: String?,
+        sort: String?,
+        limit: Int
+    ): Map<String, Any?> {
         requireOwner(context)
-        val items = auditLogRepository.listByWorkspace(context.workspaceId, type).map {
+        val normalizedSort = when (sort?.trim()?.lowercase()) {
+            null, "", "desc" -> "desc"
+            "asc" -> "asc"
+            else -> throw BadRequestException("sort must be asc or desc")
+        }
+        val boundedLimit = limit.coerceIn(1, 500)
+        val items = auditLogRepository.listByWorkspace(
+            workspaceId = context.workspaceId,
+            type = type,
+            actorUserId = actorUserId,
+            query = query,
+            sort = normalizedSort,
+            limit = boundedLimit
+        ).map {
             mapOf(
                 "id" to it.id,
                 "workspace_id" to it.workspaceId,
                 "actor_user_id" to it.actorUserId,
                 "action" to it.action,
-                "payload" to it.payloadJson,
+                "payload" to parseAuditPayload(it.payloadJson),
                 "created_at" to it.createdAt.toString()
             )
         }
-        return mapOf("items" to items)
+        auditListCounter.increment()
+        auditListSizeSummary.record(items.size.toDouble())
+        return mapOf(
+            "items" to items,
+            "sort" to normalizedSort,
+            "limit" to boundedLimit
+        )
+    }
+
+    private fun parseAuditPayload(payloadJson: String): Map<String, Any?> {
+        return runCatching {
+            val raw = objectMapper.readValue(payloadJson, Map::class.java) as Map<*, *>
+            raw.entries.associate { (key, value) -> key.toString() to value }
+        }.getOrElse {
+            mapOf("raw" to payloadJson.take(240))
+        }
     }
 
     fun debugNeighbors(context: WorkspaceContext, documentId: String): Map<String, Any?> {

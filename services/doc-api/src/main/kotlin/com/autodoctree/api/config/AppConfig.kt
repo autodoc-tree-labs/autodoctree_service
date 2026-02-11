@@ -68,7 +68,9 @@ data class FeatureFlags(
 
 @ConfigurationProperties(prefix = "security")
 data class SecurityFlags(
-    val osTenantAssert: Boolean
+    val osTenantAssert: Boolean,
+    val logSanitizerEnabled: Boolean = true,
+    val logMaxStringLength: Int = 240
 )
 
 @ConfigurationProperties(prefix = "tree")

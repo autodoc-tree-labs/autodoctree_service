@@ -2005,13 +2005,44 @@ class AuditLogRepository(private val jdbcTemplate: JdbcTemplate) {
     }
 
     fun listByWorkspace(workspaceId: String, type: String?): List<AuditLogRow> {
+        return listByWorkspace(
+            workspaceId = workspaceId,
+            type = type,
+            actorUserId = null,
+            query = null,
+            sort = "desc",
+            limit = 300
+        )
+    }
+
+    fun listByWorkspace(
+        workspaceId: String,
+        type: String?,
+        actorUserId: String?,
+        query: String?,
+        sort: String?,
+        limit: Int
+    ): List<AuditLogRow> {
         val args = mutableListOf<Any>(workspaceId)
         val sql = StringBuilder("SELECT * FROM audit_log WHERE workspace_id = ?")
         if (!type.isNullOrBlank()) {
             sql.append(" AND action = ?")
-            args.add(type)
+            args.add(type.trim())
         }
-        sql.append(" ORDER BY created_at DESC LIMIT 300")
+        if (!actorUserId.isNullOrBlank()) {
+            sql.append(" AND actor_user_id = ?")
+            args.add(actorUserId.trim())
+        }
+        if (!query.isNullOrBlank()) {
+            val like = "%${query.trim().lowercase()}%"
+            sql.append(" AND (LOWER(action) LIKE ? OR LOWER(actor_user_id) LIKE ? OR LOWER(payload_json) LIKE ?)")
+            args.add(like)
+            args.add(like)
+            args.add(like)
+        }
+        val sortDirection = if (sort.equals("asc", ignoreCase = true)) "ASC" else "DESC"
+        sql.append(" ORDER BY created_at $sortDirection, id $sortDirection LIMIT ?")
+        args.add(limit.coerceIn(1, 500))
         return jdbcTemplate.query(sql.toString(), mapper, *args.toTypedArray())
     }
 }

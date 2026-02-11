@@ -17,15 +17,18 @@ type JobItem = {
   created_at: string;
 };
 type JobsResponse = { items: JobItem[] };
+type AuditItem = {
+  id: string;
+  action: string;
+  workspace_id: string;
+  actor_user_id: string;
+  created_at: string;
+  payload: Record<string, unknown>;
+};
 type AuditResponse = {
-  items: Array<{
-    id: string;
-    action: string;
-    workspace_id: string;
-    actor_user_id: string;
-    created_at: string;
-    payload: Record<string, unknown>;
-  }>;
+  items: AuditItem[];
+  sort: "asc" | "desc";
+  limit: number;
 };
 type MaskedText = {
   hash: string;
@@ -449,12 +452,44 @@ export default function App() {
 
   function AuditPage() {
     const [type, setType] = useState("");
-    const [items, setItems] = useState<AuditResponse["items"]>([]);
+    const [actorUserId, setActorUserId] = useState("");
+    const [query, setQuery] = useState("");
+    const [sort, setSort] = useState<"desc" | "asc">("desc");
+    const [limit, setLimit] = useState("100");
+    const [items, setItems] = useState<AuditItem[]>([]);
+    const [expandedId, setExpandedId] = useState<string | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
     const load = async () => {
-      const query = type ? `?type=${encodeURIComponent(type)}` : "";
-      const response = await api.request<AuditResponse>(`/admin/audit${query}`, {}, true);
-      setItems(response.items);
+      if (!state.workspaceId) {
+        setItems([]);
+        setExpandedId(null);
+        return;
+      }
+      setLoading(true);
+      setError(null);
+      try {
+        const params = new URLSearchParams();
+        if (type.trim()) {
+          params.set("type", type.trim());
+        }
+        if (actorUserId.trim()) {
+          params.set("actor_user_id", actorUserId.trim());
+        }
+        if (query.trim()) {
+          params.set("q", query.trim());
+        }
+        params.set("sort", sort);
+        const boundedLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+        params.set("limit", String(boundedLimit));
+        const response = await api.request<AuditResponse>(`/admin/audit?${params.toString()}`, {}, true);
+        setItems(response.items);
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "감사 로그를 불러오지 못했습니다."));
+      } finally {
+        setLoading(false);
+      }
     };
 
     useEffect(() => {
@@ -464,9 +499,71 @@ export default function App() {
     return (
       <Layout>
         <h2>감사 로그</h2>
-        <input value={type} onChange={(e) => setType(e.target.value)} placeholder="액션 타입" />
-        <button onClick={() => void load()}>필터</button>
-        <pre>{JSON.stringify(items, null, 2)}</pre>
+        <p>워크스페이스 경계 내 이벤트만 조회됩니다. payload는 민감정보 차단 정책이 적용됩니다.</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8, marginBottom: 10 }}>
+          <input value={type} onChange={(e) => setType(e.target.value)} placeholder="action (예: admin.retry)" />
+          <input value={actorUserId} onChange={(e) => setActorUserId(e.target.value)} placeholder="actor_user_id" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="전체 검색(action/payload)" />
+          <select value={sort} onChange={(e) => setSort(e.target.value as "desc" | "asc")}>
+            <option value="desc">최신순</option>
+            <option value="asc">오래된순</option>
+          </select>
+          <select value={limit} onChange={(e) => setLimit(e.target.value)}>
+            <option value="50">50개</option>
+            <option value="100">100개</option>
+            <option value="200">200개</option>
+            <option value="300">300개</option>
+          </select>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <button onClick={() => void load()} disabled={loading}>
+            {loading ? "조회 중..." : "조회"}
+          </button>
+          <span>총 {items.length}건</span>
+        </div>
+        {error ? <div style={{ border: "1px solid #d33", background: "#fff3f3", padding: 8, marginBottom: 12 }}>{error}</div> : null}
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: "6px 4px" }}>시각</th>
+              <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: "6px 4px" }}>액션</th>
+              <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: "6px 4px" }}>행위자</th>
+              <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: "6px 4px" }}>워크스페이스</th>
+              <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: "6px 4px" }}>payload 요약</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => {
+              const isOpen = expandedId === item.id;
+              const preview = Object.entries(item.payload)
+                .slice(0, 3)
+                .map(([key, value]) => `${key}=${String(value)}`)
+                .join(", ");
+              return (
+                <tr key={item.id}>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px", whiteSpace: "nowrap" }}>{item.created_at}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{item.action}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{item.actor_user_id}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{item.workspace_id}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>
+                    <div>{preview || "-"}</div>
+                    <button onClick={() => setExpandedId(isOpen ? null : item.id)}>{isOpen ? "접기" : "상세"}</button>
+                    {isOpen ? (
+                      <pre style={{ marginTop: 6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{JSON.stringify(item.payload, null, 2)}</pre>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+            {items.length === 0 ? (
+              <tr>
+                <td colSpan={5} style={{ padding: "10px 4px" }}>
+                  조회 결과가 없습니다.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
       </Layout>
     );
   }

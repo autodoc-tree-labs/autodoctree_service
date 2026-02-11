@@ -67,6 +67,8 @@ feature:
 
 security:
   os-tenant-assert: true
+  log-sanitizer-enabled: ${SECURITY_LOG_SANITIZER_ENABLED:true}
+  log-max-string-length: ${SECURITY_LOG_MAX_STRING_LENGTH:240}
 
 worker:
   poll-interval-ms: 2000

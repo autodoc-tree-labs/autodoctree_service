@@ -341,7 +341,33 @@ Query: `document_id` optional
 ```
 
 ## GET /admin/audit
-Query: `type`, `from`, `to`
+Query:
+- `type` (optional)
+- `actor_user_id` (optional)
+- `q` (optional, action/actor/payload text match)
+- `sort` (optional, `desc|asc`, default `desc`)
+- `limit` (optional, `1..500`, default `100`)
+
+Response (example):
+```json
+{
+  "items": [
+    {
+      "id": "audit_1",
+      "workspace_id": "ws_1",
+      "actor_user_id": "user_1",
+      "action": "admin.retry",
+      "payload": {
+        "document_id": "doc_1",
+        "stage": "EMBED"
+      },
+      "created_at": "2026-02-11T11:20:30"
+    }
+  ],
+  "sort": "desc",
+  "limit": 100
+}
+```
 
 ## GET /admin/tree/policy
 Response (example):

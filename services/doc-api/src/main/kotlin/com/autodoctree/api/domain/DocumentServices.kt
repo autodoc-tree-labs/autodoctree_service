@@ -4,6 +4,7 @@ import com.autodoctree.api.db.AttachmentRepository
 import com.autodoctree.api.db.DocumentRepository
 import com.autodoctree.api.db.PipelineStatusRepository
 import com.autodoctree.api.infra.BadRequestException
+import com.autodoctree.api.infra.LogSanitizer
 import com.autodoctree.api.infra.NotFoundException
 import com.autodoctree.api.infra.requireEditor
 import com.autodoctree.api.search.SearchSpec
@@ -11,6 +12,7 @@ import com.autodoctree.api.search.TenantSearchClient
 import com.autodoctree.api.storage.S3StorageService
 import com.autodoctree.api.tenant.WorkspaceContext
 import com.fasterxml.jackson.databind.ObjectMapper
+import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.LocalDateTime
@@ -18,15 +20,21 @@ import java.time.LocalDateTime
 @Service
 class AuditService(
     private val auditLogRepository: com.autodoctree.api.db.AuditLogRepository,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    private val logSanitizer: LogSanitizer,
+    meterRegistry: MeterRegistry
 ) {
+    private val auditEventCounter = meterRegistry.counter("audit_event_total")
+
     fun write(workspaceId: String, actorUserId: String, action: String, payload: Map<String, Any?>) {
+        val sanitizedPayload = logSanitizer.sanitize(payload)
         auditLogRepository.insert(
             workspaceId,
             actorUserId,
             action,
-            objectMapper.writeValueAsString(payload)
+            objectMapper.writeValueAsString(sanitizedPayload)
         )
+        auditEventCounter.increment()
     }
 }
 
@@ -225,6 +233,7 @@ class AttachmentService(
             checksumSha256 = checksumSha256
         )
         val presigned = s3StorageService.presignPutObject(
+            workspaceId = context.workspaceId,
             objectKey = attachment.objectKey,
             contentType = contentType,
             expiresInSeconds = 900
@@ -251,6 +260,7 @@ class AttachmentService(
     fun complete(context: WorkspaceContext, attachmentId: String) {
         requireEditor(context)
         val attachment = attachmentRepository.findByWorkspaceAndId(context.workspaceId, attachmentId) ?: throw NotFoundException()
+        s3StorageService.assertWorkspaceObjectKey(context.workspaceId, attachment.objectKey)
         attachmentRepository.updateCompleted(context.workspaceId, attachmentId)
         outboxService.enqueue(
             workspaceId = context.workspaceId,

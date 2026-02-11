@@ -428,10 +428,14 @@ class AdminController(
     @GetMapping("/audit")
     fun audit(
         request: HttpServletRequest,
-        @RequestParam(required = false, name = "type") type: String?
+        @RequestParam(required = false, name = "type") type: String?,
+        @RequestParam(required = false, name = "actor_user_id") actorUserId: String?,
+        @RequestParam(required = false, name = "q") query: String?,
+        @RequestParam(required = false, name = "sort", defaultValue = "desc") sort: String,
+        @RequestParam(required = false, name = "limit", defaultValue = "100") limit: Int
     ): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)
-        return adminService.listAudit(context, type)
+        return adminService.listAudit(context, type, actorUserId, query, sort, limit)
     }
 
     @GetMapping("/tree/debug/neighbors")

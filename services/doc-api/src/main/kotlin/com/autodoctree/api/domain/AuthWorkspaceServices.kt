@@ -1,7 +1,6 @@
 package com.autodoctree.api.domain
 
 import com.autodoctree.api.config.AuthProperties
-import com.autodoctree.api.db.AuditLogRepository
 import com.autodoctree.api.db.MembershipRepository
 import com.autodoctree.api.db.RefreshTokenRepository
 import com.autodoctree.api.db.UserRepository
@@ -15,7 +14,6 @@ import com.autodoctree.api.security.AuthTokens
 import com.autodoctree.api.security.AuthUser
 import com.autodoctree.api.security.JwtService
 import com.autodoctree.api.tenant.WorkspaceContext
-import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -108,18 +106,20 @@ class WorkspaceService(
     private val membershipRepository: MembershipRepository,
     private val userRepository: UserRepository,
     private val passwordEncoder: PasswordEncoder,
-    private val auditLogRepository: AuditLogRepository,
-    private val objectMapper: ObjectMapper
+    private val auditService: AuditService
 ) {
     @Transactional
     fun createWorkspace(userId: String, name: String): Map<String, String> {
         val workspace = workspaceRepository.create(name, userId)
         membershipRepository.create(workspace.id, userId, "OWNER")
-        auditLogRepository.insert(
-            workspace.id,
-            userId,
-            "workspace.created",
-            objectMapper.writeValueAsString(mapOf("workspace_id" to workspace.id, "name" to name))
+        auditService.write(
+            workspaceId = workspace.id,
+            actorUserId = userId,
+            action = "workspace.created",
+            payload = mapOf(
+                "workspace_id" to workspace.id,
+                "name" to name
+            )
         )
         return mapOf("id" to workspace.id, "name" to workspace.name)
     }
@@ -164,16 +164,14 @@ class WorkspaceService(
         } else {
             membershipRepository.updateRole(workspaceId, user.id, role)
         }
-        auditLogRepository.insert(
-            workspaceId,
-            context.userId,
-            "membership.changed",
-            objectMapper.writeValueAsString(
-                mapOf(
-                    "target_user_id" to user.id,
-                    "email" to email,
-                    "role" to role
-                )
+        auditService.write(
+            workspaceId = workspaceId,
+            actorUserId = context.userId,
+            action = "membership.changed",
+            payload = mapOf(
+                "target_user_id" to user.id,
+                "email" to email,
+                "role" to role
             )
         )
     }
@@ -190,15 +188,13 @@ class WorkspaceService(
             return
         }
         membershipRepository.updateRole(workspaceId, userId, role)
-        auditLogRepository.insert(
-            workspaceId,
-            context.userId,
-            "membership.role_updated",
-            objectMapper.writeValueAsString(
-                mapOf(
-                    "target_user_id" to userId,
-                    "role" to role
-                )
+        auditService.write(
+            workspaceId = workspaceId,
+            actorUserId = context.userId,
+            action = "membership.role_updated",
+            payload = mapOf(
+                "target_user_id" to userId,
+                "role" to role
             )
         )
     }
@@ -215,15 +211,13 @@ class WorkspaceService(
         val exists = membershipRepository.findRoleByWorkspaceAndUser(workspaceId, userId)
             ?: throw NotFoundException()
         membershipRepository.delete(workspaceId, userId)
-        auditLogRepository.insert(
-            workspaceId,
-            context.userId,
-            "membership.removed",
-            objectMapper.writeValueAsString(
-                mapOf(
-                    "target_user_id" to userId,
-                    "previous_role" to exists
-                )
+        auditService.write(
+            workspaceId = workspaceId,
+            actorUserId = context.userId,
+            action = "membership.removed",
+            payload = mapOf(
+                "target_user_id" to userId,
+                "previous_role" to exists
             )
         )
     }

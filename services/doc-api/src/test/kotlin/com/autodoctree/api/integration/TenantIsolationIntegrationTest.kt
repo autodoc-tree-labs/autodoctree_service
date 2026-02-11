@@ -202,6 +202,12 @@ class TenantIsolationIntegrationTest {
         ).andExpect(status().isForbidden)
 
         mockMvc.perform(
+            get("/api/v1/admin/audit")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
             get("/api/v1/admin/tree/policy")
                 .header("Authorization", "Bearer $tokenB")
                 .header("X-Workspace-Id", wsAId)
@@ -347,6 +353,31 @@ class TenantIsolationIntegrationTest {
                 .header("Authorization", "Bearer $tokenB")
                 .header("X-Workspace-Id", wsAId)
         ).andExpect(status().isForbidden)
+    }
+
+    @Test
+    fun `attachment completion rejects object key outside workspace namespace`() {
+        val leakedAttachment = attachmentRepository.create(
+            workspaceId = wsAId,
+            documentId = wsADocId,
+            filename = "leak.txt",
+            contentType = "text/plain",
+            size = 1,
+            objectKey = "workspaces/$wsBId/attachments/$wsADocId/leak.txt",
+            checksumSha256 = null
+        )
+
+        mockMvc.perform(
+            post("/api/v1/attachments/complete")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf("attachment_id" to leakedAttachment.id)
+                    )
+                )
+        ).andExpect(status().isBadRequest)
     }
 
     private fun login(email: String, password: String): String {
