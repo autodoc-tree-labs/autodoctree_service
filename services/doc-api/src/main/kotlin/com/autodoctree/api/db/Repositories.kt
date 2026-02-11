@@ -217,6 +217,20 @@ data class ActiveLearningQuestionRow(
     val updatedAt: LocalDateTime
 )
 
+data class ConceptPrototypeRow(
+    val id: String,
+    val workspaceId: String,
+    val snapshotId: String,
+    val conceptKey: String,
+    val label: String,
+    val prototypeVectorJson: String,
+    val exemplarDocIdsJson: String,
+    val docCount: Int,
+    val driftScore: Double,
+    val createdAt: LocalDateTime,
+    val updatedAt: LocalDateTime
+)
+
 data class AuditLogRow(
     val id: String,
     val workspaceId: String,
@@ -1417,6 +1431,89 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
     fun findMembershipByWorkspaceAndDocument(workspaceId: String, documentId: String): TreeMembershipRow? {
         val active = findActiveSnapshot(workspaceId) ?: return null
         return findMembershipByDocInSnapshot(workspaceId, active.id, documentId)
+    }
+}
+
+@Repository
+class ConceptPrototypeRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<ConceptPrototypeRow> { rs: ResultSet, _: Int ->
+        ConceptPrototypeRow(
+            id = rs.getString("id"),
+            workspaceId = rs.getString("workspace_id"),
+            snapshotId = rs.getString("snapshot_id"),
+            conceptKey = rs.getString("concept_key"),
+            label = rs.getString("label"),
+            prototypeVectorJson = rs.getString("prototype_vector_json"),
+            exemplarDocIdsJson = rs.getString("exemplar_doc_ids_json"),
+            docCount = rs.getInt("doc_count"),
+            driftScore = rs.getDouble("drift_score"),
+            createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
+            updatedAt = rs.getTimestamp("updated_at").toLocalDateTime()
+        )
+    }
+
+    fun listByWorkspaceAndSnapshot(workspaceId: String, snapshotId: String): List<ConceptPrototypeRow> = jdbcTemplate.query(
+        """
+        SELECT *
+        FROM concept_prototype
+        WHERE workspace_id = ? AND snapshot_id = ?
+        ORDER BY doc_count DESC, label
+        """.trimIndent(),
+        mapper,
+        workspaceId,
+        snapshotId
+    )
+
+    fun listByWorkspaceAndActiveSnapshot(workspaceId: String): List<ConceptPrototypeRow> = jdbcTemplate.query(
+        """
+        SELECT cp.*
+        FROM concept_prototype cp
+        JOIN tree_snapshot ts ON ts.id = cp.snapshot_id AND ts.workspace_id = cp.workspace_id
+        WHERE cp.workspace_id = ?
+          AND ts.status = 'ACTIVE'
+        ORDER BY cp.doc_count DESC, cp.label
+        """.trimIndent(),
+        mapper,
+        workspaceId
+    )
+
+    fun replaceSnapshotConcepts(workspaceId: String, snapshotId: String, concepts: List<ConceptPrototypeRow>) {
+        jdbcTemplate.update(
+            "DELETE FROM concept_prototype WHERE workspace_id = ? AND snapshot_id = ?",
+            workspaceId,
+            snapshotId
+        )
+        concepts.forEach { row ->
+            jdbcTemplate.update(
+                """
+                INSERT INTO concept_prototype(
+                    id,
+                    workspace_id,
+                    snapshot_id,
+                    concept_key,
+                    label,
+                    prototype_vector_json,
+                    exemplar_doc_ids_json,
+                    doc_count,
+                    drift_score,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                row.id,
+                workspaceId,
+                snapshotId,
+                row.conceptKey,
+                row.label,
+                row.prototypeVectorJson,
+                row.exemplarDocIdsJson,
+                row.docCount,
+                row.driftScore,
+                row.createdAt,
+                row.updatedAt
+            )
+        }
     }
 }
 

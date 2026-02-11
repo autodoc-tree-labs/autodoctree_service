@@ -85,6 +85,16 @@ tree:
   assign-quarantine-enabled: ${TREE_ASSIGN_QUARANTINE_ENABLED:true}
   assign-reranker-enabled: ${TREE_ASSIGN_RERANKER_ENABLED:false}
   structure-worker-enabled: ${TREE_STRUCTURE_WORKER_ENABLED:false}
+  concept-enabled: ${TREE_CONCEPT_ENABLED:false}
+  concept-assign-threshold: ${TREE_CONCEPT_ASSIGN_THRESHOLD:0.72}
+  concept-min-docs: ${TREE_CONCEPT_MIN_DOCS:2}
+  concept-update-alpha: ${TREE_CONCEPT_UPDATE_ALPHA:0.30}
+  optimizer-enabled: ${TREE_OPTIMIZER_ENABLED:false}
+  optimizer-max-iterations: ${TREE_OPTIMIZER_MAX_ITERATIONS:4}
+  optimizer-change-cost-lambda: ${TREE_OPTIMIZER_CHANGE_COST_LAMBDA:0.75}
+  optimizer-cannot-violation-mu: ${TREE_OPTIMIZER_CANNOT_VIOLATION_MU:3.0}
+  optimizer-size-penalty-nu: ${TREE_OPTIMIZER_SIZE_PENALTY_NU:0.12}
+  optimizer-min-improvement: ${TREE_OPTIMIZER_MIN_IMPROVEMENT:0.01}
   max-cluster-size: ${TREE_MAX_CLUSTER_SIZE:20}
   min-cluster-size: ${TREE_MIN_CLUSTER_SIZE:2}
   community-resolution: ${TREE_COMMUNITY_RESOLUTION:1.0}

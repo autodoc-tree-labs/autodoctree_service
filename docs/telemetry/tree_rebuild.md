@@ -1,7 +1,7 @@
 # Tree Rebuild Telemetry v1
 
 ## Goals
-- Rebuild path를 단계별(`ingest`, `embed`, `pairwise`, `graph`, `cluster`, `assign`, `tree_extract`)로 분해해 원인 분석 가능하게 유지한다.
+- Rebuild path를 단계별(`ingest`, `embed`, `pairwise`, `concept_preassign`, `graph`, `cluster`, `optimizer`, `assign`, `tree_extract`, `concept_update`)로 분해해 원인 분석 가능하게 유지한다.
 - 문서 원문/본문/첨부 내용은 로그에 남기지 않는다.
 
 ## Log Events
@@ -90,6 +90,12 @@ tree_rebuild_stage {event=tree_rebuild_stage, workspace_id=ws_1, stage=graph, du
 - `structure_worker_error_total`
 - `worker_fallback_total`
 - `worker_fallback_rate`
+- `incremental_assign_rate`
+- `concept_count`
+- `concept_drift`
+- `optimizer_iterations`
+- `change_cost`
+- `objective_score`
 
 기존 호환 메트릭도 유지:
 - `tree_rebuild_duration_ms`

@@ -4,6 +4,8 @@ import com.autodoctree.api.config.FeatureFlags
 import com.autodoctree.api.config.TreeProperties
 import com.autodoctree.api.db.AttachmentRepository
 import com.autodoctree.api.db.AuditLogRepository
+import com.autodoctree.api.db.ConceptPrototypeRepository
+import com.autodoctree.api.db.ConceptPrototypeRow
 import com.autodoctree.api.db.DocumentRow
 import com.autodoctree.api.db.DocumentRepository
 import com.autodoctree.api.db.DocumentSectionRepository
@@ -37,6 +39,7 @@ import org.slf4j.MDC
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.security.MessageDigest
+import java.time.LocalDateTime
 import java.util.UUID
 import kotlin.math.sqrt
 
@@ -47,6 +50,7 @@ class TreeService(
     private val documentSectionRepository: DocumentSectionRepository,
     private val embeddingRepository: EmbeddingRepository,
     private val treeRepository: TreeRepository,
+    private val conceptPrototypeRepository: ConceptPrototypeRepository,
     private val feedbackRepository: FeedbackRepository,
     private val userRuleRepository: UserRuleRepository,
     private val workspaceTreePolicyRepository: WorkspaceTreePolicyRepository,
@@ -94,6 +98,12 @@ class TreeService(
     private val explainAcceptCounter = meterRegistry.counter("explain_accept_total")
     private val workerFallbackCounter = meterRegistry.counter("worker_fallback_total")
     private val workerFallbackRateSummary = meterRegistry.summary("worker_fallback_rate")
+    private val incrementalAssignRateSummary = meterRegistry.summary("incremental_assign_rate")
+    private val conceptCountSummary = meterRegistry.summary("concept_count")
+    private val conceptDriftSummary = meterRegistry.summary("concept_drift")
+    private val optimizerIterationsSummary = meterRegistry.summary("optimizer_iterations")
+    private val changeCostSummary = meterRegistry.summary("change_cost")
+    private val objectiveScoreSummary = meterRegistry.summary("objective_score")
     private val unsortedReasonCodes = setOf("LOW_CONFIDENCE", "HUB", "CONFLICT", "TEMPLATE", "RECOMMEND")
 
     private data class AssignmentPolicy(
@@ -109,6 +119,35 @@ class TreeService(
         val confidenceByDocument: Map<String, Double>,
         val decisionByDocument: Map<String, String>,
         val reasonByDocument: Map<String, String>
+    )
+
+    private data class ConceptCandidate(
+        val label: String,
+        val vector: List<Double>,
+        val docCount: Int
+    )
+
+    private data class ConceptPreassignOutcome(
+        val assignmentByDocument: Map<String, String>,
+        val confidenceByDocument: Map<String, Double>,
+        val sourceByDocument: Map<String, String>,
+        val activeConceptCount: Int
+    )
+
+    private data class ObjectiveBreakdown(
+        val fitScore: Double,
+        val changeCost: Double,
+        val cannotViolations: Int,
+        val sizePenalty: Double,
+        val objectiveScore: Double
+    )
+
+    private data class OptimizerOutcome(
+        val assignmentByDocument: Map<String, String>,
+        val optimizedDocIds: Set<String>,
+        val iterations: Int,
+        val before: ObjectiveBreakdown,
+        val after: ObjectiveBreakdown
     )
 
     @Transactional
@@ -267,7 +306,7 @@ class TreeService(
                 )
             )
 
-            val remaining = documents.filterNot { assignment.containsKey(it.id) }
+            var remaining = documents.filterNot { assignment.containsKey(it.id) }
             var graphStats = NeighborBuildStats()
             var labelSourceBreakdown = emptyMap<String, Int>()
             var labelCacheToPersist = previousLabelCache
@@ -277,6 +316,63 @@ class TreeService(
                 decisionByDocument = emptyMap(),
                 reasonByDocument = emptyMap()
             )
+            val activeConcepts = if (treeProperties.conceptEnabled) {
+                conceptPrototypeRepository.listByWorkspaceAndActiveSnapshot(workspaceId)
+                    .mapNotNull { concept ->
+                        parseVector(concept.prototypeVectorJson).takeIf { it.isNotEmpty() }?.let { vector ->
+                            ConceptCandidate(
+                                label = concept.label,
+                                vector = vector,
+                                docCount = concept.docCount
+                            )
+                        }
+                    }
+            } else {
+                emptyList()
+            }
+            val conceptStartedAt = System.nanoTime()
+            val conceptPreassignOutcome = if (treeProperties.conceptEnabled && remaining.isNotEmpty() && activeConcepts.isNotEmpty()) {
+                preassignByConcept(
+                    documents = remaining,
+                    embeddings = embeddingByDocumentId,
+                    activeConcepts = activeConcepts
+                )
+            } else {
+                ConceptPreassignOutcome(
+                    assignmentByDocument = emptyMap(),
+                    confidenceByDocument = emptyMap(),
+                    sourceByDocument = emptyMap(),
+                    activeConceptCount = activeConcepts.size
+                )
+            }
+            if (conceptPreassignOutcome.assignmentByDocument.isNotEmpty()) {
+                assignment.putAll(conceptPreassignOutcome.assignmentByDocument)
+            }
+            val conceptAssignedDocIds = conceptPreassignOutcome.assignmentByDocument.keys.toSet()
+            val conceptSourceByDocument = conceptPreassignOutcome.sourceByDocument
+            val conceptAvgConfidence = conceptPreassignOutcome.confidenceByDocument.values
+                .average()
+                .takeIf { !it.isNaN() } ?: 0.0
+            val candidateDocCount = remaining.size.coerceAtLeast(1)
+            val incrementalAssignRate = conceptAssignedDocIds.size.toDouble() / candidateDocCount.toDouble()
+            if (treeProperties.conceptEnabled) {
+                incrementalAssignRateSummary.record(incrementalAssignRate)
+                conceptCountSummary.record(activeConcepts.size.toDouble())
+            }
+            treeTelemetry.recordStage(
+                trace = trace,
+                stage = "concept_preassign",
+                startedAtNanos = conceptStartedAt,
+                details = mapOf(
+                    "enabled" to treeProperties.conceptEnabled,
+                    "active_concept_count" to conceptPreassignOutcome.activeConceptCount,
+                    "candidate_doc_count" to remaining.size,
+                    "assigned_doc_count" to conceptAssignedDocIds.size,
+                    "incremental_assign_rate" to String.format("%.3f", incrementalAssignRate),
+                    "avg_confidence" to String.format("%.3f", conceptAvgConfidence)
+                )
+            )
+            remaining = documents.filterNot { assignment.containsKey(it.id) }
             val embeddingAvailableDocRatio = if (remaining.isEmpty()) {
                 1.0
             } else {
@@ -456,6 +552,47 @@ class TreeService(
                 membership.documentId to (node?.label ?: "")
             }
 
+            val optimizerStartedAt = System.nanoTime()
+            val frozenDocIds = lockedLabelByDocument.keys + quarantineReasonByDocument.keys
+            val optimizerOutcome = if (treeProperties.optimizerEnabled) {
+                optimizeAssignment(
+                    documents = documents,
+                    assignment = assignment.toMap(),
+                    adjacency = graph.adjacency,
+                    previousDocToLabel = previousDocToLabel,
+                    lockedLabelByDocument = lockedLabelByDocument,
+                    frozenDocIds = frozenDocIds
+                )
+            } else {
+                null
+            }
+            if (optimizerOutcome != null) {
+                assignment.clear()
+                assignment.putAll(optimizerOutcome.assignmentByDocument)
+                optimizerIterationsSummary.record(optimizerOutcome.iterations.toDouble())
+                changeCostSummary.record(optimizerOutcome.after.changeCost)
+                objectiveScoreSummary.record(optimizerOutcome.after.objectiveScore)
+            }
+            treeTelemetry.recordStage(
+                trace = trace,
+                stage = "optimizer",
+                startedAtNanos = optimizerStartedAt,
+                details = if (optimizerOutcome == null) {
+                    mapOf("enabled" to treeProperties.optimizerEnabled, "skipped" to true)
+                } else {
+                    mapOf(
+                        "enabled" to true,
+                        "iterations" to optimizerOutcome.iterations,
+                        "optimized_doc_count" to optimizerOutcome.optimizedDocIds.size,
+                        "objective_before" to String.format("%.3f", optimizerOutcome.before.objectiveScore),
+                        "objective_after" to String.format("%.3f", optimizerOutcome.after.objectiveScore),
+                        "change_cost" to String.format("%.3f", optimizerOutcome.after.changeCost),
+                        "cannot_violations" to optimizerOutcome.after.cannotViolations,
+                        "size_penalty" to String.format("%.3f", optimizerOutcome.after.sizePenalty)
+                    )
+                }
+            )
+
             val movedCount = assignment.entries.count { (docId, newLabel) ->
                 previousDocToLabel[docId] != null && previousDocToLabel[docId] != newLabel
             }
@@ -501,6 +638,13 @@ class TreeService(
                         "reranker_enabled" to assignmentPolicy.rerankerEnabled,
                         "structure_worker_enabled" to assignmentPolicy.structureWorkerEnabled,
                         "source" to assignmentPolicy.source
+                    ),
+                    "concept_preassigned_count" to conceptAssignedDocIds.size,
+                    "optimizer_enabled" to treeProperties.optimizerEnabled,
+                    "optimizer_iterations" to (optimizerOutcome?.iterations ?: 0),
+                    "objective_score" to String.format(
+                        "%.3f",
+                        optimizerOutcome?.after?.objectiveScore ?: 0.0
                     ),
                     "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
                 )
@@ -649,6 +793,9 @@ class TreeService(
                     wasLocked = lockedLabelByDocument.containsKey(doc.id),
                     personalized = personalizedDocIds.contains(doc.id),
                     ruled = ruledDocIds.contains(doc.id),
+                    conceptPreassigned = conceptAssignedDocIds.contains(doc.id),
+                    conceptSource = conceptSourceByDocument[doc.id],
+                    optimizerAdjusted = optimizerOutcome?.optimizedDocIds?.contains(doc.id) == true,
                     quarantineReason = quarantineReasonByDocument[doc.id]
                 )
                 val llmSentence = llmExplainGenerator.generate(
@@ -681,6 +828,42 @@ class TreeService(
                     "membership_count" to assignment.size
                 )
             )
+
+            var conceptDriftAverage = 0.0
+            if (treeProperties.conceptEnabled) {
+                val conceptUpdateStartedAt = System.nanoTime()
+                val conceptRows = buildSnapshotConceptRows(
+                    workspaceId = workspaceId,
+                    snapshotId = snapshot.id,
+                    assignment = assignment,
+                    embeddings = embeddingByDocumentId,
+                    previousConcepts = activeConcepts
+                )
+                conceptPrototypeRepository.replaceSnapshotConcepts(workspaceId, snapshot.id, conceptRows)
+                conceptDriftAverage = conceptRows
+                    .map { it.driftScore }
+                    .average()
+                    .takeIf { !it.isNaN() } ?: 0.0
+                conceptCountSummary.record(conceptRows.size.toDouble())
+                conceptDriftSummary.record(conceptDriftAverage)
+                treeTelemetry.recordStage(
+                    trace = trace,
+                    stage = "concept_update",
+                    startedAtNanos = conceptUpdateStartedAt,
+                    details = mapOf(
+                        "enabled" to true,
+                        "concept_count" to conceptRows.size,
+                        "concept_drift" to String.format("%.3f", conceptDriftAverage)
+                    )
+                )
+            } else {
+                treeTelemetry.recordStage(
+                    trace = trace,
+                    stage = "concept_update",
+                    startedAtNanos = System.nanoTime(),
+                    details = mapOf("enabled" to false, "skipped" to true)
+                )
+            }
 
             if (actorUserId != null) {
                 auditService.write(
@@ -723,6 +906,14 @@ class TreeService(
                 "reranker_fallback_rate" to String.format("%.3f", graphStats.rerankerFallbackRate),
                 "auto_ratio" to String.format("%.3f", autoRatio),
                 "recommend_ratio" to String.format("%.3f", recommendRatio),
+                "incremental_assign_rate" to String.format("%.3f", incrementalAssignRate),
+                "concept_count" to activeConcepts.size,
+                "concept_preassigned_count" to conceptAssignedDocIds.size,
+                "concept_drift" to String.format("%.3f", conceptDriftAverage),
+                "optimizer_enabled" to treeProperties.optimizerEnabled,
+                "optimizer_iterations" to (optimizerOutcome?.iterations ?: 0),
+                "objective_score" to String.format("%.3f", optimizerOutcome?.after?.objectiveScore ?: 0.0),
+                "change_cost" to String.format("%.3f", optimizerOutcome?.after?.changeCost ?: 0.0),
                 "policy_threshold" to mapOf(
                     "auto" to assignmentPolicy.autoThreshold,
                     "recommend" to assignmentPolicy.recommendThreshold,
@@ -769,6 +960,17 @@ class TreeService(
                         "reranker_fallback_rate" to graphStats.rerankerFallbackRate,
                         "auto_ratio" to autoRatio,
                         "recommend_ratio" to recommendRatio,
+                        "incremental_assign_rate" to incrementalAssignRate,
+                        "concept_count" to activeConcepts.size,
+                        "concept_preassigned_count" to conceptAssignedDocIds.size,
+                        "concept_drift" to conceptDriftAverage,
+                        "optimizer_enabled" to treeProperties.optimizerEnabled,
+                        "optimizer_iterations" to (optimizerOutcome?.iterations ?: 0),
+                        "fit_score" to (optimizerOutcome?.after?.fitScore ?: 0.0),
+                        "objective_score" to (optimizerOutcome?.after?.objectiveScore ?: 0.0),
+                        "change_cost" to (optimizerOutcome?.after?.changeCost ?: 0.0),
+                        "cannot_violations" to (optimizerOutcome?.after?.cannotViolations ?: 0),
+                        "size_penalty" to (optimizerOutcome?.after?.sizePenalty ?: 0.0),
                         "rule_conflict_count" to ruleConflictCount,
                         "soft_rule_doc_count" to softRulePreferredLabelByDocument.size,
                         "policy_threshold" to mapOf(
@@ -1172,12 +1374,22 @@ class TreeService(
         wasLocked: Boolean,
         personalized: Boolean,
         ruled: Boolean,
+        conceptPreassigned: Boolean,
+        conceptSource: String? = null,
+        optimizerAdjusted: Boolean,
         quarantineReason: String? = null
     ): List<String> {
         val signals = mutableListOf<String>()
         if (wasLocked) signals += "LOCKED_NODE"
         if (personalized) signals += "PERSONALIZED_MOVE_SIGNAL"
         if (ruled) signals += "USER_RULE_MATCHED"
+        if (conceptPreassigned) {
+            signals += "CONCEPT_PREASSIGNED"
+            conceptSource?.takeIf { it.isNotBlank() }?.let { source ->
+                signals += "CONCEPT_SOURCE_${source.trim().uppercase()}"
+            }
+        }
+        if (optimizerAdjusted) signals += "OBJECTIVE_OPTIMIZED"
         quarantineReason?.takeIf { it.isNotBlank() }?.let { signals += it }
         if (signals.isEmpty()) {
             signals += "CLUSTER_DEFAULT"
@@ -1432,6 +1644,432 @@ class TreeService(
                     "score" to (kotlin.math.round(score.coerceIn(0.0, 1.0) * 1000.0) / 1000.0)
                 )
             }
+    }
+
+    private fun preassignByConcept(
+        documents: List<DocumentRow>,
+        embeddings: Map<String, EmbeddingRow>,
+        activeConcepts: List<ConceptCandidate>
+    ): ConceptPreassignOutcome {
+        if (documents.isEmpty() || activeConcepts.isEmpty()) {
+            return ConceptPreassignOutcome(
+                assignmentByDocument = emptyMap(),
+                confidenceByDocument = emptyMap(),
+                sourceByDocument = emptyMap(),
+                activeConceptCount = 0
+            )
+        }
+        val eligibleConcepts = activeConcepts
+            .filter { concept ->
+                concept.docCount >= treeProperties.conceptMinDocs &&
+                    isPlacementCandidateLabel(concept.label) &&
+                    concept.vector.isNotEmpty()
+            }
+        if (eligibleConcepts.isEmpty()) {
+            return ConceptPreassignOutcome(
+                assignmentByDocument = emptyMap(),
+                confidenceByDocument = emptyMap(),
+                sourceByDocument = emptyMap(),
+                activeConceptCount = 0
+            )
+        }
+        val threshold = treeProperties.conceptAssignThreshold.coerceIn(0.0, 1.0)
+        val assigned = mutableMapOf<String, String>()
+        val confidenceByDocument = mutableMapOf<String, Double>()
+        val sourceByDocument = mutableMapOf<String, String>()
+        documents.forEach { document ->
+            val vector = embeddings[document.id]?.let { parseVector(it.vectorJson) }.orEmpty()
+            if (vector.isEmpty()) {
+                return@forEach
+            }
+            val scored = eligibleConcepts
+                .map { concept ->
+                    val raw = cosine(vector, concept.vector).coerceIn(-1.0, 1.0)
+                    val normalized = ((raw + 1.0) / 2.0).coerceIn(0.0, 1.0)
+                    concept to normalized
+                }
+                .sortedByDescending { it.second }
+            val best = scored.firstOrNull() ?: return@forEach
+            val second = scored.getOrNull(1)?.second ?: 0.0
+            val margin = (best.second - second).coerceIn(0.0, 1.0)
+            val confidence = ((best.second * 0.75) + (margin * 0.25)).coerceIn(0.0, 1.0)
+            if (best.second < threshold || confidence < threshold) {
+                return@forEach
+            }
+            assigned[document.id] = best.first.label
+            confidenceByDocument[document.id] = confidence
+            sourceByDocument[document.id] = conceptSourceToken(best.first.label)
+        }
+        return ConceptPreassignOutcome(
+            assignmentByDocument = assigned,
+            confidenceByDocument = confidenceByDocument,
+            sourceByDocument = sourceByDocument,
+            activeConceptCount = eligibleConcepts.size
+        )
+    }
+
+    private fun optimizeAssignment(
+        documents: List<DocumentRow>,
+        assignment: Map<String, String>,
+        adjacency: Map<String, List<NeighborLink>>,
+        previousDocToLabel: Map<String, String>,
+        lockedLabelByDocument: Map<String, String>,
+        frozenDocIds: Set<String>
+    ): OptimizerOutcome {
+        val baseline = assignment.toMutableMap()
+        val before = buildObjectiveBreakdown(
+            documents = documents,
+            assignment = baseline,
+            adjacency = adjacency,
+            previousDocToLabel = previousDocToLabel,
+            lockedLabelByDocument = lockedLabelByDocument
+        )
+        if (documents.isEmpty() || baseline.isEmpty()) {
+            return OptimizerOutcome(
+                assignmentByDocument = baseline,
+                optimizedDocIds = emptySet(),
+                iterations = 0,
+                before = before,
+                after = before
+            )
+        }
+        val current = baseline.toMutableMap()
+        val optimizedDocIds = mutableSetOf<String>()
+        val maxIterations = treeProperties.optimizerMaxIterations.coerceAtLeast(1)
+        val minImprovement = treeProperties.optimizerMinImprovement.coerceAtLeast(0.0)
+        var iterations = 0
+
+        for (iteration in 1..maxIterations) {
+            var changed = false
+            val labelCounts = current.values.groupingBy { it }.eachCount().toMutableMap()
+            documents.forEach { document ->
+                val documentId = document.id
+                if (frozenDocIds.contains(documentId)) {
+                    return@forEach
+                }
+                val currentLabel = current[documentId] ?: "general"
+                val lockedLabel = lockedLabelByDocument[documentId]
+                val candidateLabels = linkedSetOf<String>()
+                candidateLabels += currentLabel
+                previousDocToLabel[documentId]
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { candidateLabels += it }
+                adjacency[documentId]
+                    .orEmpty()
+                    .mapNotNull { neighbor -> current[neighbor.documentId] }
+                    .filter { it.isNotBlank() }
+                    .forEach { label -> candidateLabels += label }
+                if (candidateLabels.size <= 1) {
+                    return@forEach
+                }
+                var bestLabel = currentLabel
+                var bestScore = localObjectiveScore(
+                    documentId = documentId,
+                    candidateLabel = currentLabel,
+                    assignment = current,
+                    labelCounts = labelCounts,
+                    adjacency = adjacency,
+                    previousDocToLabel = previousDocToLabel,
+                    lockedLabelByDocument = lockedLabelByDocument
+                )
+                candidateLabels.forEach { candidateLabel ->
+                    if (candidateLabel == currentLabel) {
+                        return@forEach
+                    }
+                    if (lockedLabel != null && candidateLabel != lockedLabel) {
+                        return@forEach
+                    }
+                    val candidateScore = localObjectiveScore(
+                        documentId = documentId,
+                        candidateLabel = candidateLabel,
+                        assignment = current,
+                        labelCounts = labelCounts,
+                        adjacency = adjacency,
+                        previousDocToLabel = previousDocToLabel,
+                        lockedLabelByDocument = lockedLabelByDocument
+                    )
+                    if (candidateScore > bestScore + minImprovement) {
+                        bestScore = candidateScore
+                        bestLabel = candidateLabel
+                    }
+                }
+                if (bestLabel == currentLabel) {
+                    return@forEach
+                }
+                current[documentId] = bestLabel
+                labelCounts[currentLabel] = (labelCounts[currentLabel] ?: 1) - 1
+                labelCounts[bestLabel] = (labelCounts[bestLabel] ?: 0) + 1
+                optimizedDocIds += documentId
+                changed = true
+            }
+            if (!changed) {
+                break
+            }
+            iterations = iteration
+        }
+
+        val after = buildObjectiveBreakdown(
+            documents = documents,
+            assignment = current,
+            adjacency = adjacency,
+            previousDocToLabel = previousDocToLabel,
+            lockedLabelByDocument = lockedLabelByDocument
+        )
+        return OptimizerOutcome(
+            assignmentByDocument = current,
+            optimizedDocIds = optimizedDocIds,
+            iterations = iterations,
+            before = before,
+            after = after
+        )
+    }
+
+    private fun localObjectiveScore(
+        documentId: String,
+        candidateLabel: String,
+        assignment: Map<String, String>,
+        labelCounts: Map<String, Int>,
+        adjacency: Map<String, List<NeighborLink>>,
+        previousDocToLabel: Map<String, String>,
+        lockedLabelByDocument: Map<String, String>
+    ): Double {
+        val currentLabel = assignment[documentId] ?: "general"
+        val sameNeighbors = adjacency[documentId]
+            .orEmpty()
+            .filter { neighbor -> assignment[neighbor.documentId] == candidateLabel }
+            .take(3)
+        val fitScore = sameNeighbors
+            .map { link -> link.similarity }
+            .average()
+            .takeIf { !it.isNaN() } ?: 0.0
+        val priorBonus = if (previousDocToLabel[documentId] == candidateLabel) 0.05 else 0.0
+        val previousLabel = previousDocToLabel[documentId]
+        val changePenalty = if (previousLabel != null && previousLabel != candidateLabel) 1.0 else 0.0
+        val cannotPenalty = if (
+            lockedLabelByDocument[documentId] != null &&
+            lockedLabelByDocument[documentId] != candidateLabel
+        ) {
+            1.0
+        } else {
+            0.0
+        }
+        val currentCount = labelCounts[candidateLabel] ?: 0
+        val predictedSize = currentCount + if (candidateLabel == currentLabel) 0 else 1
+        val maxClusterSize = treeProperties.maxClusterSize.coerceAtLeast(1)
+        val minClusterSize = treeProperties.minClusterSize.coerceAtLeast(1)
+        val overPenalty = if (isUnsortedLabel(candidateLabel)) {
+            0.0
+        } else {
+            ((predictedSize - maxClusterSize).coerceAtLeast(0)).toDouble() / maxClusterSize.toDouble()
+        }
+        val underPenalty = if (isUnsortedLabel(candidateLabel)) {
+            0.0
+        } else {
+            ((minClusterSize - predictedSize).coerceAtLeast(0)).toDouble() / minClusterSize.toDouble()
+        }
+        val sizePenalty = overPenalty + (underPenalty * 0.35)
+        return (fitScore + priorBonus) -
+            (treeProperties.optimizerChangeCostLambda * changePenalty) -
+            (treeProperties.optimizerCannotViolationMu * cannotPenalty) -
+            (treeProperties.optimizerSizePenaltyNu * sizePenalty)
+    }
+
+    private fun buildObjectiveBreakdown(
+        documents: List<DocumentRow>,
+        assignment: Map<String, String>,
+        adjacency: Map<String, List<NeighborLink>>,
+        previousDocToLabel: Map<String, String>,
+        lockedLabelByDocument: Map<String, String>
+    ): ObjectiveBreakdown {
+        if (documents.isEmpty() || assignment.isEmpty()) {
+            return ObjectiveBreakdown(
+                fitScore = 0.0,
+                changeCost = 0.0,
+                cannotViolations = 0,
+                sizePenalty = 0.0,
+                objectiveScore = 0.0
+            )
+        }
+        val fitScore = documents
+            .map { document ->
+                val label = assignment[document.id] ?: "general"
+                adjacency[document.id]
+                    .orEmpty()
+                    .filter { neighbor -> assignment[neighbor.documentId] == label }
+                    .take(3)
+                    .map { it.similarity }
+                    .average()
+                    .takeIf { !it.isNaN() } ?: 0.0
+            }
+            .average()
+            .takeIf { !it.isNaN() } ?: 0.0
+
+        val changed = assignment.entries.count { (documentId, label) ->
+            previousDocToLabel[documentId] != null && previousDocToLabel[documentId] != label
+        }
+        val changeCost = changed.toDouble() / assignment.size.toDouble().coerceAtLeast(1.0)
+        val cannotViolations = assignment.entries.count { (documentId, label) ->
+            val lockedLabel = lockedLabelByDocument[documentId] ?: return@count false
+            lockedLabel != label
+        }
+        val cannotPenalty = cannotViolations.toDouble() / assignment.size.toDouble().coerceAtLeast(1.0)
+        val maxClusterSize = treeProperties.maxClusterSize.coerceAtLeast(1)
+        val minClusterSize = treeProperties.minClusterSize.coerceAtLeast(1)
+        val clusterPenalty = assignment.values
+            .groupingBy { it }
+            .eachCount()
+            .entries
+            .filter { (label, _) -> !isUnsortedLabel(label) }
+            .map { (_, size) ->
+                val overPenalty = ((size - maxClusterSize).coerceAtLeast(0)).toDouble() / maxClusterSize.toDouble()
+                val underPenalty = ((minClusterSize - size).coerceAtLeast(0)).toDouble() / minClusterSize.toDouble()
+                overPenalty + (underPenalty * 0.35)
+            }
+            .average()
+            .takeIf { !it.isNaN() } ?: 0.0
+
+        val objectiveScore = fitScore -
+            (treeProperties.optimizerChangeCostLambda * changeCost) -
+            (treeProperties.optimizerCannotViolationMu * cannotPenalty) -
+            (treeProperties.optimizerSizePenaltyNu * clusterPenalty)
+        return ObjectiveBreakdown(
+            fitScore = fitScore,
+            changeCost = changeCost,
+            cannotViolations = cannotViolations,
+            sizePenalty = clusterPenalty,
+            objectiveScore = objectiveScore
+        )
+    }
+
+    private fun buildSnapshotConceptRows(
+        workspaceId: String,
+        snapshotId: String,
+        assignment: Map<String, String>,
+        embeddings: Map<String, EmbeddingRow>,
+        previousConcepts: List<ConceptCandidate>
+    ): List<ConceptPrototypeRow> {
+        if (assignment.isEmpty()) {
+            return emptyList()
+        }
+        val vectorsByDocument = embeddings
+            .mapValues { (_, embedding) -> parseVector(embedding.vectorJson) }
+            .filterValues { vector -> vector.isNotEmpty() }
+        if (vectorsByDocument.isEmpty()) {
+            return emptyList()
+        }
+        val previousByLabel = previousConcepts.associateBy { concept -> normalizeConceptKey(concept.label) }
+        val now = LocalDateTime.now()
+        return assignment.entries
+            .groupBy(
+                keySelector = { entry -> entry.value },
+                valueTransform = { entry -> entry.key }
+            )
+            .asSequence()
+            .filter { (label, docIds) ->
+                isPlacementCandidateLabel(label) && docIds.size >= treeProperties.conceptMinDocs
+            }
+            .mapNotNull { (label, docIds) ->
+                val vectors = docIds.mapNotNull { documentId -> vectorsByDocument[documentId] }
+                if (vectors.size < treeProperties.conceptMinDocs) {
+                    return@mapNotNull null
+                }
+                val centroid = averageVector(vectors)
+                if (centroid.isEmpty()) {
+                    return@mapNotNull null
+                }
+                val previousVector = previousByLabel[normalizeConceptKey(label)]?.vector
+                val prototypeVector = if (previousVector.isNullOrEmpty()) {
+                    centroid
+                } else {
+                    blendVector(
+                        previous = previousVector,
+                        current = centroid,
+                        alpha = treeProperties.conceptUpdateAlpha
+                    )
+                }
+                val exemplarDocIds = docIds
+                    .mapNotNull { documentId ->
+                        val vector = vectorsByDocument[documentId] ?: return@mapNotNull null
+                        documentId to cosine(prototypeVector, vector)
+                    }
+                    .sortedByDescending { it.second }
+                    .take(3)
+                    .map { it.first }
+                val driftScore = if (previousVector.isNullOrEmpty()) {
+                    0.0
+                } else {
+                    val similarity = cosine(previousVector, prototypeVector).coerceIn(-1.0, 1.0)
+                    (1.0 - ((similarity + 1.0) / 2.0)).coerceIn(0.0, 1.0)
+                }
+                ConceptPrototypeRow(
+                    id = UUID.randomUUID().toString(),
+                    workspaceId = workspaceId,
+                    snapshotId = snapshotId,
+                    conceptKey = normalizeConceptKey(label),
+                    label = label.take(255),
+                    prototypeVectorJson = objectMapper.writeValueAsString(prototypeVector),
+                    exemplarDocIdsJson = objectMapper.writeValueAsString(exemplarDocIds),
+                    docCount = docIds.size,
+                    driftScore = driftScore,
+                    createdAt = now,
+                    updatedAt = now
+                )
+            }
+            .sortedWith(compareByDescending<ConceptPrototypeRow> { it.docCount }.thenBy { it.label })
+            .toList()
+    }
+
+    private fun averageVector(vectors: List<List<Double>>): List<Double> {
+        if (vectors.isEmpty()) {
+            return emptyList()
+        }
+        val size = vectors.minOfOrNull { vector -> vector.size } ?: 0
+        if (size == 0) {
+            return emptyList()
+        }
+        val aggregate = DoubleArray(size)
+        vectors.forEach { vector ->
+            for (index in 0 until size) {
+                aggregate[index] += vector[index]
+            }
+        }
+        return aggregate.map { value -> value / vectors.size.toDouble() }
+    }
+
+    private fun blendVector(previous: List<Double>, current: List<Double>, alpha: Double): List<Double> {
+        val size = minOf(previous.size, current.size)
+        if (size == 0) {
+            return current
+        }
+        val boundedAlpha = alpha.coerceIn(0.0, 1.0)
+        val previousWeight = 1.0 - boundedAlpha
+        return (0 until size).map { index ->
+            (previous[index] * previousWeight) + (current[index] * boundedAlpha)
+        }
+    }
+
+    private fun normalizeConceptKey(label: String): String {
+        val normalized = label.trim()
+            .lowercase()
+            .replace(Regex("[^\\p{L}\\p{N}]+"), "_")
+            .trim('_')
+        return if (normalized.isBlank()) "concept" else normalized.take(120)
+    }
+
+    private fun conceptSourceToken(label: String): String {
+        val token = normalizeConceptKey(label)
+            .replace(Regex("[^a-z0-9]+"), "_")
+            .trim('_')
+            .uppercase()
+        return if (token.isBlank()) "UNKNOWN" else token.take(40)
+    }
+
+    private fun parseVector(vectorJson: String): List<Double> {
+        return runCatching {
+            objectMapper.readValue(vectorJson, List::class.java).mapNotNull { value ->
+                (value as? Number)?.toDouble()
+            }
+        }.getOrElse { emptyList() }
     }
 
     private fun parseRationale(json: String): Map<String, Any?> {
