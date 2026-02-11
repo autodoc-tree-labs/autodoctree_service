@@ -213,7 +213,8 @@ Response:
     "similar_docs": [
       { "document_id": "doc_2", "title": "ShedLock notes", "similarity": 0.91 }
     ],
-    "signals": ["HYBRID_SIM_HIGH"]
+    "signals": ["HYBRID_SIM_HIGH"],
+    "llm_sentence": "동시성 키워드와 높은 유사도 신호로 이 노드에 배치되었습니다."
   }
 }
 ```
@@ -245,3 +246,71 @@ Query: `document_id` optional
 
 ## GET /admin/audit
 Query: `type`, `from`, `to`
+
+## GET /admin/tree/debug/neighbors
+Query: `document_id` (required)
+
+Response:
+```json
+{
+  "document_id": "doc_1",
+  "title": "Locking strategy",
+  "neighbors": [
+    {
+      "neighbor_doc_id": "doc_2",
+      "title": "Concurrency notes",
+      "sem_sim": 0.91,
+      "lex_sim": 0.54,
+      "entity_overlap": 2,
+      "final_sim": 0.84,
+      "gate_flags": {
+        "lexical_gate_passed": true,
+        "reason": "EMBEDDING_LEXICAL_GATED"
+      }
+    }
+  ]
+}
+```
+
+## GET /admin/tree/debug/cluster-stats
+Response (example):
+```json
+{
+  "snapshot_id": "ts_2",
+  "status": "ACTIVE",
+  "cluster_count": 8,
+  "avg_cluster_size": 4.2,
+  "neighbor_edges_total": 312,
+  "edges_filtered_total": 98,
+  "label_filtered_total": 3,
+  "avg_label_length": 6.4,
+  "tree_rebuild_duration_ms": 182.5,
+  "moved_ratio": 0.13,
+  "churn_ratio": 0.13
+}
+```
+
+## GET /admin/tree/rules
+Response:
+```json
+{
+  "items": [
+    {
+      "id": "rule_1",
+      "rule_type": "TITLE_CONTAINS",
+      "rule_value": "invoice",
+      "node_id": "n_2",
+      "node_label": "billing",
+      "enabled": true,
+      "created_at": "2026-02-10T09:00:00"
+    }
+  ]
+}
+```
+
+## POST /admin/tree/rules
+```json
+{ "rule_type": "TITLE_CONTAINS", "rule_value": "invoice", "node_id": "n_2" }
+```
+
+## DELETE /admin/tree/rules/{ruleId}

@@ -383,6 +383,25 @@ code {
   opacity: 0.8;
 }
 
+.notice-panel {
+  border: 1px solid transparent;
+  border-radius: 12px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+
+.notice-panel-info {
+  background: #edf4ff;
+  border-color: #cfe0ff;
+  color: #1f4f9a;
+}
+
+.notice-panel-success {
+  background: #e9f7ef;
+  border-color: #c7ead6;
+  color: #17653a;
+}
+
 .empty-state {
   border: 1px dashed #cdd8ea;
   background: #f8fbff;
@@ -750,9 +769,43 @@ code {
   font-weight: 800;
 }
 
-.drag-doc-btn {
-  width: 100%;
-  justify-content: flex-start;
+.tree-doc-list {
+  gap: 10px;
+}
+
+.tree-doc-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.tree-doc-link {
+  border: 1px solid #d7e0f0;
+  border-radius: 12px;
+  background: #f7f9fd;
+  color: inherit;
+  text-decoration: none;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tree-doc-link:hover {
+  border-color: #a8c6f6;
+  background: #edf4ff;
+}
+
+.drag-doc-title {
+  font-weight: 800;
+  color: #2a4a74;
+}
+
+.drag-doc-id {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
 }
 
 .two-col-grid {
@@ -857,6 +910,10 @@ code {
   .field-row {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .tree-doc-item {
+    grid-template-columns: 1fr;
   }
 
   .page-title {

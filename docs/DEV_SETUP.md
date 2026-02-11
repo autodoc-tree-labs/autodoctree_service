@@ -14,15 +14,36 @@ docker compose ps
 
 If default ports are already in use, run with overrides:
 ```bash
-POSTGRES_PORT=55432 OPENSEARCH_PORT=59201 REDIS_PORT=56380 MINIO_PORT=59000 MINIO_CONSOLE_PORT=59001 docker compose up -d
+POSTGRES_PORT=55432 OPENSEARCH_PORT=59201 REDIS_PORT=56380 MINIO_PORT=59010 MINIO_CONSOLE_PORT=59011 docker compose up -d
 ```
 
 Services:
 - Postgres: `localhost:5432`
 - OpenSearch: `localhost:59200`
 - Redis: `localhost:56379`
-- MinIO API: `localhost:9000`
-- MinIO Console: `localhost:9001`
+- MinIO API: `localhost:59000`
+- MinIO Console: `localhost:59001`
+
+## 1-1. Optional local LLM (Ollama, offline embedding + generate)
+Start only Ollama with compose profile:
+```bash
+docker compose --profile llm up -d ollama
+docker compose ps ollama
+```
+
+Pull and verify both models:
+```bash
+docker compose --profile llm exec ollama ollama pull bge-m3
+docker compose --profile llm exec ollama ollama pull llama3.1:8b-instruct
+docker compose --profile llm exec ollama ollama list
+```
+
+If host port `11434` is already used, override with `OLLAMA_PORT`.
+
+Optional one-shot preload service:
+```bash
+docker compose --profile llm --profile llm-init up ollama-init
+```
 
 ## 2. Backend (IntelliJ)
 1. Open `services/` as Gradle project.
@@ -30,10 +51,26 @@ Services:
 3. Env:
 - `SPRING_PROFILES_ACTIVE=local`
 - `DOC_API_JWT_SECRET=dev-secret-change-me`
+- MinIO를 기본 포트 외로 바꿨다면 `S3_ENDPOINT`를 같은 주소로 지정 (예: `http://localhost:59010`)
+- Ollama 임베딩 사용 시:
+  - `FEATURE_EMBEDDING_OLLAMA=true`
+  - `EMBEDDING_PROVIDER=ollama`
+  - `EMBEDDING_OLLAMA_BASE_URL=http://localhost:11434`
+  - `EMBEDDING_OLLAMA_MODEL=bge-m3`
+  - `LLM_PROVIDER=ollama`
+  - `LLM_OLLAMA_BASE_URL=http://localhost:11434`
+  - `LLM_OLLAMA_MODEL=llama3.1:8b-instruct`
+  - `FEATURE_LLM_LABELING=true`
+  - `FEATURE_LLM_EXPLAIN=true`
 
 Quick test:
 ```bash
 curl -s http://localhost:8080/api/v1/health
+```
+
+Ollama smoke:
+```bash
+./scripts/llm_smoke.sh
 ```
 
 ## 3. Frontend
@@ -54,7 +91,33 @@ Important flags:
 - `feature.auto-tree`
 - `feature.explain`
 - `feature.hybrid-search`
+- `feature.nori-tokenizer`
+- `feature.label-quality-filter`
+- `feature.community-clustering`
+- `feature.feedback-routing-v2`
+- `feature.user-rules-v1`
+- `feature.admin-tree-debug`
 - `security.os-tenant-assert`
+- `TREE_NEIGHBOR_MIN_SIMILARITY` (기본 `0.8`, 값이 높을수록 트리 노드가 더 잘 분리됨)
+
+관리자 트리 디버그/룰 기능을 로컬에서 켜려면:
+```bash
+FEATURE_USER_RULES_V1=true FEATURE_ADMIN_TREE_DEBUG=true ./gradlew -p services :doc-api:bootRun
+```
+
+## 5-1. OpenSearch ko_nori analyzer check
+`_index_template`는 서버 시작 시 자동 갱신됩니다. analyzer 확인:
+```bash
+curl -s -X POST http://localhost:59200/_analyze \
+  -H 'Content-Type: application/json' \
+  -d '{"analyzer":"ko_nori","text":"사랑하는 문서를 자동 분류합니다"}'
+```
+
+템플릿 변경 후 재인덱싱이 필요하면:
+```bash
+curl -s -X DELETE http://localhost:59200/docs-active
+```
+그 뒤 `doc-api` 재시작 시 템플릿/인덱스/alias가 다시 bootstrap 됩니다.
 
 ## 6. Security notes
 - Do not log document body, extracted text, chunk text, or presigned URLs.

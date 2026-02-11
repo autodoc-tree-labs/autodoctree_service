@@ -25,6 +25,18 @@ search:
 security:
   os-tenant-assert: true
 
+feature:
+  embedding-ollama: false
+  llm-labeling: false
+  llm-explain: false
+  tfidf-labeler-fallback: false
+  label-quality-filter: true
+  community-clustering: true
+  nori-tokenizer: false
+  feedback-routing-v2: true
+  user-rules-v1: false
+  admin-tree-debug: true
+
 worker:
   poll-interval-ms: 86400000
   max-retries: 3
@@ -32,6 +44,43 @@ worker:
 
 tree:
   neighbor-top-k: 3
+  neighbor-min-similarity: 0.0
+  neighbor-normalize: true
   max-cluster-size: 8
+  min-cluster-size: 2
+  community-resolution: 1.0
   personalization-decay: 0.85
   personalization-min-score: 0.8
+  fusion-semantic-weight: 0.8
+  fusion-lexical-weight: 0.2
+  fusion-lexical-gate: 0.35
+  other-cluster-score-threshold: 0.32
+
+embedding:
+  provider: stub
+  input:
+    max-chars: 2000
+    head-chars: 1200
+    tail-chars: 600
+    section-heading-limit: 4
+    section-count-limit: 16
+  ollama:
+    base-url: http://localhost:11434
+    model: bge-m3
+    timeout-ms: 5000
+    batch-size: 16
+    max-retries: 1
+    retry-backoff-ms: 50
+    circuit-failure-threshold: 2
+    circuit-open-ms: 1000
+
+llm:
+  provider: ollama
+  ollama:
+    base-url: http://localhost:11434
+    model: llama3.1:8b-instruct
+    timeout-ms: 10000
+    max-retries: 1
+    retry-backoff-ms: 50
+    circuit-failure-threshold: 2
+    circuit-open-ms: 1000

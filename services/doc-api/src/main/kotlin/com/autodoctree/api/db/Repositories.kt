@@ -95,6 +95,7 @@ data class EmbeddingRow(
     val documentId: String,
     val targetType: String,
     val targetId: String,
+    val inputHash: String,
     val vectorJson: String,
     val modelVersion: String,
     val createdAt: LocalDateTime
@@ -134,6 +135,7 @@ data class TreeSnapshotRow(
     val movedRatio: Double,
     val churnCount: Int,
     val nodeRenameCount: Int,
+    val labelCacheJson: String,
     val createdAt: LocalDateTime,
     val activatedAt: LocalDateTime?,
     val activatedBy: String?
@@ -166,6 +168,17 @@ data class FeedbackEventRow(
     val userId: String,
     val eventType: String,
     val payloadJson: String,
+    val createdAt: LocalDateTime
+)
+
+data class UserRuleRow(
+    val id: String,
+    val workspaceId: String,
+    val ruleType: String,
+    val ruleValue: String,
+    val nodeId: String,
+    val enabled: Boolean,
+    val createdBy: String,
     val createdAt: LocalDateTime
 )
 
@@ -773,6 +786,7 @@ class EmbeddingRepository(private val jdbcTemplate: JdbcTemplate) {
             documentId = rs.getString("document_id"),
             targetType = rs.getString("target_type"),
             targetId = rs.getString("target_id"),
+            inputHash = rs.getString("input_hash"),
             vectorJson = rs.getString("vector_json"),
             modelVersion = rs.getString("model_version"),
             createdAt = rs.getTimestamp("created_at").toLocalDateTime()
@@ -784,6 +798,7 @@ class EmbeddingRepository(private val jdbcTemplate: JdbcTemplate) {
         documentId: String,
         targetType: String,
         targetId: String,
+        inputHash: String,
         vectorJson: String,
         modelVersion: String
     ) {
@@ -792,14 +807,15 @@ class EmbeddingRepository(private val jdbcTemplate: JdbcTemplate) {
             jdbcTemplate.update(
                 """
                 INSERT INTO embeddings(
-                    id, workspace_id, document_id, target_type, target_id, vector_json, model_version, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, workspace_id, document_id, target_type, target_id, input_hash, vector_json, model_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """.trimIndent(),
                 UUID.randomUUID().toString(),
                 workspaceId,
                 documentId,
                 targetType,
                 targetId,
+                inputHash,
                 vectorJson,
                 modelVersion,
                 now
@@ -809,17 +825,39 @@ class EmbeddingRepository(private val jdbcTemplate: JdbcTemplate) {
                 """
                 UPDATE embeddings
                 SET vector_json = ?, created_at = ?
-                WHERE workspace_id = ? AND target_type = ? AND target_id = ? AND model_version = ?
+                WHERE workspace_id = ? AND target_type = ? AND target_id = ? AND model_version = ? AND input_hash = ?
                 """.trimIndent(),
                 vectorJson,
                 now,
                 workspaceId,
                 targetType,
                 targetId,
-                modelVersion
+                modelVersion,
+                inputHash
             )
         }
     }
+
+    fun findByInputHash(
+        workspaceId: String,
+        targetType: String,
+        targetId: String,
+        modelVersion: String,
+        inputHash: String
+    ): EmbeddingRow? = jdbcTemplate.queryOneOrNull(
+        """
+        SELECT * FROM embeddings
+        WHERE workspace_id = ? AND target_type = ? AND target_id = ? AND model_version = ? AND input_hash = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """.trimIndent(),
+        mapper,
+        workspaceId,
+        targetType,
+        targetId,
+        modelVersion,
+        inputHash
+    )
 
     fun findDocEmbedding(workspaceId: String, documentId: String, modelVersion: String): EmbeddingRow? = jdbcTemplate.queryOneOrNull(
         """
@@ -1094,6 +1132,7 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
             movedRatio = rs.getDouble("moved_ratio"),
             churnCount = rs.getInt("churn_count"),
             nodeRenameCount = rs.getInt("node_rename_count"),
+            labelCacheJson = rs.getString("label_cache_json"),
             createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
             activatedAt = rs.getTimestamp("activated_at")?.toLocalDateTime(),
             activatedBy = rs.getString("activated_by")
@@ -1130,15 +1169,16 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
         status: String,
         movedRatio: Double,
         churnCount: Int,
-        nodeRenameCount: Int
+        nodeRenameCount: Int,
+        labelCacheJson: String = "{}"
     ): TreeSnapshotRow {
         val id = UUID.randomUUID().toString()
         val now = LocalDateTime.now()
         jdbcTemplate.update(
             """
             INSERT INTO tree_snapshot(
-                id, workspace_id, status, moved_ratio, churn_count, node_rename_count, created_at, activated_at, activated_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                id, workspace_id, status, moved_ratio, churn_count, node_rename_count, label_cache_json, created_at, activated_at, activated_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
             """.trimIndent(),
             id,
             workspaceId,
@@ -1146,9 +1186,10 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
             movedRatio,
             churnCount,
             nodeRenameCount,
+            labelCacheJson,
             now
         )
-        return TreeSnapshotRow(id, workspaceId, status, movedRatio, churnCount, nodeRenameCount, now, null, null)
+        return TreeSnapshotRow(id, workspaceId, status, movedRatio, churnCount, nodeRenameCount, labelCacheJson, now, null, null)
     }
 
     fun findActiveSnapshot(workspaceId: String): TreeSnapshotRow? = jdbcTemplate.queryOneOrNull(
@@ -1352,6 +1393,63 @@ class FeedbackRepository(private val jdbcTemplate: JdbcTemplate) {
         workspaceId,
         limit
     )
+}
+
+@Repository
+class UserRuleRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<UserRuleRow> { rs: ResultSet, _: Int ->
+        UserRuleRow(
+            id = rs.getString("id"),
+            workspaceId = rs.getString("workspace_id"),
+            ruleType = rs.getString("rule_type"),
+            ruleValue = rs.getString("rule_value"),
+            nodeId = rs.getString("node_id"),
+            enabled = rs.getBoolean("enabled"),
+            createdBy = rs.getString("created_by"),
+            createdAt = rs.getTimestamp("created_at").toLocalDateTime()
+        )
+    }
+
+    fun create(
+        workspaceId: String,
+        ruleType: String,
+        ruleValue: String,
+        nodeId: String,
+        createdBy: String
+    ): UserRuleRow {
+        val id = UUID.randomUUID().toString()
+        val now = LocalDateTime.now()
+        jdbcTemplate.update(
+            """
+            INSERT INTO user_rule(
+                id, workspace_id, rule_type, rule_value, node_id, enabled, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+            id,
+            workspaceId,
+            ruleType,
+            ruleValue,
+            nodeId,
+            true,
+            createdBy,
+            now
+        )
+        return UserRuleRow(id, workspaceId, ruleType, ruleValue, nodeId, true, createdBy, now)
+    }
+
+    fun listByWorkspace(workspaceId: String): List<UserRuleRow> = jdbcTemplate.query(
+        "SELECT * FROM user_rule WHERE workspace_id = ? AND enabled = true ORDER BY created_at DESC",
+        mapper,
+        workspaceId
+    )
+
+    fun delete(workspaceId: String, ruleId: String) {
+        jdbcTemplate.update(
+            "DELETE FROM user_rule WHERE workspace_id = ? AND id = ?",
+            workspaceId,
+            ruleId
+        )
+    }
 }
 
 @Repository

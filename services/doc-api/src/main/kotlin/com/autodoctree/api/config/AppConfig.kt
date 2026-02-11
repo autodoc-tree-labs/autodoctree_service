@@ -53,7 +53,17 @@ data class SearchProperties(
 data class FeatureFlags(
     val autoTree: Boolean,
     val explain: Boolean,
-    val hybridSearch: Boolean
+    val hybridSearch: Boolean,
+    val embeddingOllama: Boolean,
+    val labelQualityFilter: Boolean,
+    val communityClustering: Boolean,
+    val noriTokenizer: Boolean,
+    val feedbackRoutingV2: Boolean,
+    val userRulesV1: Boolean,
+    val adminTreeDebug: Boolean,
+    val llmLabeling: Boolean = false,
+    val llmExplain: Boolean = false,
+    val tfidfLabelerFallback: Boolean = false
 )
 
 @ConfigurationProperties(prefix = "security")
@@ -64,9 +74,59 @@ data class SecurityFlags(
 @ConfigurationProperties(prefix = "tree")
 data class TreeProperties(
     val neighborTopK: Int,
+    val neighborMinSimilarity: Double,
+    val neighborNormalize: Boolean,
     val maxClusterSize: Int,
+    val minClusterSize: Int,
+    val communityResolution: Double,
     val personalizationDecay: Double,
-    val personalizationMinScore: Double
+    val personalizationMinScore: Double,
+    val fusionSemanticWeight: Double,
+    val fusionLexicalWeight: Double,
+    val fusionLexicalGate: Double,
+    val otherClusterScoreThreshold: Double
+)
+
+@ConfigurationProperties(prefix = "embedding")
+data class EmbeddingProperties(
+    val provider: String,
+    val input: EmbeddingInputProperties,
+    val ollama: OllamaEmbeddingProperties
+)
+
+data class EmbeddingInputProperties(
+    val maxChars: Int,
+    val headChars: Int,
+    val tailChars: Int,
+    val sectionHeadingLimit: Int,
+    val sectionCountLimit: Int
+)
+
+data class OllamaEmbeddingProperties(
+    val baseUrl: String,
+    val model: String,
+    val timeoutMs: Long,
+    val batchSize: Int,
+    val maxRetries: Int,
+    val retryBackoffMs: Long,
+    val circuitFailureThreshold: Int,
+    val circuitOpenMs: Long
+)
+
+@ConfigurationProperties(prefix = "llm")
+data class LlmProperties(
+    val provider: String,
+    val ollama: OllamaLlmProperties
+)
+
+data class OllamaLlmProperties(
+    val baseUrl: String,
+    val model: String,
+    val timeoutMs: Long,
+    val maxRetries: Int,
+    val retryBackoffMs: Long,
+    val circuitFailureThreshold: Int,
+    val circuitOpenMs: Long
 )
 
 @Configuration

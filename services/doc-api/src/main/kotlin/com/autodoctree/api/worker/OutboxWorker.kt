@@ -37,7 +37,8 @@ class OutboxWorker(
     private val stageExecutionRepository: StageExecutionRepository,
     private val documentSectionRepository: DocumentSectionRepository,
     private val embeddingRepository: EmbeddingRepository,
-    private val embeddingProvider: LocalStubEmbeddingProvider,
+    private val embeddingProvider: EmbeddingProvider,
+    private val embeddingInputPreprocessor: EmbeddingInputPreprocessor,
     private val tenantSearchClient: TenantSearchClient,
     private val treeService: TreeService,
     private val rebuildDebounceQueue: RebuildDebounceQueue,
@@ -62,6 +63,8 @@ class OutboxWorker(
     private val stageDurationTimers: Map<Stage, Timer> = Stage.entries.associateWith { stage ->
         meterRegistry.timer("worker.stage.duration", "stage", stage.name)
     }
+    private val embeddingCacheHitCounter = meterRegistry.counter("embedding_cache_hit_total")
+    private val embeddingCacheMissCounter = meterRegistry.counter("embedding_cache_miss_total")
 
     init {
         meterRegistry.gauge("worker.outbox.lag_seconds", outboxLagSeconds)
@@ -235,23 +238,51 @@ class OutboxWorker(
         }
 
         if (runEmbed) {
+            val latestDocument = documentRepository.findByWorkspaceAndId(workspaceId, documentId) ?: document
             val sections = documentSectionRepository.listByWorkspaceAndDocument(workspaceId, documentId)
-            val textForEmbedding = if (sections.isNotEmpty()) {
-                sections.joinToString("\n") { it.chunkText }
-            } else {
-                documentRepository.findByWorkspaceAndId(workspaceId, documentId)?.bodyText ?: ""
+            val modelVersion = embeddingProvider.modelVersion()
+            val payloads = embeddingInputPreprocessor.buildPayloads(latestDocument, sections)
+            val payloadHashes = payloads.associate { payload ->
+                payload to sha256(payload.text + "|" + modelVersion)
             }
-            val inputHash = sha256(textForEmbedding + Stage.EMBED.name)
-            executeStage(workspaceId, documentId, Stage.EMBED, inputHash, embeddingProvider.modelVersion()) {
-                val embedding = embeddingProvider.embed(listOf(textForEmbedding)).first()
-                embeddingRepository.upsert(
-                    workspaceId = workspaceId,
-                    documentId = documentId,
-                    targetType = "DOCUMENT",
-                    targetId = documentId,
-                    vectorJson = objectMapper.writeValueAsString(embedding),
-                    modelVersion = embeddingProvider.modelVersion()
-                )
+            val stageInputHash = sha256(
+                payloadHashes.values.sorted().joinToString("|") + "|" + modelVersion + "|" + Stage.EMBED.name
+            )
+            executeStage(workspaceId, documentId, Stage.EMBED, stageInputHash, modelVersion) {
+                val misses = mutableListOf<Pair<EmbeddingPayload, String>>()
+                payloadHashes.forEach { (payload, inputHash) ->
+                    val cached = embeddingRepository.findByInputHash(
+                        workspaceId = workspaceId,
+                        targetType = payload.targetType,
+                        targetId = payload.targetId,
+                        modelVersion = modelVersion,
+                        inputHash = inputHash
+                    )
+                    if (cached == null) {
+                        misses += payload to inputHash
+                        embeddingCacheMissCounter.increment()
+                    } else {
+                        embeddingCacheHitCounter.increment()
+                    }
+                }
+
+                misses.chunked(embeddingProvider.batchSize()).forEach { batch ->
+                    val vectors = embeddingProvider.embed(batch.map { it.first.text })
+                    if (vectors.size != batch.size) {
+                        throw IllegalStateException("Embedding provider returned mismatched vector count")
+                    }
+                    batch.forEachIndexed { index, (payload, inputHash) ->
+                        embeddingRepository.upsert(
+                            workspaceId = workspaceId,
+                            documentId = documentId,
+                            targetType = payload.targetType,
+                            targetId = payload.targetId,
+                            inputHash = inputHash,
+                            vectorJson = objectMapper.writeValueAsString(vectors[index]),
+                            modelVersion = modelVersion
+                        )
+                    }
+                }
             }
         }
 

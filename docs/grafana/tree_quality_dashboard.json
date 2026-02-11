@@ -1,0 +1,101 @@
+{
+  "uid": "autodoc-tree-quality-v1",
+  "title": "AutoDoc Tree Quality",
+  "tags": ["autodoc", "tree", "quality"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Tree Rebuild Duration (ms)",
+      "targets": [
+        {
+          "expr": "rate(tree_rebuild_duration_ms_sum[5m]) / rate(tree_rebuild_duration_ms_count[5m])",
+          "legendFormat": "avg"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Neighbor Edges",
+      "targets": [
+        {
+          "expr": "rate(neighbor_edges_total_sum[5m])",
+          "legendFormat": "edges_total"
+        },
+        {
+          "expr": "rate(edges_filtered_total_sum[5m])",
+          "legendFormat": "edges_filtered"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Cluster Size",
+      "targets": [
+        {
+          "expr": "rate(cluster_count_sum[5m]) / rate(cluster_count_count[5m])",
+          "legendFormat": "cluster_count"
+        },
+        {
+          "expr": "rate(avg_cluster_size_sum[5m]) / rate(avg_cluster_size_count[5m])",
+          "legendFormat": "avg_cluster_size"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Label Quality",
+      "targets": [
+        {
+          "expr": "sum(rate(label_filtered_total[5m])) by (reason)",
+          "legendFormat": "filtered {{reason}}"
+        },
+        {
+          "expr": "rate(avg_label_length_sum[5m]) / rate(avg_label_length_count[5m])",
+          "legendFormat": "avg_label_length"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Tree Stability",
+      "targets": [
+        {
+          "expr": "rate(moved_ratio_sum[5m]) / rate(moved_ratio_count[5m])",
+          "legendFormat": "moved_ratio"
+        },
+        {
+          "expr": "rate(churn_ratio_sum[5m]) / rate(churn_ratio_count[5m])",
+          "legendFormat": "churn_ratio"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Feedback/Rules Applied",
+      "targets": [
+        {
+          "expr": "rate(feedback_applied_total[5m])",
+          "legendFormat": "feedback_applied"
+        },
+        {
+          "expr": "rate(rules_applied_total[5m])",
+          "legendFormat": "rules_applied"
+        }
+      ]
+    }
+  ]
+}

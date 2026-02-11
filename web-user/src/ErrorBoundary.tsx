@@ -27,9 +27,9 @@ export class ErrorBoundary extends React.Component<React.PropsWithChildren, Erro
     if (this.state.hasError) {
       return (
         <div style={{ padding: 20, fontFamily: "sans-serif" }}>
-          <h2>Unexpected UI error</h2>
-          <p>{this.state.message || "Something went wrong."}</p>
-          <button onClick={() => window.location.reload()}>Retry</button>
+          <h2>예상하지 못한 인터페이스 오류가 발생했습니다</h2>
+          <p>{this.state.message || "문제가 발생했습니다."}</p>
+          <button onClick={() => window.location.reload()}>다시 시도</button>
         </div>
       );
     }

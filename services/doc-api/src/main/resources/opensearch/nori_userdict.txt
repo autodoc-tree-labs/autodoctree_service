@@ -1,0 +1,6 @@
+# custom product and domain terms
+오토독트리
+오토독
+워크스페이스
+문서함
+스냅샷
