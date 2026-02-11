@@ -163,6 +163,8 @@ class TreeTelemetry(
             "assign_recommend_threshold" to tree.assignRecommendThreshold,
             "assign_quarantine_enabled" to tree.assignQuarantineEnabled,
             "assign_reranker_enabled" to tree.assignRerankerEnabled,
+            "consensus_enabled" to tree.consensusEnabled,
+            "consensus_threshold" to tree.consensusThreshold,
             "max_cluster_size" to tree.maxClusterSize,
             "min_cluster_size" to tree.minClusterSize,
             "community_resolution" to tree.communityResolution,

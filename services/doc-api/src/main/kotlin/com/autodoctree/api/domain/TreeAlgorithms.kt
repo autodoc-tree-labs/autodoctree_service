@@ -10,6 +10,7 @@ import com.autodoctree.api.reranker.RerankerPairInput
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.time.Duration
 import java.time.LocalDateTime
@@ -681,6 +682,7 @@ class TreeClusterer(
     private val featureFlags: com.autodoctree.api.config.FeatureFlags,
     meterRegistry: MeterRegistry
 ) {
+    private val logger = LoggerFactory.getLogger(javaClass)
     private val durationTimer = meterRegistry.timer("tree.clusterer.duration")
     private val docsSummary = meterRegistry.summary("tree.clusterer.docs")
     private val clustersSummary = meterRegistry.summary("tree.clusterer.clusters")
@@ -688,6 +690,15 @@ class TreeClusterer(
     private val clusterAverageSizeSummary = meterRegistry.summary("avg_cluster_size")
     private val modularityProxySummary = meterRegistry.summary("modularity_proxy")
     private val splitClusterCounter = meterRegistry.counter("split_cluster_total")
+    private val consensusStrengthSummary = meterRegistry.summary("consensus_strength")
+    private val unstableClusterCountSummary = meterRegistry.summary("unstable_cluster_count")
+
+    private data class ConsensusResult(
+        val communities: List<List<String>>,
+        val consensusStrength: Double,
+        val unstableClusterCount: Int,
+        val strongEdgeCount: Int
+    )
 
     fun cluster(documents: List<DocumentRow>, graph: NeighborGraph, maxClusterSize: Int): List<TreeCluster> {
         val sample = Timer.start()
@@ -714,12 +725,27 @@ class TreeClusterer(
             }
         }
 
-        val communities = if (featureFlags.communityClustering) {
+        val baseCommunities = if (featureFlags.communityClustering) {
             detectCommunities(ids, weighted, treeProperties.communityResolution)
         } else {
             connectedComponents(ids, undirected)
         }
-        val merged = mergeSmallClusters(communities, weighted, treeProperties.minClusterSize.coerceAtLeast(1))
+        val consensusResult = if (treeProperties.consensusEnabled) {
+            applyConsensusClustering(
+                ids = ids,
+                weighted = weighted,
+                undirected = undirected,
+                baseCommunities = baseCommunities
+            )
+        } else {
+            ConsensusResult(
+                communities = baseCommunities,
+                consensusStrength = 0.0,
+                unstableClusterCount = 0,
+                strongEdgeCount = 0
+            )
+        }
+        val merged = mergeSmallClusters(consensusResult.communities, weighted, treeProperties.minClusterSize.coerceAtLeast(1))
 
         val bounded = merged.flatMap { component ->
             splitOversizedComponent(component, undirected, weighted, maxClusterSize.coerceAtLeast(2))
@@ -741,7 +767,144 @@ class TreeClusterer(
         clusterCountSummary.record(clusters.size.toDouble())
         clusterAverageSizeSummary.record(clusters.map { it.documentIds.size }.average().takeIf { !it.isNaN() } ?: 0.0)
         modularityProxySummary.record(modularityProxy(ids, weighted, clusters))
+        if (treeProperties.consensusEnabled) {
+            consensusStrengthSummary.record(consensusResult.consensusStrength.coerceIn(0.0, 1.0))
+            unstableClusterCountSummary.record(consensusResult.unstableClusterCount.toDouble())
+            logger.info(
+                "consensus_cluster_summary enabled=true threshold={} strong_edge_count={} consensus_strength={} unstable_cluster_count={}",
+                treeProperties.consensusThreshold,
+                consensusResult.strongEdgeCount,
+                String.format("%.3f", consensusResult.consensusStrength),
+                consensusResult.unstableClusterCount
+            )
+        }
         return clusters
+    }
+
+    private fun applyConsensusClustering(
+        ids: List<String>,
+        weighted: Map<String, Map<String, Double>>,
+        undirected: Map<String, Set<String>>,
+        baseCommunities: List<List<String>>
+    ): ConsensusResult {
+        if (ids.isEmpty()) {
+            return ConsensusResult(
+                communities = emptyList(),
+                consensusStrength = 0.0,
+                unstableClusterCount = 0,
+                strongEdgeCount = 0
+            )
+        }
+
+        val ensembles = mutableListOf<List<List<String>>>()
+        if (baseCommunities.isNotEmpty()) {
+            ensembles += baseCommunities
+        }
+        val highResolution = detectCommunities(ids, weighted, treeProperties.communityResolution + 0.25)
+        if (highResolution.isNotEmpty()) {
+            ensembles += highResolution
+        }
+        val lowResolution = detectCommunities(
+            ids,
+            weighted,
+            (treeProperties.communityResolution - 0.20).coerceAtLeast(0.10)
+        )
+        if (lowResolution.isNotEmpty()) {
+            ensembles += lowResolution
+        }
+        val denseThreshold = maxOf(0.55, treeProperties.neighborMinSimilarity.coerceIn(0.0, 1.0))
+        val denseUndirected = ids.associateWith { mutableSetOf<String>() }.toMutableMap()
+        weighted.forEach { (docId, neighbors) ->
+            neighbors.forEach { (neighborId, similarity) ->
+                if (similarity >= denseThreshold) {
+                    denseUndirected.getValue(docId).add(neighborId)
+                    denseUndirected.getValue(neighborId).add(docId)
+                }
+            }
+        }
+        val denseComponents = connectedComponents(ids, denseUndirected.mapValues { it.value.toSet() })
+        if (denseComponents.isNotEmpty()) {
+            ensembles += denseComponents
+        }
+        if (ensembles.isEmpty()) {
+            return ConsensusResult(
+                communities = connectedComponents(ids, undirected),
+                consensusStrength = 0.0,
+                unstableClusterCount = 0,
+                strongEdgeCount = 0
+            )
+        }
+
+        val labelMaps = ensembles.map(::clusterLabelMap)
+        val threshold = treeProperties.consensusThreshold.coerceIn(0.5, 1.0)
+        val strongAdjacency = ids.associateWith { mutableSetOf<String>() }.toMutableMap()
+        val pairScoreByKey = mutableMapOf<String, Double>()
+        val incidentPairByDoc = ids.associateWith { mutableSetOf<String>() }.toMutableMap()
+        var strongEdgeCount = 0
+        var totalStrength = 0.0
+
+        weighted.forEach { (docId, neighbors) ->
+            neighbors.forEach { (neighborId, _) ->
+                if (docId >= neighborId) {
+                    return@forEach
+                }
+                val key = pairKey(docId, neighborId)
+                val votes = labelMaps.count { labels -> labels[docId] != null && labels[docId] == labels[neighborId] }
+                val probability = votes.toDouble() / labelMaps.size.toDouble()
+                pairScoreByKey[key] = probability
+                incidentPairByDoc.getValue(docId).add(key)
+                incidentPairByDoc.getValue(neighborId).add(key)
+                if (probability >= threshold) {
+                    strongAdjacency.getValue(docId).add(neighborId)
+                    strongAdjacency.getValue(neighborId).add(docId)
+                    strongEdgeCount += 1
+                    totalStrength += probability
+                }
+            }
+        }
+
+        val communities = if (strongEdgeCount == 0) {
+            baseCommunities.ifEmpty { connectedComponents(ids, undirected) }
+        } else {
+            connectedComponents(ids, strongAdjacency.mapValues { it.value.toSet() })
+        }
+        val unstableClusterCount = ids.count { docId ->
+            val pairKeys = incidentPairByDoc[docId].orEmpty()
+            if (pairKeys.isEmpty()) {
+                return@count false
+            }
+            val strongest = pairKeys.maxOfOrNull { pairKey -> pairScoreByKey[pairKey] ?: 0.0 } ?: 0.0
+            strongest < threshold
+        }
+        val consensusStrength = if (strongEdgeCount == 0) {
+            0.0
+        } else {
+            totalStrength / strongEdgeCount.toDouble()
+        }
+        return ConsensusResult(
+            communities = communities,
+            consensusStrength = consensusStrength.coerceIn(0.0, 1.0),
+            unstableClusterCount = unstableClusterCount,
+            strongEdgeCount = strongEdgeCount
+        )
+    }
+
+    private fun clusterLabelMap(communities: List<List<String>>): Map<String, Int> {
+        val result = mutableMapOf<String, Int>()
+        communities.forEachIndexed { index, members ->
+            members.forEach { docId ->
+                result[docId] = index
+            }
+        }
+        return result
+    }
+
+    private fun pairKey(left: String, right: String): String {
+        return if (left <= right) {
+            "$left::$right"
+        } else {
+            "$right::$left"
+        }
     }
 
     private fun splitOversizedComponent(

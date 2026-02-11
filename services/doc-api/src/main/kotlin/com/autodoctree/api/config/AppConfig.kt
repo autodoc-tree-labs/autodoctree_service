@@ -86,6 +86,8 @@ data class TreeProperties(
     val maxClusterSize: Int,
     val minClusterSize: Int,
     val communityResolution: Double,
+    val consensusEnabled: Boolean = false,
+    val consensusThreshold: Double = 0.67,
     val personalizationDecay: Double,
     val personalizationMinScore: Double,
     val fusionSemanticWeight: Double,

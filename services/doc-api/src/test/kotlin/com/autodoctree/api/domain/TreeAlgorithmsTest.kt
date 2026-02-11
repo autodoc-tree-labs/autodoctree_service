@@ -312,6 +312,44 @@ class TreeAlgorithmsTest {
     }
 
     @Test
+    fun `consensus clusterer is reproducible and keeps strong pairs`() {
+        val registry = SimpleMeterRegistry()
+        val clusterer = TreeClusterer(
+            treeProperties = testTreeProperties().copy(
+                consensusEnabled = true,
+                consensusThreshold = 0.67
+            ),
+            featureFlags = testFeatureFlags(),
+            meterRegistry = registry
+        )
+        val docs = listOf(
+            doc("f-1", "finance invoice"),
+            doc("f-2", "finance settlement"),
+            doc("s-1", "sports match"),
+            doc("s-2", "sports league"),
+            doc("l-1", "legal policy"),
+            doc("l-2", "legal contract")
+        )
+        val adjacency = mapOf(
+            "f-1" to listOf(NeighborLink("f-2", 0.93), NeighborLink("s-1", 0.08)),
+            "f-2" to listOf(NeighborLink("f-1", 0.93), NeighborLink("l-1", 0.07)),
+            "s-1" to listOf(NeighborLink("s-2", 0.94), NeighborLink("f-1", 0.08)),
+            "s-2" to listOf(NeighborLink("s-1", 0.94), NeighborLink("l-2", 0.06)),
+            "l-1" to listOf(NeighborLink("l-2", 0.92), NeighborLink("f-2", 0.07)),
+            "l-2" to listOf(NeighborLink("l-1", 0.92), NeighborLink("s-2", 0.06))
+        )
+
+        val first = clusterer.cluster(docs, NeighborGraph(adjacency), maxClusterSize = 6)
+        val second = clusterer.cluster(docs, NeighborGraph(adjacency), maxClusterSize = 6)
+        val assignmentFirst = first.flatMap { cluster -> cluster.documentIds.map { it to cluster.id } }.toMap()
+        val assignmentSecond = second.flatMap { cluster -> cluster.documentIds.map { it to cluster.id } }.toMap()
+
+        assertEquals(assignmentFirst, assignmentSecond)
+        assertEquals(docs.size, assignmentFirst.size)
+        assertTrue(first.isNotEmpty())
+    }
+
+    @Test
     fun `labeler returns non empty labels`() {
         val labeler = testLabeler()
         val docs = listOf(
