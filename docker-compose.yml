@@ -86,6 +86,34 @@ services:
     volumes:
       - ollama-data:/root/.ollama
 
+  ollama-init:
+    image: ollama/ollama:0.5.7
+    profiles: ["llm-init"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: >
+      /bin/sh -c '
+      set -e;
+      for model in bge-m3 llama3.1:8b-instruct; do
+        echo "[ollama-init] pulling $$model";
+        retries=0;
+        until ollama pull "$$model"; do
+          retries=$$((retries+1));
+          if [ "$$retries" -ge 5 ]; then
+            echo "[ollama-init] failed to pull $$model after $$retries attempts" >&2;
+            exit 1;
+          fi;
+          sleep 3;
+        done;
+      done;
+      ollama list;
+      exit 0;'
+    volumes:
+      - ollama-data:/root/.ollama
+
 volumes:
   postgres-data:
   opensearch-data:

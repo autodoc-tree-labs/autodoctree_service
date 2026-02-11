@@ -24,20 +24,26 @@ Services:
 - MinIO API: `localhost:59000`
 - MinIO Console: `localhost:59001`
 
-## 1-1. Optional local LLM (Ollama, offline embedding)
+## 1-1. Optional local LLM (Ollama, offline embedding + generate)
 Start only Ollama with compose profile:
 ```bash
 docker compose --profile llm up -d ollama
 docker compose ps ollama
 ```
 
-Pull and verify the model:
+Pull and verify both models:
 ```bash
 docker compose --profile llm exec ollama ollama pull bge-m3
+docker compose --profile llm exec ollama ollama pull llama3.1:8b-instruct
 docker compose --profile llm exec ollama ollama list
 ```
 
 If host port `11434` is already used, override with `OLLAMA_PORT`.
+
+Optional one-shot preload service:
+```bash
+docker compose --profile llm --profile llm-init up ollama-init
+```
 
 ## 2. Backend (IntelliJ)
 1. Open `services/` as Gradle project.
@@ -51,6 +57,11 @@ If host port `11434` is already used, override with `OLLAMA_PORT`.
   - `EMBEDDING_PROVIDER=ollama`
   - `EMBEDDING_OLLAMA_BASE_URL=http://localhost:11434`
   - `EMBEDDING_OLLAMA_MODEL=bge-m3`
+  - `LLM_PROVIDER=ollama`
+  - `LLM_OLLAMA_BASE_URL=http://localhost:11434`
+  - `LLM_OLLAMA_MODEL=llama3.1:8b-instruct`
+  - `FEATURE_LLM_LABELING=true`
+  - `FEATURE_LLM_EXPLAIN=true`
 
 Quick test:
 ```bash
@@ -59,7 +70,7 @@ curl -s http://localhost:8080/api/v1/health
 
 Ollama smoke:
 ```bash
-curl -s http://localhost:11434/api/tags
+./scripts/llm_smoke.sh
 ```
 
 ## 3. Frontend

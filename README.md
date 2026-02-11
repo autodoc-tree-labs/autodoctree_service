@@ -30,10 +30,17 @@ docker compose up -d
 docker compose ps
 ```
 
-Optional offline embedding runtime (Ollama):
+Optional offline embedding/generate runtime (Ollama):
 ```bash
 docker compose --profile llm up -d ollama
 docker compose --profile llm exec ollama ollama pull bge-m3
+docker compose --profile llm exec ollama ollama pull llama3.1:8b-instruct
+docker compose --profile llm exec ollama ollama list
+```
+
+Optional one-shot preload profile:
+```bash
+docker compose --profile llm --profile llm-init up ollama-init
 ```
 
 2) backend (IntelliJ)
@@ -50,6 +57,7 @@ pnpm -C web-admin dev --port 5173
 4) tests/build
 ```bash
 ./gradlew -p services test
+./scripts/llm_smoke.sh
 pnpm build
 pnpm test:e2e
 ```

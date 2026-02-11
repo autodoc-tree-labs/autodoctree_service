@@ -51,8 +51,12 @@ curl -s \"http://localhost:59200/docs-active/_search?q=workspace_id:YOUR_WORKSPA
 
 ### Key metrics
 - `tree_rebuild_duration_ms`
+- `embedding_latency_ms`
+- `embedding_fail_total`
 - `neighbor_edges_total`
+- `edges_total`
 - `edges_filtered_total`
+- `avg_similarity`
 - `cluster_count`
 - `avg_cluster_size`
 - `label_filtered_total{reason=...}`
@@ -68,7 +72,7 @@ curl -s \"http://localhost:59200/docs-active/_search?q=workspace_id:YOUR_WORKSPA
 
 ### Quick check
 ```bash
-curl -s http://localhost:8080/actuator/prometheus | rg 'tree_rebuild_duration_ms|neighbor_edges_total|cluster_count|label_filtered_total'
+curl -s http://localhost:8080/actuator/prometheus | rg 'tree_rebuild_duration_ms|embedding_latency_ms|edges_total|avg_similarity|cluster_count|label_filtered_total'
 ```
 
 ## Tree Quality Regression Golden Set (B-0607)
