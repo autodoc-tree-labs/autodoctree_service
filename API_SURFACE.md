@@ -213,7 +213,8 @@ Response:
     "similar_docs": [
       { "document_id": "doc_2", "title": "ShedLock notes", "similarity": 0.91 }
     ],
-    "signals": ["HYBRID_SIM_HIGH"]
+    "signals": ["HYBRID_SIM_HIGH"],
+    "llm_sentence": "동시성 키워드와 높은 유사도 신호로 이 노드에 배치되었습니다."
   }
 }
 ```

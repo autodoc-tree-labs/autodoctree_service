@@ -9,6 +9,9 @@ feature:
   explain: true
   hybrid-search: false
   embedding-ollama: ${FEATURE_EMBEDDING_OLLAMA:false}
+  llm-labeling: ${FEATURE_LLM_LABELING:true}
+  llm-explain: ${FEATURE_LLM_EXPLAIN:true}
+  tfidf-labeler-fallback: ${FEATURE_TFIDF_LABELER_FALLBACK:false}
   nori-tokenizer: ${FEATURE_NORI_TOKENIZER:true}
 
 search:
@@ -16,3 +19,6 @@ search:
 
 security:
   os-tenant-assert: true
+
+llm:
+  provider: ${LLM_PROVIDER:ollama}

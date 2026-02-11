@@ -55,6 +55,9 @@ feature:
   explain: true
   hybrid-search: false
   embedding-ollama: ${FEATURE_EMBEDDING_OLLAMA:false}
+  llm-labeling: ${FEATURE_LLM_LABELING:true}
+  llm-explain: ${FEATURE_LLM_EXPLAIN:true}
+  tfidf-labeler-fallback: ${FEATURE_TFIDF_LABELER_FALLBACK:false}
   label-quality-filter: ${FEATURE_LABEL_QUALITY_FILTER:true}
   community-clustering: ${FEATURE_COMMUNITY_CLUSTERING:true}
   nori-tokenizer: ${FEATURE_NORI_TOKENIZER:true}
@@ -101,3 +104,14 @@ embedding:
     retry-backoff-ms: ${EMBEDDING_OLLAMA_RETRY_BACKOFF_MS:300}
     circuit-failure-threshold: ${EMBEDDING_OLLAMA_CIRCUIT_FAILURE_THRESHOLD:3}
     circuit-open-ms: ${EMBEDDING_OLLAMA_CIRCUIT_OPEN_MS:15000}
+
+llm:
+  provider: ${LLM_PROVIDER:ollama}
+  ollama:
+    base-url: ${LLM_OLLAMA_BASE_URL:http://localhost:11434}
+    model: ${LLM_OLLAMA_MODEL:llama3.1:8b-instruct}
+    timeout-ms: ${LLM_OLLAMA_TIMEOUT_MS:10000}
+    max-retries: ${LLM_OLLAMA_MAX_RETRIES:2}
+    retry-backoff-ms: ${LLM_OLLAMA_RETRY_BACKOFF_MS:300}
+    circuit-failure-threshold: ${LLM_OLLAMA_CIRCUIT_FAILURE_THRESHOLD:3}
+    circuit-open-ms: ${LLM_OLLAMA_CIRCUIT_OPEN_MS:15000}

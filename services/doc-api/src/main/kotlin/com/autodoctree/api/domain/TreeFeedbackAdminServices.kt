@@ -20,11 +20,13 @@ import com.autodoctree.api.infra.ForbiddenException
 import com.autodoctree.api.infra.NotFoundException
 import com.autodoctree.api.infra.requireEditor
 import com.autodoctree.api.infra.requireOwner
+import com.autodoctree.api.llm.LlmTextGenerator
 import com.autodoctree.api.tenant.WorkspaceContext
 import com.autodoctree.api.worker.EmbeddingProvider
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Statistic
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
@@ -44,12 +46,16 @@ class TreeService(
     private val neighborBuilder: NeighborBuilder,
     private val treeClusterer: TreeClusterer,
     private val treeLabeler: TreeLabeler,
+    private val labelerChain: LabelerChain,
+    private val llmExplainGenerator: LlmExplainGenerator,
     private val treePersonalizationEngine: TreePersonalizationEngine,
     private val userRuleMatcher: UserRuleMatcher,
     private val embeddingProvider: EmbeddingProvider,
+    private val llmTextGenerator: LlmTextGenerator,
     private val rebuildDebounceQueue: RebuildDebounceQueue,
     meterRegistry: MeterRegistry
 ) {
+    private val logger = LoggerFactory.getLogger(javaClass)
     private val rebuildDurationSummary = meterRegistry.summary("tree_rebuild_duration_ms")
     private val feedbackAppliedCounter = meterRegistry.counter("feedback_applied_total")
     private val correctedRatioSummary = meterRegistry.summary("corrected_ratio")
@@ -67,6 +73,7 @@ class TreeService(
             val active = treeRepository.findActiveSnapshot(workspaceId)
             val activeNodes = active?.let { treeRepository.listNodes(workspaceId, it.id) } ?: emptyList()
             val activeMemberships = active?.let { treeRepository.listMemberships(workspaceId, it.id) } ?: emptyList()
+            val previousLabelCache = parseLabelCache(active?.labelCacheJson)
 
             val lockedNodes = activeNodes.filter { it.locked }
             val lockedNodeById = lockedNodes.associateBy { it.id }
@@ -150,6 +157,14 @@ class TreeService(
             )
 
             val remaining = documents.filterNot { assignment.containsKey(it.id) }
+            var graphStats = NeighborBuildStats()
+            var labelSourceBreakdown = emptyMap<String, Int>()
+            var labelCacheToPersist = previousLabelCache
+            val embeddingAvailableDocRatio = if (remaining.isEmpty()) {
+                1.0
+            } else {
+                remaining.count { embeddingByDocumentId.containsKey(it.id) }.toDouble() / remaining.size.toDouble()
+            }
             if (remaining.isNotEmpty()) {
                 val graph = neighborBuilder.build(
                     workspaceId = workspaceId,
@@ -168,12 +183,16 @@ class TreeService(
                     graph = graph,
                     maxClusterSize = treeProperties.maxClusterSize
                 )
-
-                val rawLabelsByCluster = treeLabeler.labelClusters(
+                val labelingResult = labelerChain.labelClusters(
                     workspaceDocuments = documents,
-                    clusters = clusters
+                    clusters = clusters,
+                    existingCache = previousLabelCache
                 )
+                val rawLabelsByCluster = labelingResult.labelsByCluster
                 val mergedLabelMap = treeLabeler.mergeSimilarLabels(rawLabelsByCluster.values)
+                graphStats = graph.stats
+                labelSourceBreakdown = labelingResult.sourceBreakdown
+                labelCacheToPersist = labelingResult.labelCacheBySignature
 
                 clusters.forEach { cluster ->
                     val rawLabel = rawLabelsByCluster[cluster.id] ?: "general"
@@ -183,6 +202,24 @@ class TreeService(
                     }
                 }
             }
+            logger.info(
+                "tree_rebuild_summary workspace_id={} document_count={} embedding_provider={} embedding_model={} llm_provider={} llm_model={} embedding_available_doc_ratio={} edge_count={} filtered_edge_count={} similarity_source_breakdown={} label_source_breakdown={}",
+                workspaceId,
+                documents.size,
+                embeddingProvider.providerId(),
+                embeddingProvider.modelVersion(),
+                llmTextGenerator.providerId(),
+                llmTextGenerator.modelVersion(),
+                String.format("%.3f", embeddingAvailableDocRatio),
+                graphStats.edgeCount,
+                graphStats.filteredEdgeCount,
+                mapOf(
+                    "embedding_only" to graphStats.similaritySourceBreakdown.embeddingOnly,
+                    "lexical_only" to graphStats.similaritySourceBreakdown.lexicalOnly,
+                    "fused" to graphStats.similaritySourceBreakdown.fused
+                ),
+                labelSourceBreakdown
+            )
 
             documents.forEach { doc ->
                 assignment.putIfAbsent(doc.id, "general")
@@ -279,7 +316,8 @@ class TreeService(
                 status = nextStatus,
                 movedRatio = movedRatio,
                 churnCount = churnCount,
-                nodeRenameCount = nodeRenameCount
+                nodeRenameCount = nodeRenameCount,
+                labelCacheJson = objectMapper.writeValueAsString(labelCacheToPersist)
             )
 
             val root = treeRepository.insertNode(
@@ -333,14 +371,23 @@ class TreeService(
             documents.forEach { doc ->
                 val label = assignment[doc.id] ?: "general"
                 val node = labelToNode[label] ?: return@forEach
+                val keywords = treeLabeler.keywords(doc.title + " " + (doc.bodyText ?: ""), 5)
+                val similarDocs = findSimilarDocs(doc.id, embeddingByDocumentId, documentsById, 3)
+                val signals = buildSignals(
+                    wasLocked = lockedLabelByDocument.containsKey(doc.id),
+                    personalized = personalizedDocIds.contains(doc.id),
+                    ruled = ruledDocIds.contains(doc.id)
+                )
+                val llmSentence = llmExplainGenerator.generate(
+                    keywords = keywords,
+                    similarDocs = similarDocs,
+                    signals = signals
+                )
                 val rationale = mapOf(
-                    "keywords" to treeLabeler.keywords(doc.title + " " + (doc.bodyText ?: ""), 5),
-                    "similar_docs" to findSimilarDocs(doc.id, embeddingByDocumentId, documentsById, 3),
-                    "signals" to buildSignals(
-                        wasLocked = lockedLabelByDocument.containsKey(doc.id),
-                        personalized = personalizedDocIds.contains(doc.id),
-                        ruled = ruledDocIds.contains(doc.id)
-                    )
+                    "keywords" to keywords,
+                    "similar_docs" to similarDocs,
+                    "signals" to signals,
+                    "llm_sentence" to llmSentence
                 )
                 treeRepository.insertMembership(
                     workspaceId = workspaceId,
@@ -463,7 +510,8 @@ class TreeService(
         val fallback = mapOf(
             "keywords" to emptyList<String>(),
             "similar_docs" to emptyList<Map<String, Any?>>(),
-            "signals" to emptyList<String>()
+            "signals" to emptyList<String>(),
+            "llm_sentence" to null
         )
         val rationale = membership?.let { parseRationale(it.rationaleJson) } ?: fallback
         return mapOf(
@@ -538,7 +586,8 @@ class TreeService(
             mapOf(
                 "keywords" to emptyList<String>(),
                 "similar_docs" to emptyList<Map<String, Any?>>(),
-                "signals" to emptyList<String>()
+                "signals" to emptyList<String>(),
+                "llm_sentence" to null
             )
         }
     }
@@ -619,6 +668,16 @@ class TreeService(
                 )
             }
             .distinctBy { "${it.ruleType}::${it.ruleValue}::${it.targetLabel}" }
+    }
+
+    private fun parseLabelCache(labelCacheJson: String?): Map<String, String> {
+        if (labelCacheJson.isNullOrBlank()) {
+            return emptyMap()
+        }
+        return runCatching {
+            @Suppress("UNCHECKED_CAST")
+            objectMapper.readValue(labelCacheJson, Map::class.java) as Map<String, String>
+        }.getOrElse { emptyMap() }
     }
 
 }

@@ -3,6 +3,7 @@ package com.autodoctree.api.worker
 import com.autodoctree.api.config.EmbeddingInputProperties
 import com.autodoctree.api.config.EmbeddingProperties
 import com.autodoctree.api.config.OllamaEmbeddingProperties
+import com.autodoctree.api.ollama.embedding.OllamaEmbeddingClient
 import com.autodoctree.api.db.DocumentRow
 import com.autodoctree.api.db.SectionRow
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -83,20 +84,24 @@ class EmbeddingProviderTest {
                 respond(exchange, 200, """{"embeddings":[[0.1,0.2],[0.3,0.4]]}""")
             }
         }
+        val properties = EmbeddingProperties(
+            provider = "ollama",
+            input = EmbeddingInputProperties(4000, 2400, 1200, 6, 24),
+            ollama = defaultOllamaProperties("http://127.0.0.1:${server.address.port}").copy(
+                timeoutMs = 2000,
+                maxRetries = 1,
+                retryBackoffMs = 10,
+                batchSize = 8
+            )
+        )
 
         val provider = OllamaEmbeddingProvider(
-            objectMapper = jacksonObjectMapper(),
-            embeddingProperties = EmbeddingProperties(
-                provider = "ollama",
-                input = EmbeddingInputProperties(4000, 2400, 1200, 6, 24),
-                ollama = defaultOllamaProperties("http://127.0.0.1:${server.address.port}").copy(
-                    timeoutMs = 2000,
-                    maxRetries = 1,
-                    retryBackoffMs = 10,
-                    batchSize = 8
-                )
-            ),
-            meterRegistry = SimpleMeterRegistry()
+            embeddingProperties = properties,
+            ollamaEmbeddingClient = OllamaEmbeddingClient(
+                objectMapper = jacksonObjectMapper(),
+                embeddingProperties = properties,
+                meterRegistry = SimpleMeterRegistry()
+            )
         )
 
         val vectors = provider.embed(listOf("a", "b"))
@@ -112,20 +117,24 @@ class EmbeddingProviderTest {
             attempts.incrementAndGet()
             respond(exchange, 500, """{"error":"down"}""")
         }
+        val properties = EmbeddingProperties(
+            provider = "ollama",
+            input = EmbeddingInputProperties(4000, 2400, 1200, 6, 24),
+            ollama = defaultOllamaProperties("http://127.0.0.1:${server.address.port}").copy(
+                timeoutMs = 2000,
+                maxRetries = 0,
+                circuitFailureThreshold = 1,
+                circuitOpenMs = 30000
+            )
+        )
 
         val provider = OllamaEmbeddingProvider(
-            objectMapper = jacksonObjectMapper(),
-            embeddingProperties = EmbeddingProperties(
-                provider = "ollama",
-                input = EmbeddingInputProperties(4000, 2400, 1200, 6, 24),
-                ollama = defaultOllamaProperties("http://127.0.0.1:${server.address.port}").copy(
-                    timeoutMs = 2000,
-                    maxRetries = 0,
-                    circuitFailureThreshold = 1,
-                    circuitOpenMs = 30000
-                )
-            ),
-            meterRegistry = SimpleMeterRegistry()
+            embeddingProperties = properties,
+            ollamaEmbeddingClient = OllamaEmbeddingClient(
+                objectMapper = jacksonObjectMapper(),
+                embeddingProperties = properties,
+                meterRegistry = SimpleMeterRegistry()
+            )
         )
 
         assertThrows<IllegalStateException> { provider.embed(listOf("a")) }
@@ -163,4 +172,3 @@ class EmbeddingProviderTest {
         }
     }
 }
-

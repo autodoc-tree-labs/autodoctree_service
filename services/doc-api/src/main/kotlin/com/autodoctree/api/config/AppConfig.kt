@@ -60,7 +60,10 @@ data class FeatureFlags(
     val noriTokenizer: Boolean,
     val feedbackRoutingV2: Boolean,
     val userRulesV1: Boolean,
-    val adminTreeDebug: Boolean
+    val adminTreeDebug: Boolean,
+    val llmLabeling: Boolean = false,
+    val llmExplain: Boolean = false,
+    val tfidfLabelerFallback: Boolean = false
 )
 
 @ConfigurationProperties(prefix = "security")
@@ -104,6 +107,22 @@ data class OllamaEmbeddingProperties(
     val model: String,
     val timeoutMs: Long,
     val batchSize: Int,
+    val maxRetries: Int,
+    val retryBackoffMs: Long,
+    val circuitFailureThreshold: Int,
+    val circuitOpenMs: Long
+)
+
+@ConfigurationProperties(prefix = "llm")
+data class LlmProperties(
+    val provider: String,
+    val ollama: OllamaLlmProperties
+)
+
+data class OllamaLlmProperties(
+    val baseUrl: String,
+    val model: String,
+    val timeoutMs: Long,
     val maxRetries: Int,
     val retryBackoffMs: Long,
     val circuitFailureThreshold: Int,

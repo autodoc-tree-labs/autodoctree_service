@@ -30,7 +30,21 @@ data class NeighborLink(
 )
 
 data class NeighborGraph(
-    val adjacency: Map<String, List<NeighborLink>>
+    val adjacency: Map<String, List<NeighborLink>>,
+    val stats: NeighborBuildStats = NeighborBuildStats()
+)
+
+data class NeighborBuildStats(
+    val edgeCount: Int = 0,
+    val filteredEdgeCount: Int = 0,
+    val averageSimilarity: Double = 0.0,
+    val similaritySourceBreakdown: SimilaritySourceBreakdown = SimilaritySourceBreakdown()
+)
+
+data class SimilaritySourceBreakdown(
+    val embeddingOnly: Int = 0,
+    val lexicalOnly: Int = 0,
+    val fused: Int = 0
 )
 
 data class TreeCluster(
@@ -98,9 +112,11 @@ class NeighborBuilder(
     private val durationTimer = meterRegistry.timer("tree.neighbor_builder.duration")
     private val docsSummary = meterRegistry.summary("tree.neighbor_builder.docs")
     private val edgesSummary = meterRegistry.summary("neighbor_edges_total")
+    private val edgesTotalSummary = meterRegistry.summary("edges_total")
     private val edgesFilteredSummary = meterRegistry.summary("edges_filtered_total")
     private val legacyEdgesFilteredSummary = meterRegistry.summary("neighbor_edges_filtered_total")
     private val averageSimilaritySummary = meterRegistry.summary("tree.neighbor_builder.avg_similarity")
+    private val averageSimilarityLegacySummary = meterRegistry.summary("avg_similarity")
     private val averageSemanticSummary = meterRegistry.summary("tree.neighbor_builder.avg_sem_similarity")
     private val averageLexicalSummary = meterRegistry.summary("tree.neighbor_builder.avg_lex_similarity")
     private val edgeCreatedCounterEmbeddingOnly =
@@ -145,6 +161,9 @@ class NeighborBuilder(
         var semanticCount = 0
         var totalLexical = 0.0
         var lexicalCount = 0
+        var embeddingOnlyEdges = 0
+        var lexicalOnlyEdges = 0
+        var fusedEdges = 0
 
         documents.forEach { document ->
             val source = vectorByDoc[document.id].orEmpty()
@@ -200,11 +219,14 @@ class NeighborBuilder(
                         semanticCount += 1
                         if (lexicalGatePassed) {
                             edgeCreatedCounterFusion.increment()
+                            fusedEdges += 1
                         } else {
                             edgeCreatedCounterEmbeddingOnly.increment()
+                            embeddingOnlyEdges += 1
                         }
                     } else {
                         edgeCreatedCounterLexical.increment()
+                        lexicalOnlyEdges += 1
                     }
 
                     NeighborLink(
@@ -232,11 +254,16 @@ class NeighborBuilder(
 
         sample.stop(durationTimer)
         docsSummary.record(documents.size.toDouble())
-        edgesSummary.record(adjacency.values.sumOf { it.size }.toDouble())
+        val edgeCount = adjacency.values.sumOf { it.size }
+        edgesSummary.record(edgeCount.toDouble())
+        edgesTotalSummary.record(edgeCount.toDouble())
         edgesFilteredSummary.record(filteredOutCount.toDouble())
         legacyEdgesFilteredSummary.record(filteredOutCount.toDouble())
-        if (adjacency.values.sumOf { it.size } > 0) {
-            averageSimilaritySummary.record(totalSimilarity / adjacency.values.sumOf { it.size }.toDouble())
+        var averageSimilarity = 0.0
+        if (edgeCount > 0) {
+            averageSimilarity = totalSimilarity / edgeCount.toDouble()
+            averageSimilaritySummary.record(averageSimilarity)
+            averageSimilarityLegacySummary.record(averageSimilarity)
         }
         if (semanticCount > 0) {
             averageSemanticSummary.record(totalSemantic / semanticCount.toDouble())
@@ -245,7 +272,19 @@ class NeighborBuilder(
             averageLexicalSummary.record(totalLexical / lexicalCount.toDouble())
         }
 
-        return NeighborGraph(adjacency = adjacency)
+        return NeighborGraph(
+            adjacency = adjacency,
+            stats = NeighborBuildStats(
+                edgeCount = edgeCount,
+                filteredEdgeCount = filteredOutCount,
+                averageSimilarity = averageSimilarity,
+                similaritySourceBreakdown = SimilaritySourceBreakdown(
+                    embeddingOnly = embeddingOnlyEdges,
+                    lexicalOnly = lexicalOnlyEdges,
+                    fused = fusedEdges
+                )
+            )
+        )
     }
 
     private fun buildLexicalVectors(documents: List<DocumentRow>): Map<String, Map<String, Double>> {
@@ -677,23 +716,14 @@ class TreeLabeler(
                 .sortedByDescending { it.score }
 
             val selectedTerms = selectLabelTerms(bestTerms, clusterDocs.size)
-            var label = sanitizeLabel(selectedTerms)
-            if (label.isBlank()) {
-                label = fallbackLabel
-            }
-            if (featureFlags.labelQualityFilter) {
-                label = filterLabelOrFallback(label, fallbackLabel)
-            }
-            if (selectedTerms.any { it.contains('-') }) {
-                phraseLabelCounter.increment()
-            }
-            val lowQualityCluster = cluster.qualityScore < 0.32 || clusterDocs.size < 2
-            if (lowQualityCluster) {
-                val topLevel = topLevelLabel(if (label == "기타") fallbackLabel else label)
-                label = "$topLevel-기타"
-                otherClusterCounter.increment()
-            }
-            labelLengthSummary.record(label.length.toDouble())
+            val candidate = sanitizeLabel(selectedTerms)
+            val label = finalizeLabel(
+                candidate = candidate,
+                fallbackLabel = fallbackLabel,
+                clusterQualityScore = cluster.qualityScore,
+                clusterSize = clusterDocs.size,
+                usedPhrase = selectedTerms.any { it.contains('-') }
+            )
             cluster.id to label
         }
     }
@@ -745,6 +775,37 @@ class TreeLabeler(
 
     fun tokenize(text: String): List<String> {
         return tokenizer.tokenize(text)
+    }
+
+    fun fallbackLabelFor(clusterDocs: List<DocumentRow>): String {
+        return fallbackLabel(clusterDocs)
+    }
+
+    fun finalizeLabel(
+        candidate: String,
+        fallbackLabel: String,
+        clusterQualityScore: Double,
+        clusterSize: Int,
+        usedPhrase: Boolean = false
+    ): String {
+        var label = sanitizeLabel(listOf(candidate))
+        if (label.isBlank()) {
+            label = fallbackLabel
+        }
+        if (featureFlags.labelQualityFilter) {
+            label = filterLabelOrFallback(label, fallbackLabel)
+        }
+        if (usedPhrase || label.contains('-')) {
+            phraseLabelCounter.increment()
+        }
+        val lowQualityCluster = clusterQualityScore < 0.32 || clusterSize < 2
+        if (lowQualityCluster) {
+            val topLevel = topLevelLabel(if (label == "기타") fallbackLabel else label)
+            label = "$topLevel-기타"
+            otherClusterCounter.increment()
+        }
+        labelLengthSummary.record(label.length.toDouble())
+        return label
     }
 
     private fun sanitizeLabel(terms: List<String>): String {

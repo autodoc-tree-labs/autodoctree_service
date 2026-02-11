@@ -27,6 +27,9 @@ security:
 
 feature:
   embedding-ollama: false
+  llm-labeling: false
+  llm-explain: false
+  tfidf-labeler-fallback: false
   label-quality-filter: true
   community-clustering: true
   nori-tokenizer: false
@@ -66,6 +69,17 @@ embedding:
     model: bge-m3
     timeout-ms: 5000
     batch-size: 16
+    max-retries: 1
+    retry-backoff-ms: 50
+    circuit-failure-threshold: 2
+    circuit-open-ms: 1000
+
+llm:
+  provider: ollama
+  ollama:
+    base-url: http://localhost:11434
+    model: llama3.1:8b-instruct
+    timeout-ms: 10000
     max-retries: 1
     retry-backoff-ms: 50
     circuit-failure-threshold: 2
