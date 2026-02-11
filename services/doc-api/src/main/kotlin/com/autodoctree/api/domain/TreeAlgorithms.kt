@@ -5,6 +5,8 @@ import com.autodoctree.api.db.DocumentRow
 import com.autodoctree.api.db.EmbeddingRow
 import com.autodoctree.api.db.FeedbackEventRow
 import com.autodoctree.api.db.TreeNodeRow
+import com.autodoctree.api.reranker.PairRerankerClient
+import com.autodoctree.api.reranker.RerankerPairInput
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
@@ -41,6 +43,9 @@ data class NeighborBuildStats(
     val mutualPassRate: Double = 1.0,
     val snnPassRate: Double = 1.0,
     val hubDocCount: Int = 0,
+    val rerankerValidatedPairs: Int = 0,
+    val rerankerPassRate: Double = 1.0,
+    val rerankerFallbackRate: Double = 0.0,
     val similaritySourceBreakdown: SimilaritySourceBreakdown = SimilaritySourceBreakdown()
 )
 
@@ -110,7 +115,8 @@ data class PersonalizationModel(
 class NeighborBuilder(
     private val objectMapper: ObjectMapper,
     private val treeLabeler: TreeLabeler,
-    meterRegistry: MeterRegistry
+    meterRegistry: MeterRegistry,
+    private val pairRerankerClient: PairRerankerClient? = null
 ) {
     private val durationTimer = meterRegistry.timer("tree.neighbor_builder.duration")
     private val docsSummary = meterRegistry.summary("tree.neighbor_builder.docs")
@@ -133,6 +139,9 @@ class NeighborBuilder(
     private val edgeCreatedCounterFusion =
         meterRegistry.counter("edge_created_total", "reason", "EMBEDDING_LEXICAL_GATED")
     private val edgeCreatedCounterLexical = meterRegistry.counter("edge_created_total", "reason", "LEXICAL_ONLY")
+    private val rerankerValidatedPairsSummary = meterRegistry.summary("reranker_validated_pairs")
+    private val rerankerPassRateSummary = meterRegistry.summary("reranker_pass_rate")
+    private val rerankerFallbackCounter = meterRegistry.counter("reranker_fallback_total")
 
     fun build(
         workspaceId: String,
@@ -146,7 +155,11 @@ class NeighborBuilder(
         lexicalGate: Double = 0.35,
         mutualKnnRequired: Boolean = true,
         snnThreshold: Double = 0.0,
-        edgeBudget: Int = topK
+        edgeBudget: Int = topK,
+        rerankerEnabled: Boolean = false,
+        rerankerPerDocBudget: Int = 4,
+        rerankerPassThreshold: Double = 0.55,
+        rerankerTextByDocumentId: Map<String, String> = emptyMap()
     ): NeighborGraph {
         val sample = Timer.start()
         val similarityThreshold = minSimilarity.coerceIn(-1.0, 1.0)
@@ -318,6 +331,77 @@ class NeighborBuilder(
             adjacency[docId] = budgeted.toMutableList()
         }
 
+        var rerankerValidatedPairs = 0
+        var rerankerPassRate = 1.0
+        var rerankerFallbackRate = 0.0
+        val finalAdjacency = adjacency.mapValues { (_, links) -> links.toMutableList() }.toMutableMap()
+        if (rerankerEnabled && pairRerankerClient != null) {
+            val perDocBudget = rerankerPerDocBudget.coerceAtLeast(1)
+            val scoreThreshold = rerankerPassThreshold.coerceIn(0.0, 1.0)
+            val pairInputs = linkedMapOf<String, RerankerPairInput>()
+            finalAdjacency.forEach { (leftDocId, links) ->
+                val leftText = rerankerTextByDocumentId[leftDocId].orEmpty().trim()
+                if (leftText.isBlank()) {
+                    return@forEach
+                }
+                links.take(perDocBudget).forEach { link ->
+                    val rightText = rerankerTextByDocumentId[link.documentId].orEmpty().trim()
+                    if (rightText.isBlank()) {
+                        return@forEach
+                    }
+                    val pairKey = pairKey(leftDocId, link.documentId)
+                    pairInputs.putIfAbsent(
+                        pairKey,
+                        RerankerPairInput(
+                            pairKey = pairKey,
+                            leftText = leftText,
+                            rightText = rightText
+                        )
+                    )
+                }
+            }
+            if (pairInputs.isNotEmpty()) {
+                try {
+                    val pairScores = pairRerankerClient.scorePairs(workspaceId, pairInputs.values.toList())
+                    rerankerValidatedPairs = pairInputs.size
+                    val passByPair = pairInputs.keys.associateWith { pairKey ->
+                        (pairScores[pairKey] ?: 0.0) >= scoreThreshold
+                    }
+                    val passedPairs = passByPair.values.count { it }
+                    rerankerPassRate = if (rerankerValidatedPairs == 0) {
+                        1.0
+                    } else {
+                        passedPairs.toDouble() / rerankerValidatedPairs.toDouble()
+                    }
+                    finalAdjacency.keys.forEach { docId ->
+                        val reranked = finalAdjacency[docId].orEmpty()
+                            .mapNotNull { link ->
+                                val pairKey = pairKey(docId, link.documentId)
+                                val keep = passByPair[pairKey] ?: true
+                                if (!keep) {
+                                    return@mapNotNull null
+                                }
+                                val rerankScore = pairScores[pairKey]?.coerceIn(0.0, 1.0)
+                                if (rerankScore == null) {
+                                    return@mapNotNull link
+                                }
+                                val blendedScore = ((link.similarity * 0.65) + (rerankScore * 0.35)).coerceIn(0.0, 1.0)
+                                link.copy(
+                                    similarity = blendedScore,
+                                    reason = "${link.reason}_RERANKED"
+                                )
+                            }
+                            .sortedByDescending { it.similarity }
+                            .toMutableList()
+                        finalAdjacency[docId] = reranked
+                    }
+                } catch (_: Exception) {
+                    rerankerFallbackRate = 1.0
+                    rerankerFallbackCounter.increment()
+                }
+            }
+        }
+
         var totalSimilarity = 0.0
         var totalSemantic = 0.0
         var semanticCount = 0
@@ -329,7 +413,7 @@ class NeighborBuilder(
         var lexicalGateEvaluated = 0
         var lexicalGatePassedCount = 0
 
-        adjacency.values.forEach { links ->
+        finalAdjacency.values.forEach { links ->
             links.forEach { link ->
                 totalSimilarity += link.similarity
                 totalLexical += link.lexicalSimilarity
@@ -357,7 +441,7 @@ class NeighborBuilder(
 
         sample.stop(durationTimer)
         docsSummary.record(documents.size.toDouble())
-        val edgeCount = adjacency.values.sumOf { it.size }
+        val edgeCount = finalAdjacency.values.sumOf { it.size }
         val rawEdgeCount = rawAdjacency.values.sumOf { it.size }
         val filteredOutCount = filteredBySimilarity + (rawEdgeCount - edgeCount).coerceAtLeast(0)
         val mutualPassRate = if (!mutualKnnRequired || mutualEvaluated == 0) {
@@ -370,7 +454,7 @@ class NeighborBuilder(
         } else {
             snnPassed.toDouble() / snnEvaluated.toDouble()
         }
-        val hubDocCount = adjacency.values.count { it.size >= effectiveEdgeBudget }
+        val hubDocCount = finalAdjacency.values.count { it.size >= effectiveEdgeBudget }
         val lexicalGatePassRate = if (lexicalGateEvaluated == 0) {
             0.0
         } else {
@@ -385,6 +469,8 @@ class NeighborBuilder(
         mutualPassRateSummary.record(mutualPassRate)
         snnPassRateSummary.record(snnPassRate)
         hubDocCountSummary.record(hubDocCount.toDouble())
+        rerankerValidatedPairsSummary.record(rerankerValidatedPairs.toDouble())
+        rerankerPassRateSummary.record(rerankerPassRate)
         var averageSimilarity = 0.0
         if (edgeCount > 0) {
             averageSimilarity = totalSimilarity / edgeCount.toDouble()
@@ -399,7 +485,7 @@ class NeighborBuilder(
         }
 
         return NeighborGraph(
-            adjacency = adjacency,
+            adjacency = finalAdjacency,
             stats = NeighborBuildStats(
                 edgeCount = edgeCount,
                 filteredEdgeCount = filteredOutCount,
@@ -407,6 +493,9 @@ class NeighborBuilder(
                 mutualPassRate = mutualPassRate,
                 snnPassRate = snnPassRate,
                 hubDocCount = hubDocCount,
+                rerankerValidatedPairs = rerankerValidatedPairs,
+                rerankerPassRate = rerankerPassRate,
+                rerankerFallbackRate = rerankerFallbackRate,
                 similaritySourceBreakdown = SimilaritySourceBreakdown(
                     embeddingOnly = embeddingOnlyEdges,
                     lexicalOnly = lexicalOnlyEdges,
@@ -414,6 +503,14 @@ class NeighborBuilder(
                 )
             )
         )
+    }
+
+    private fun pairKey(leftDocId: String, rightDocId: String): String {
+        return if (leftDocId <= rightDocId) {
+            "$leftDocId::$rightDocId"
+        } else {
+            "$rightDocId::$leftDocId"
+        }
     }
 
     private data class LexicalModel(

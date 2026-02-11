@@ -114,6 +114,24 @@ services:
     volumes:
       - ollama-data:/root/.ollama
 
+  reranker-api:
+    build:
+      context: ./services/reranker-api
+      dockerfile: Dockerfile
+    profiles: ["ml"]
+    ports:
+      - "${RERANKER_PORT:-18080}:18080"
+    environment:
+      RERANKER_BACKEND: ${RERANKER_BACKEND:-lexical}
+      RERANKER_MODEL_PATH: /models
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:18080/health', timeout=2)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - reranker-data:/models
+
   prometheus:
     image: prom/prometheus:v2.54.1
     profiles: ["observability"]
@@ -151,4 +169,5 @@ volumes:
   opensearch-data:
   minio-data:
   ollama-data:
+  reranker-data:
   grafana-data:

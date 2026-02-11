@@ -57,6 +57,20 @@ Optional one-shot preload service:
 docker compose --profile llm --profile llm-init up ollama-init
 ```
 
+## 1-2. Optional local reranker (Stage-B edge validation)
+Start reranker service with compose profile:
+```bash
+docker compose --profile ml up -d reranker-api
+docker compose ps reranker-api
+```
+
+Smoke check:
+```bash
+./scripts/reranker_smoke.sh
+```
+
+If host port `18080` is already used, override with `RERANKER_PORT`.
+
 ## 2. Backend (IntelliJ)
 1. Open `services/` as Gradle project.
 2. Run `doc-api` main class: `com.autodoctree.api.DocApiApplicationKt`
@@ -118,9 +132,17 @@ Important flags:
 - `TREE_ASSIGN_RECOMMEND_THRESHOLD`
 - `TREE_ASSIGN_QUARANTINE_ENABLED`
 - `TREE_ASSIGN_RERANKER_ENABLED`
+- `TREE_RERANKER_PER_DOC_BUDGET`
+- `TREE_RERANKER_PASS_THRESHOLD`
 - `TREE_QUESTION_MAX_OPEN`
 - `TREE_QUESTION_TTL_HOURS`
 - `TREE_QUESTION_GENERATE_BATCH_SIZE`
+- `RERANKER_ENABLED`
+- `RERANKER_BASE_URL`
+- `RERANKER_TIMEOUT_MS`
+- `RERANKER_BATCH_SIZE`
+- `RERANKER_MAX_RETRIES`
+- `RERANKER_RETRY_BACKOFF_MS`
 - `TREE_EMBEDDING_DOCUMENT_WEIGHT` / `TREE_EMBEDDING_SUMMARY_WEIGHT` / `TREE_EMBEDDING_SECTION_WEIGHT`
   - 채널별 임베딩 결합 가중치(TITLE, BODY_SUMMARY, SECTION_CENTROID)
 

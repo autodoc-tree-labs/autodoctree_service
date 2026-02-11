@@ -285,6 +285,11 @@ class TreeService(
             var mergedLabelMap = emptyMap<String, String>()
             val quarantineReasonByDocument = mutableMapOf<String, String>()
             if (remaining.isNotEmpty()) {
+                val rerankerTextByDocument = if (assignmentPolicy.rerankerEnabled) {
+                    buildRerankerTextByDocument(workspaceId, remaining)
+                } else {
+                    emptyMap()
+                }
                 graph = neighborBuilder.build(
                     workspaceId = workspaceId,
                     documents = remaining,
@@ -297,7 +302,11 @@ class TreeService(
                     lexicalGate = treeProperties.fusionLexicalGate,
                     mutualKnnRequired = treeProperties.neighborMutualKnnRequired,
                     snnThreshold = treeProperties.neighborSnnThreshold,
-                    edgeBudget = treeProperties.neighborEdgeBudget
+                    edgeBudget = treeProperties.neighborEdgeBudget,
+                    rerankerEnabled = assignmentPolicy.rerankerEnabled,
+                    rerankerPerDocBudget = treeProperties.rerankerPerDocBudget,
+                    rerankerPassThreshold = treeProperties.rerankerPassThreshold,
+                    rerankerTextByDocumentId = rerankerTextByDocument
                 )
 
                 graphStats = graph.stats
@@ -312,7 +321,10 @@ class TreeService(
                         "avg_similarity" to String.format("%.3f", graphStats.averageSimilarity),
                         "mutual_pass_rate" to String.format("%.3f", graphStats.mutualPassRate),
                         "snn_pass_rate" to String.format("%.3f", graphStats.snnPassRate),
-                        "hub_doc_count" to graphStats.hubDocCount
+                        "hub_doc_count" to graphStats.hubDocCount,
+                        "reranker_validated_pairs" to graphStats.rerankerValidatedPairs,
+                        "reranker_pass_rate" to String.format("%.3f", graphStats.rerankerPassRate),
+                        "reranker_fallback_rate" to String.format("%.3f", graphStats.rerankerFallbackRate)
                     )
                 )
 
@@ -669,6 +681,9 @@ class TreeService(
                 "mutual_pass_rate" to String.format("%.3f", graphStats.mutualPassRate),
                 "snn_pass_rate" to String.format("%.3f", graphStats.snnPassRate),
                 "hub_doc_count" to graphStats.hubDocCount,
+                "reranker_validated_pairs" to graphStats.rerankerValidatedPairs,
+                "reranker_pass_rate" to String.format("%.3f", graphStats.rerankerPassRate),
+                "reranker_fallback_rate" to String.format("%.3f", graphStats.rerankerFallbackRate),
                 "auto_ratio" to String.format("%.3f", autoRatio),
                 "recommend_ratio" to String.format("%.3f", recommendRatio),
                 "policy_threshold" to mapOf(
@@ -711,6 +726,9 @@ class TreeService(
                         "unsorted_ratio" to unsortedRatio,
                         "embedding_available_doc_ratio" to embeddingAvailableDocRatio,
                         "hub_doc_count" to graphStats.hubDocCount,
+                        "reranker_validated_pairs" to graphStats.rerankerValidatedPairs,
+                        "reranker_pass_rate" to graphStats.rerankerPassRate,
+                        "reranker_fallback_rate" to graphStats.rerankerFallbackRate,
                         "auto_ratio" to autoRatio,
                         "recommend_ratio" to recommendRatio,
                         "rule_conflict_count" to ruleConflictCount,
@@ -1393,6 +1411,41 @@ class TreeService(
                 "llm_sentence" to null
             )
         }
+    }
+
+    private fun buildRerankerTextByDocument(
+        workspaceId: String,
+        documents: List<DocumentRow>
+    ): Map<String, String> {
+        if (documents.isEmpty()) {
+            return emptyMap()
+        }
+        return documents.associate { document ->
+            val bodySummary = compactWhitespace(document.bodyText.orEmpty()).take(240)
+            val topSections = documentSectionRepository
+                .listByWorkspaceAndDocument(workspaceId, document.id)
+                .take(3)
+                .joinToString(" ") { section ->
+                    val heading = compactWhitespace(section.heading.orEmpty()).take(48)
+                    val chunk = compactWhitespace(section.chunkText.orEmpty()).take(120)
+                    listOf(heading, chunk)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" ")
+                }
+            val rerankerInput = listOf(
+                compactWhitespace(document.title).take(120),
+                bodySummary,
+                compactWhitespace(topSections).take(420)
+            )
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+                .take(900)
+            document.id to rerankerInput
+        }
+    }
+
+    private fun compactWhitespace(value: String): String {
+        return value.replace(Regex("\\s+"), " ").trim()
     }
 
     private fun findSimilarDocs(

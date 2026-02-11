@@ -91,6 +91,8 @@ data class TreeProperties(
     val fusionSemanticWeight: Double,
     val fusionLexicalWeight: Double,
     val fusionLexicalGate: Double,
+    val rerankerPerDocBudget: Int = 4,
+    val rerankerPassThreshold: Double = 0.55,
     val embeddingDocumentWeight: Double = 0.65,
     val embeddingSummaryWeight: Double = 0.25,
     val embeddingSectionWeight: Double = 0.10,
@@ -130,6 +132,16 @@ data class OllamaEmbeddingProperties(
 data class LlmProperties(
     val provider: String,
     val ollama: OllamaLlmProperties
+)
+
+@ConfigurationProperties(prefix = "reranker")
+data class RerankerProperties(
+    val enabled: Boolean = true,
+    val baseUrl: String = "http://localhost:18080",
+    val timeoutMs: Long = 1200,
+    val batchSize: Int = 64,
+    val maxRetries: Int = 1,
+    val retryBackoffMs: Long = 150
 )
 
 data class OllamaLlmProperties(

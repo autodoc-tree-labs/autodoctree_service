@@ -6,6 +6,8 @@ import com.autodoctree.api.db.DocumentRow
 import com.autodoctree.api.db.EmbeddingRow
 import com.autodoctree.api.db.FeedbackEventRow
 import com.autodoctree.api.db.TreeNodeRow
+import com.autodoctree.api.reranker.PairRerankerClient
+import com.autodoctree.api.reranker.RerankerPairInput
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import java.time.LocalDateTime
@@ -206,6 +208,93 @@ class TreeAlgorithmsTest {
         )
 
         assertTrue(graph.adjacency.values.all { it.size <= 1 })
+    }
+
+    @Test
+    fun `neighbor builder stage b reranker filters low confidence pair`() {
+        val registry = SimpleMeterRegistry()
+        val rerankerClient = object : PairRerankerClient {
+            override fun scorePairs(workspaceId: String, pairs: List<RerankerPairInput>): Map<String, Double> {
+                return pairs.associate { pair ->
+                    val score = if (pair.pairKey == "doc-a::doc-b") 0.18 else 0.92
+                    pair.pairKey to score
+                }
+            }
+        }
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry, rerankerClient)
+        val docs = listOf(
+            doc("doc-a", "alpha finance"),
+            doc("doc-b", "alpha invoice"),
+            doc("doc-c", "alpha billing")
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(1.0, 0.0)),
+            "doc-b" to embedding("doc-b", listOf(0.98, 0.02)),
+            "doc-c" to embedding("doc-c", listOf(0.96, 0.04))
+        )
+        val textByDoc = docs.associate { doc ->
+            doc.id to "${doc.title} ${doc.bodyText.orEmpty()}"
+        }
+
+        val graph = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 2,
+            minSimilarity = 0.0,
+            mutualKnnRequired = false,
+            snnThreshold = 0.0,
+            rerankerEnabled = true,
+            rerankerPerDocBudget = 2,
+            rerankerPassThreshold = 0.5,
+            rerankerTextByDocumentId = textByDoc
+        )
+
+        assertFalse(graph.adjacency["doc-a"].orEmpty().any { it.documentId == "doc-b" })
+        assertTrue(graph.adjacency["doc-a"].orEmpty().any { it.documentId == "doc-c" })
+        assertTrue(graph.stats.rerankerValidatedPairs > 0)
+        assertTrue(graph.stats.rerankerPassRate < 1.0)
+    }
+
+    @Test
+    fun `neighbor builder reranker fallback keeps original edges`() {
+        val registry = SimpleMeterRegistry()
+        val failingRerankerClient = object : PairRerankerClient {
+            override fun scorePairs(workspaceId: String, pairs: List<RerankerPairInput>): Map<String, Double> {
+                throw IllegalStateException("reranker unavailable")
+            }
+        }
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry, failingRerankerClient)
+        val docs = listOf(
+            doc("doc-a", "platform roadmap"),
+            doc("doc-b", "platform architecture"),
+            doc("doc-c", "service reliability")
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(1.0, 0.0)),
+            "doc-b" to embedding("doc-b", listOf(0.94, 0.06)),
+            "doc-c" to embedding("doc-c", listOf(0.88, 0.12))
+        )
+        val textByDoc = docs.associate { doc ->
+            doc.id to "${doc.title} ${doc.bodyText.orEmpty()}"
+        }
+
+        val graph = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 2,
+            minSimilarity = 0.0,
+            mutualKnnRequired = false,
+            snnThreshold = 0.0,
+            rerankerEnabled = true,
+            rerankerPerDocBudget = 2,
+            rerankerPassThreshold = 0.5,
+            rerankerTextByDocumentId = textByDoc
+        )
+
+        assertTrue(graph.adjacency["doc-a"].orEmpty().isNotEmpty())
+        assertEquals(1.0, graph.stats.rerankerFallbackRate)
     }
 
     @Test

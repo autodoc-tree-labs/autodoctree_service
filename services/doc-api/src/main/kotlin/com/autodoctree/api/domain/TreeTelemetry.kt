@@ -169,6 +169,8 @@ class TreeTelemetry(
             "fusion_semantic_weight" to tree.fusionSemanticWeight,
             "fusion_lexical_weight" to tree.fusionLexicalWeight,
             "fusion_lexical_gate" to tree.fusionLexicalGate,
+            "reranker_per_doc_budget" to tree.rerankerPerDocBudget,
+            "reranker_pass_threshold" to tree.rerankerPassThreshold,
             "feature_flags" to mapOf(
                 "auto_tree" to flags.autoTree,
                 "community_clustering" to flags.communityClustering,

@@ -76,6 +76,13 @@ tree_rebuild_stage {event=tree_rebuild_stage, workspace_id=ws_1, stage=graph, du
 - `question_expired_total`
 - `question_impact_score`
 - `questions_open`
+- `reranker_latency_ms`
+- `reranker_request_total`
+- `reranker_error_total`
+- `reranker_batch_size`
+- `reranker_validated_pairs`
+- `reranker_pass_rate`
+- `reranker_fallback_total`
 
 기존 호환 메트릭도 유지:
 - `tree_rebuild_duration_ms`

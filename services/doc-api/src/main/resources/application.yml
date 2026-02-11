@@ -92,6 +92,8 @@ tree:
   fusion-semantic-weight: ${TREE_FUSION_SEMANTIC_WEIGHT:0.8}
   fusion-lexical-weight: ${TREE_FUSION_LEXICAL_WEIGHT:0.2}
   fusion-lexical-gate: ${TREE_FUSION_LEXICAL_GATE:0.35}
+  reranker-per-doc-budget: ${TREE_RERANKER_PER_DOC_BUDGET:4}
+  reranker-pass-threshold: ${TREE_RERANKER_PASS_THRESHOLD:0.55}
   embedding-document-weight: ${TREE_EMBEDDING_DOCUMENT_WEIGHT:0.65}
   embedding-summary-weight: ${TREE_EMBEDDING_SUMMARY_WEIGHT:0.25}
   embedding-section-weight: ${TREE_EMBEDDING_SECTION_WEIGHT:0.10}
@@ -128,3 +130,11 @@ llm:
     retry-backoff-ms: ${LLM_OLLAMA_RETRY_BACKOFF_MS:300}
     circuit-failure-threshold: ${LLM_OLLAMA_CIRCUIT_FAILURE_THRESHOLD:3}
     circuit-open-ms: ${LLM_OLLAMA_CIRCUIT_OPEN_MS:15000}
+
+reranker:
+  enabled: ${RERANKER_ENABLED:true}
+  base-url: ${RERANKER_BASE_URL:http://localhost:18080}
+  timeout-ms: ${RERANKER_TIMEOUT_MS:1200}
+  batch-size: ${RERANKER_BATCH_SIZE:64}
+  max-retries: ${RERANKER_MAX_RETRIES:1}
+  retry-backoff-ms: ${RERANKER_RETRY_BACKOFF_MS:150}
