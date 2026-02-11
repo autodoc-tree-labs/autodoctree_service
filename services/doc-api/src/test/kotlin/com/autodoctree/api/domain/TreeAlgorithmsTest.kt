@@ -105,6 +105,74 @@ class TreeAlgorithmsTest {
     }
 
     @Test
+    fun `neighbor builder enforces mutual knn when enabled`() {
+        val registry = SimpleMeterRegistry()
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
+        val docs = listOf(
+            doc("doc-a", "alpha billing"),
+            doc("doc-b", "alpha billing invoice"),
+            doc("doc-c", "invoice note")
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(1.0, 0.0)),
+            "doc-b" to embedding("doc-b", listOf(0.95, 0.05)),
+            "doc-c" to embedding("doc-c", listOf(0.3, 0.7))
+        )
+
+        val strict = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 1,
+            minSimilarity = 0.0,
+            mutualKnnRequired = true,
+            snnThreshold = 0.0
+        )
+        val relaxed = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 1,
+            minSimilarity = 0.0,
+            mutualKnnRequired = false,
+            snnThreshold = 0.0
+        )
+
+        assertTrue(strict.adjacency["doc-c"].isNullOrEmpty())
+        assertFalse(relaxed.adjacency["doc-c"].isNullOrEmpty())
+    }
+
+    @Test
+    fun `neighbor builder applies per-node edge budget`() {
+        val registry = SimpleMeterRegistry()
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
+        val docs = listOf(
+            doc("doc-a", "alpha"),
+            doc("doc-b", "alpha"),
+            doc("doc-c", "alpha"),
+            doc("doc-d", "alpha")
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(1.0, 0.0)),
+            "doc-b" to embedding("doc-b", listOf(0.98, 0.02)),
+            "doc-c" to embedding("doc-c", listOf(0.96, 0.04)),
+            "doc-d" to embedding("doc-d", listOf(0.94, 0.06))
+        )
+
+        val graph = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 3,
+            minSimilarity = 0.0,
+            edgeBudget = 1,
+            snnThreshold = 0.0
+        )
+
+        assertTrue(graph.adjacency.values.all { it.size <= 1 })
+    }
+
+    @Test
     fun `clusterer splits oversized component`() {
         val clusterer = testClusterer(SimpleMeterRegistry())
         val docs = (1..9).map { index -> doc("doc-$index", "document $index") }

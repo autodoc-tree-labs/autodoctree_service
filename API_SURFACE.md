@@ -283,7 +283,8 @@ Response (example):
   "assignment": {
     "node_id": "node_3",
     "node_label": "billing",
-    "snapshot_id": "ts_2"
+    "snapshot_id": "ts_2",
+    "quarantine_reason": null
   },
   "assignment_confidence": 0.41,
   "neighbors": [
@@ -342,7 +343,10 @@ Response (example):
   "status": "ACTIVE",
   "parameters": {
     "neighbor_top_k": 5,
-    "neighbor_min_similarity": 0.25
+    "neighbor_min_similarity": 0.25,
+    "neighbor_mutual_knn_required": true,
+    "neighbor_snn_threshold": 0.12,
+    "neighbor_edge_budget": 6
   },
   "models": {
     "embedding_provider": "ollama",
@@ -371,6 +375,9 @@ Response (example):
   "avg_cluster_size": 4.2,
   "neighbor_edges_total": 312,
   "edges_filtered_total": 98,
+  "mutual_pass_rate": 0.84,
+  "snn_pass_rate": 0.78,
+  "hub_doc_count": 3,
   "label_filtered_total": 3,
   "avg_label_length": 6.4,
   "tree_rebuild_duration_ms": 182.5,

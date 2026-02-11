@@ -38,6 +38,9 @@ data class NeighborBuildStats(
     val edgeCount: Int = 0,
     val filteredEdgeCount: Int = 0,
     val averageSimilarity: Double = 0.0,
+    val mutualPassRate: Double = 1.0,
+    val snnPassRate: Double = 1.0,
+    val hubDocCount: Int = 0,
     val similaritySourceBreakdown: SimilaritySourceBreakdown = SimilaritySourceBreakdown()
 )
 
@@ -119,6 +122,9 @@ class NeighborBuilder(
     private val averageSimilarityLegacySummary = meterRegistry.summary("avg_similarity")
     private val averageSemanticSummary = meterRegistry.summary("tree.neighbor_builder.avg_sem_similarity")
     private val averageLexicalSummary = meterRegistry.summary("tree.neighbor_builder.avg_lex_similarity")
+    private val mutualPassRateSummary = meterRegistry.summary("tree.neighbor_builder.mutual_pass_rate")
+    private val snnPassRateSummary = meterRegistry.summary("tree.neighbor_builder.snn_pass_rate")
+    private val hubDocCountSummary = meterRegistry.summary("tree.neighbor_builder.hub_doc_count")
     private val edgeCreatedCounterEmbeddingOnly =
         meterRegistry.counter("edge_created_total", "reason", "EMBEDDING_ONLY")
     private val edgeCreatedCounterFusion =
@@ -134,11 +140,18 @@ class NeighborBuilder(
         normalize: Boolean = true,
         semanticWeight: Double = 0.8,
         lexicalWeight: Double = 0.2,
-        lexicalGate: Double = 0.35
+        lexicalGate: Double = 0.35,
+        mutualKnnRequired: Boolean = true,
+        snnThreshold: Double = 0.0,
+        edgeBudget: Int = topK
     ): NeighborGraph {
         val sample = Timer.start()
         val similarityThreshold = minSimilarity.coerceIn(-1.0, 1.0)
         val useEmbeddingSimilarity = embeddings.values.any { !it.modelVersion.startsWith("local-stub", ignoreCase = true) }
+        val effectiveTopK = topK.coerceAtLeast(1)
+        val candidateTopK = maxOf(effectiveTopK * 3, effectiveTopK)
+        val effectiveEdgeBudget = edgeBudget.coerceAtLeast(1)
+        val effectiveSnnThreshold = snnThreshold.coerceIn(0.0, 1.0)
         val vectorByDoc = documents.associate { document ->
             val vector = embeddings[document.id]?.let { embedding ->
                 objectMapper.readValue(embedding.vectorJson, List::class.java)
@@ -154,22 +167,14 @@ class NeighborBuilder(
             document.id to extractEntityTokens(document.title + " " + (document.bodyText ?: "")).toSet()
         }
 
-        val adjacency = mutableMapOf<String, MutableList<NeighborLink>>()
-        var filteredOutCount = 0
-        var totalSimilarity = 0.0
-        var totalSemantic = 0.0
-        var semanticCount = 0
-        var totalLexical = 0.0
-        var lexicalCount = 0
-        var embeddingOnlyEdges = 0
-        var lexicalOnlyEdges = 0
-        var fusedEdges = 0
+        val rawAdjacency = mutableMapOf<String, MutableList<NeighborLink>>()
+        var filteredBySimilarity = 0
 
         documents.forEach { document ->
             val source = vectorByDoc[document.id].orEmpty()
             val sourceLexical = lexicalVectors[document.id].orEmpty()
             if (source.isEmpty() && !useEmbeddingSimilarity && sourceLexical.isEmpty()) {
-                adjacency[document.id] = mutableListOf()
+                rawAdjacency[document.id] = mutableListOf()
                 return@forEach
             }
 
@@ -207,26 +212,8 @@ class NeighborBuilder(
                     }
 
                     if (similarity < similarityThreshold) {
-                        filteredOutCount += 1
+                        filteredBySimilarity += 1
                         return@mapNotNull null
-                    }
-
-                    totalSimilarity += similarity
-                    totalLexical += lexicalSimilarity
-                    lexicalCount += 1
-                    if (embeddingSimilarity != null) {
-                        totalSemantic += embeddingSimilarity
-                        semanticCount += 1
-                        if (lexicalGatePassed) {
-                            edgeCreatedCounterFusion.increment()
-                            fusedEdges += 1
-                        } else {
-                            edgeCreatedCounterEmbeddingOnly.increment()
-                            embeddingOnlyEdges += 1
-                        }
-                    } else {
-                        edgeCreatedCounterLexical.increment()
-                        lexicalOnlyEdges += 1
                     }
 
                     NeighborLink(
@@ -246,19 +233,109 @@ class NeighborBuilder(
                 }
                 .sortedByDescending { it.similarity }
                 .distinctBy { it.documentId }
-                .take(topK.coerceAtLeast(1))
+                .take(candidateTopK)
                 .toMutableList()
 
-            adjacency[document.id] = neighbors
+            rawAdjacency[document.id] = neighbors
+        }
+
+        val topNeighborSets = rawAdjacency.mapValues { (_, neighbors) ->
+            neighbors.take(effectiveTopK).mapTo(mutableSetOf()) { it.documentId }
+        }
+
+        var mutualEvaluated = 0
+        var mutualPassed = 0
+        var snnEvaluated = 0
+        var snnPassed = 0
+        val adjacency = mutableMapOf<String, MutableList<NeighborLink>>()
+
+        rawAdjacency.forEach { (docId, candidates) ->
+            val filtered = candidates.filter { link ->
+                if (mutualKnnRequired) {
+                    mutualEvaluated += 1
+                    val reverseTop = topNeighborSets[link.documentId].orEmpty()
+                    if (!reverseTop.contains(docId)) {
+                        return@filter false
+                    }
+                    mutualPassed += 1
+                }
+
+                val left = topNeighborSets[docId].orEmpty()
+                val right = topNeighborSets[link.documentId].orEmpty()
+                val union = left.union(right)
+                val snn = if (union.isEmpty()) {
+                    0.0
+                } else {
+                    left.intersect(right).size.toDouble() / union.size.toDouble()
+                }
+                snnEvaluated += 1
+                if (snn >= effectiveSnnThreshold) {
+                    snnPassed += 1
+                    true
+                } else {
+                    false
+                }
+            }.sortedByDescending { it.similarity }
+
+            val budgeted = filtered.take(minOf(effectiveTopK, effectiveEdgeBudget))
+            adjacency[docId] = budgeted.toMutableList()
+        }
+
+        var totalSimilarity = 0.0
+        var totalSemantic = 0.0
+        var semanticCount = 0
+        var totalLexical = 0.0
+        var lexicalCount = 0
+        var embeddingOnlyEdges = 0
+        var lexicalOnlyEdges = 0
+        var fusedEdges = 0
+
+        adjacency.values.forEach { links ->
+            links.forEach { link ->
+                totalSimilarity += link.similarity
+                totalLexical += link.lexicalSimilarity
+                lexicalCount += 1
+                if (link.semanticSimilarity != null) {
+                    totalSemantic += link.semanticSimilarity
+                    semanticCount += 1
+                    if (link.lexicalGatePassed) {
+                        edgeCreatedCounterFusion.increment()
+                        fusedEdges += 1
+                    } else {
+                        edgeCreatedCounterEmbeddingOnly.increment()
+                        embeddingOnlyEdges += 1
+                    }
+                } else {
+                    edgeCreatedCounterLexical.increment()
+                    lexicalOnlyEdges += 1
+                }
+            }
         }
 
         sample.stop(durationTimer)
         docsSummary.record(documents.size.toDouble())
         val edgeCount = adjacency.values.sumOf { it.size }
+        val rawEdgeCount = rawAdjacency.values.sumOf { it.size }
+        val filteredOutCount = filteredBySimilarity + (rawEdgeCount - edgeCount).coerceAtLeast(0)
+        val mutualPassRate = if (!mutualKnnRequired || mutualEvaluated == 0) {
+            1.0
+        } else {
+            mutualPassed.toDouble() / mutualEvaluated.toDouble()
+        }
+        val snnPassRate = if (snnEvaluated == 0) {
+            1.0
+        } else {
+            snnPassed.toDouble() / snnEvaluated.toDouble()
+        }
+        val hubDocCount = adjacency.values.count { it.size >= effectiveEdgeBudget }
+
         edgesSummary.record(edgeCount.toDouble())
         edgesTotalSummary.record(edgeCount.toDouble())
         edgesFilteredSummary.record(filteredOutCount.toDouble())
         legacyEdgesFilteredSummary.record(filteredOutCount.toDouble())
+        mutualPassRateSummary.record(mutualPassRate)
+        snnPassRateSummary.record(snnPassRate)
+        hubDocCountSummary.record(hubDocCount.toDouble())
         var averageSimilarity = 0.0
         if (edgeCount > 0) {
             averageSimilarity = totalSimilarity / edgeCount.toDouble()
@@ -278,6 +355,9 @@ class NeighborBuilder(
                 edgeCount = edgeCount,
                 filteredEdgeCount = filteredOutCount,
                 averageSimilarity = averageSimilarity,
+                mutualPassRate = mutualPassRate,
+                snnPassRate = snnPassRate,
+                hubDocCount = hubDocCount,
                 similaritySourceBreakdown = SimilaritySourceBreakdown(
                     embeddingOnly = embeddingOnlyEdges,
                     lexicalOnly = lexicalOnlyEdges,

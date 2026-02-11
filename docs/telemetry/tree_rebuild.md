@@ -33,9 +33,13 @@ tree_rebuild_stage {event=tree_rebuild_stage, workspace_id=ws_1, stage=graph, du
   - `edge_count`
   - `filtered_edge_count`
   - `avg_similarity`
+  - `mutual_pass_rate`
+  - `snn_pass_rate`
+  - `hub_doc_count`
   - `moved_ratio`
   - `churn_ratio`
   - `unsorted_ratio`
+  - `unsorted_reason_breakdown`
   - `stage_count`
   - `stage_durations_ms`
   - `embedding_provider`, `embedding_model`
@@ -52,6 +56,9 @@ tree_rebuild_stage {event=tree_rebuild_stage, workspace_id=ws_1, stage=graph, du
 - `tree.rebuild.degree.distribution`
 - `tree.rebuild.cluster_size.distribution`
 - `tree.rebuild.unsorted_ratio`
+- `tree.neighbor_builder.mutual_pass_rate`
+- `tree.neighbor_builder.snn_pass_rate`
+- `tree.neighbor_builder.hub_doc_count`
 
 기존 호환 메트릭도 유지:
 - `tree_rebuild_duration_ms`

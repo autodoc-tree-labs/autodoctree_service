@@ -77,6 +77,9 @@ tree:
   neighbor-top-k: ${TREE_NEIGHBOR_TOP_K:5}
   neighbor-min-similarity: ${TREE_NEIGHBOR_MIN_SIMILARITY:0.25}
   neighbor-normalize: ${TREE_NEIGHBOR_NORMALIZE:true}
+  neighbor-mutual-knn-required: ${TREE_NEIGHBOR_MUTUAL_KNN_REQUIRED:true}
+  neighbor-snn-threshold: ${TREE_NEIGHBOR_SNN_THRESHOLD:0.12}
+  neighbor-edge-budget: ${TREE_NEIGHBOR_EDGE_BUDGET:6}
   max-cluster-size: ${TREE_MAX_CLUSTER_SIZE:20}
   min-cluster-size: ${TREE_MIN_CLUSTER_SIZE:2}
   community-resolution: ${TREE_COMMUNITY_RESOLUTION:1.0}

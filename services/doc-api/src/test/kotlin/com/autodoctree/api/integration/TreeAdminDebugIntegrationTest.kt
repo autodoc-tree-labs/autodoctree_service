@@ -76,12 +76,10 @@ class TreeAdminDebugIntegrationTest {
         token = login("owner@autodoc.local", "password")
         memberToken = login("member@autodoc.local", "password")
 
-        val docs = documentRepository.listByWorkspace(workspaceId, null, null, 0, 200)
-        if (docs.size < 2) {
-            createDoc("관리자 디버그 문서 A", "과학 연구와 실험 분석")
-            createDoc("관리자 디버그 문서 B", "과학 실험 노트와 연구 계획")
-        }
-        debugDocId = documentRepository.listByWorkspace(workspaceId, null, null, 0, 1).first().id
+        val anchor = createDoc("관리자 디버그 문서 A", "과학 연구와 실험 분석 데이터")
+        createDoc("관리자 디버그 문서 B", "과학 실험 노트와 연구 계획 데이터")
+        createDoc("관리자 디버그 문서 C", "과학 데이터 분석 실험 기록")
+        debugDocId = anchor.id
         treeService.rebuildWorkspace(workspaceId, ownerId, manual = true)
     }
 

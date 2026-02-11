@@ -71,6 +71,11 @@ class TreeService(
     private val lockedNodePreservedCounter = meterRegistry.counter("locked_node_preserved_total")
     private val movedRatioSummary = meterRegistry.summary("moved_ratio")
     private val churnRatioSummary = meterRegistry.summary("churn_ratio")
+    private val hubDocCounter = meterRegistry.counter("hub_doc_total")
+    private val unsortedLowConfidenceCounter = meterRegistry.counter("unsorted_reason_total", "reason", "LOW_CONFIDENCE")
+    private val unsortedHubCounter = meterRegistry.counter("unsorted_reason_total", "reason", "HUB")
+    private val unsortedConflictCounter = meterRegistry.counter("unsorted_reason_total", "reason", "CONFLICT")
+    private val unsortedTemplateCounter = meterRegistry.counter("unsorted_reason_total", "reason", "TEMPLATE")
 
     @Transactional
     fun rebuildWorkspace(workspaceId: String, actorUserId: String? = null, manual: Boolean = false): TreeSnapshotRow {
@@ -208,11 +213,13 @@ class TreeService(
             }
 
             val graphStartedAt = System.nanoTime()
+            var graph = NeighborGraph(emptyMap())
             var clusters: List<TreeCluster> = emptyList()
             val rawLabelsByCluster = mutableMapOf<String, String>()
             var mergedLabelMap = emptyMap<String, String>()
+            val quarantineReasonByDocument = mutableMapOf<String, String>()
             if (remaining.isNotEmpty()) {
-                val graph = neighborBuilder.build(
+                graph = neighborBuilder.build(
                     workspaceId = workspaceId,
                     documents = remaining,
                     embeddings = embeddingByDocumentId,
@@ -221,7 +228,10 @@ class TreeService(
                     normalize = treeProperties.neighborNormalize,
                     semanticWeight = treeProperties.fusionSemanticWeight,
                     lexicalWeight = treeProperties.fusionLexicalWeight,
-                    lexicalGate = treeProperties.fusionLexicalGate
+                    lexicalGate = treeProperties.fusionLexicalGate,
+                    mutualKnnRequired = treeProperties.neighborMutualKnnRequired,
+                    snnThreshold = treeProperties.neighborSnnThreshold,
+                    edgeBudget = treeProperties.neighborEdgeBudget
                 )
 
                 graphStats = graph.stats
@@ -233,7 +243,10 @@ class TreeService(
                     details = mapOf(
                         "edge_count" to graphStats.edgeCount,
                         "filtered_edge_count" to graphStats.filteredEdgeCount,
-                        "avg_similarity" to String.format("%.3f", graphStats.averageSimilarity)
+                        "avg_similarity" to String.format("%.3f", graphStats.averageSimilarity),
+                        "mutual_pass_rate" to String.format("%.3f", graphStats.mutualPassRate),
+                        "snn_pass_rate" to String.format("%.3f", graphStats.snnPassRate),
+                        "hub_doc_count" to graphStats.hubDocCount
                     )
                 )
 
@@ -274,6 +287,14 @@ class TreeService(
                         assignment[docId] = label
                     }
                 }
+                quarantineReasonByDocument.putAll(
+                    applyQuarantinePolicies(
+                        workspaceId = workspaceId,
+                        documents = remaining,
+                        adjacency = graph.adjacency,
+                        assignment = assignment
+                    )
+                )
             } else {
                 treeTelemetry.recordStage(
                     trace = trace,
@@ -320,7 +341,8 @@ class TreeService(
                     "moved_count" to movedCount,
                     "moved_ratio" to String.format("%.3f", movedRatio),
                     "unsorted_count" to unsortedCount,
-                    "unsorted_ratio" to String.format("%.3f", unsortedRatio)
+                    "unsorted_ratio" to String.format("%.3f", unsortedRatio),
+                    "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
                 )
             )
 
@@ -461,7 +483,8 @@ class TreeService(
                 val signals = buildSignals(
                     wasLocked = lockedLabelByDocument.containsKey(doc.id),
                     personalized = personalizedDocIds.contains(doc.id),
-                    ruled = ruledDocIds.contains(doc.id)
+                    ruled = ruledDocIds.contains(doc.id),
+                    quarantineReason = quarantineReasonByDocument[doc.id]
                 )
                 val llmSentence = llmExplainGenerator.generate(
                     keywords = keywords,
@@ -526,12 +549,16 @@ class TreeService(
                 "llm_model" to llmTextGenerator.modelVersion(),
                 "embedding_available_doc_ratio" to String.format("%.3f", embeddingAvailableDocRatio),
                 "rebuild_duration_ms" to String.format("%.3f", rebuildDurationMs),
+                "mutual_pass_rate" to String.format("%.3f", graphStats.mutualPassRate),
+                "snn_pass_rate" to String.format("%.3f", graphStats.snnPassRate),
+                "hub_doc_count" to graphStats.hubDocCount,
                 "similarity_source_breakdown" to mapOf(
                     "embedding_only" to graphStats.similaritySourceBreakdown.embeddingOnly,
                     "lexical_only" to graphStats.similaritySourceBreakdown.lexicalOnly,
                     "fused" to graphStats.similaritySourceBreakdown.fused
                 ),
-                "label_source_breakdown" to labelSourceBreakdown
+                "label_source_breakdown" to labelSourceBreakdown,
+                "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
             )
             treeTelemetry.logSummary(summaryPayload)
             treeTelemetry.storeDebugSnapshot(
@@ -554,7 +581,9 @@ class TreeService(
                         "node_rename_count" to nodeRenameCount,
                         "lock_conflict" to lockConflict,
                         "unsorted_ratio" to unsortedRatio,
-                        "embedding_available_doc_ratio" to embeddingAvailableDocRatio
+                        "embedding_available_doc_ratio" to embeddingAvailableDocRatio,
+                        "hub_doc_count" to graphStats.hubDocCount,
+                        "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
                     )
                 )
             )
@@ -689,7 +718,10 @@ class TreeService(
             normalize = treeProperties.neighborNormalize,
             semanticWeight = treeProperties.fusionSemanticWeight,
             lexicalWeight = treeProperties.fusionLexicalWeight,
-            lexicalGate = treeProperties.fusionLexicalGate
+            lexicalGate = treeProperties.fusionLexicalGate,
+            mutualKnnRequired = treeProperties.neighborMutualKnnRequired,
+            snnThreshold = treeProperties.neighborSnnThreshold,
+            edgeBudget = treeProperties.neighborEdgeBudget
         )
         val neighbors = graph.adjacency[documentId].orEmpty().map { link ->
             mapOf(
@@ -726,11 +758,20 @@ class TreeService(
             normalize = treeProperties.neighborNormalize,
             semanticWeight = treeProperties.fusionSemanticWeight,
             lexicalWeight = treeProperties.fusionLexicalWeight,
-            lexicalGate = treeProperties.fusionLexicalGate
+            lexicalGate = treeProperties.fusionLexicalGate,
+            mutualKnnRequired = treeProperties.neighborMutualKnnRequired,
+            snnThreshold = treeProperties.neighborSnnThreshold,
+            edgeBudget = treeProperties.neighborEdgeBudget
         )
         val selectedLinks = graph.adjacency[documentId].orEmpty().take(topN.coerceIn(1, 20))
         val assignmentMembership = treeRepository.findMembershipByWorkspaceAndDocument(workspaceId, documentId)
         val assignmentNode = assignmentMembership?.nodeId?.let { treeRepository.findNodeByWorkspace(workspaceId, it) }
+        val assignmentSignals = assignmentMembership
+            ?.let { parseRationale(it.rationaleJson)["signals"].safeStringList() }
+            .orEmpty()
+        val quarantineReason = assignmentSignals.firstOrNull { signal ->
+            signal in setOf("LOW_CONFIDENCE", "HUB", "TEMPLATE", "CONFLICT")
+        }
         val confidence = when {
             selectedLinks.isEmpty() -> 0.0
             selectedLinks.size == 1 -> selectedLinks.first().similarity.coerceIn(0.0, 1.0)
@@ -742,7 +783,8 @@ class TreeService(
             "assignment" to mapOf(
                 "node_id" to assignmentMembership?.nodeId,
                 "node_label" to assignmentNode?.label,
-                "snapshot_id" to assignmentMembership?.snapshotId
+                "snapshot_id" to assignmentMembership?.snapshotId,
+                "quarantine_reason" to quarantineReason
             ),
             "assignment_confidence" to confidence,
             "neighbors" to selectedLinks.map { link ->
@@ -885,11 +927,17 @@ class TreeService(
         )
     }
 
-    private fun buildSignals(wasLocked: Boolean, personalized: Boolean, ruled: Boolean): List<String> {
+    private fun buildSignals(
+        wasLocked: Boolean,
+        personalized: Boolean,
+        ruled: Boolean,
+        quarantineReason: String? = null
+    ): List<String> {
         val signals = mutableListOf<String>()
         if (wasLocked) signals += "LOCKED_NODE"
         if (personalized) signals += "PERSONALIZED_MOVE_SIGNAL"
         if (ruled) signals += "USER_RULE_MATCHED"
+        quarantineReason?.takeIf { it.isNotBlank() }?.let { signals += it }
         if (signals.isEmpty()) {
             signals += "CLUSTER_DEFAULT"
         }
@@ -1013,6 +1061,68 @@ class TreeService(
             treeProperties = treeProperties,
             qualityByDocument = qualityByDocument
         )
+    }
+
+    private fun applyQuarantinePolicies(
+        workspaceId: String,
+        documents: List<DocumentRow>,
+        adjacency: Map<String, List<NeighborLink>>,
+        assignment: MutableMap<String, String>
+    ): Map<String, String> {
+        if (documents.isEmpty()) {
+            return emptyMap()
+        }
+        val reasons = mutableMapOf<String, String>()
+        val degreeByDoc = documents.associate { doc ->
+            doc.id to adjacency[doc.id].orEmpty().size
+        }
+        val avgDegree = degreeByDoc.values.average().takeIf { !it.isNaN() } ?: 0.0
+        val hubThreshold = maxOf(3.0, avgDegree * 1.8, treeProperties.neighborEdgeBudget.toDouble())
+
+        documents.forEach { doc ->
+            val links = adjacency[doc.id].orEmpty()
+            if (links.isEmpty()) {
+                return@forEach
+            }
+            val top1 = links.getOrNull(0)?.similarity ?: 0.0
+            val top2 = links.getOrNull(1)?.similarity ?: 0.0
+            val confidenceMargin = (top1 - top2).coerceIn(0.0, 1.0)
+            val neighborLabels = links
+                .mapNotNull { neighbor -> assignment[neighbor.documentId] }
+                .toSet()
+            val diversity = if (links.isEmpty()) 0.0 else neighborLabels.size.toDouble() / links.size.toDouble()
+
+            val sections = documentSectionRepository.listByWorkspaceAndDocument(workspaceId, doc.id)
+            val noisySections = sections.count { section ->
+                section.qualityFlags
+                    ?.split(',')
+                    ?.map { it.trim().uppercase() }
+                    ?.any { flag -> flag in setOf("GIBBERISH", "TOO_SHORT", "ZERO_LENGTH") } == true
+            }
+            val templateLikely = sections.isNotEmpty() && noisySections.toDouble() / sections.size.toDouble() >= 0.6
+            val degree = degreeByDoc[doc.id] ?: 0
+
+            val reason = when {
+                templateLikely -> "TEMPLATE"
+                degree.toDouble() >= hubThreshold -> "HUB"
+                confidenceMargin < 0.06 -> "LOW_CONFIDENCE"
+                diversity >= 0.45 && confidenceMargin < 0.14 -> "CONFLICT"
+                else -> null
+            } ?: return@forEach
+
+            assignment[doc.id] = "general"
+            reasons[doc.id] = reason
+            when (reason) {
+                "HUB" -> {
+                    hubDocCounter.increment()
+                    unsortedHubCounter.increment()
+                }
+                "LOW_CONFIDENCE" -> unsortedLowConfidenceCounter.increment()
+                "CONFLICT" -> unsortedConflictCounter.increment()
+                "TEMPLATE" -> unsortedTemplateCounter.increment()
+            }
+        }
+        return reasons
     }
 
     private fun parseLabelCache(labelCacheJson: String?): Map<String, String> {
