@@ -253,6 +253,41 @@ class TenantIsolationIntegrationTest {
         ).andExpect(status().isForbidden)
 
         mockMvc.perform(
+            patch("/api/v1/admin/tree/rules/rule-a")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "rule_type" to "SOURCE_TYPE",
+                            "rule_value" to "upload",
+                            "rule_effect" to "SOFT",
+                            "node_id" to "node-x"
+                        )
+                    )
+                )
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
+            post("/api/v1/admin/tree/rules/preview")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "document_id" to wsADocId,
+                            "rule_type" to "TITLE_CONTAINS",
+                            "rule_value" to "tenant",
+                            "rule_effect" to "HARD",
+                            "node_id" to "node-x"
+                        )
+                    )
+                )
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
             patch("/api/v1/workspaces/$wsAId/members/$wsAOwnerUserId")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("Authorization", "Bearer $tokenB")

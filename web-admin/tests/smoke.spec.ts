@@ -160,6 +160,117 @@ test("loads tree debug page and renders neighbors table", async ({ page }) => {
       })
     });
   });
+  await page.route("**/api/v1/tree/active", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        snapshot_id: "snap-1",
+        status: "ACTIVE",
+        nodes: [
+          { id: "root", parent_id: null, label: "AutoDoc", locked: false },
+          { id: "node-1", parent_id: "root", label: "billing", locked: false },
+          { id: "node-2", parent_id: "root", label: "infra", locked: false }
+        ]
+      })
+    });
+  });
+  const rules = [
+    {
+      id: "rule-1",
+      rule_type: "TITLE_CONTAINS",
+      rule_value: "invoice",
+      rule_effect: "HARD",
+      node_id: "node-1",
+      node_label: "billing",
+      enabled: true,
+      created_at: "2026-02-11T00:00:00"
+    }
+  ];
+  await page.route("**/api/v1/admin/tree/rules", async (route) => {
+    const method = route.request().method();
+    if (method === "POST") {
+      const body = route.request().postDataJSON() as Record<string, string>;
+      rules.push({
+        id: "rule-2",
+        rule_type: (body.rule_type ?? "TITLE_CONTAINS").toString(),
+        rule_value: (body.rule_value ?? "").toString(),
+        rule_effect: (body.rule_effect ?? "HARD").toString(),
+        node_id: (body.node_id ?? "node-1").toString(),
+        node_label: "billing",
+        enabled: true,
+        created_at: "2026-02-11T00:00:00"
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "rule-2",
+          rule_type: body.rule_type ?? "TITLE_CONTAINS",
+          rule_value: body.rule_value ?? "",
+          rule_effect: body.rule_effect ?? "HARD",
+          node_id: body.node_id ?? "node-1"
+        })
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items: rules })
+    });
+  });
+  await page.route("**/api/v1/admin/tree/rules/*", async (route) => {
+    const method = route.request().method();
+    const path = route.request().url().split("/").pop() ?? "";
+    if (path === "preview" && method === "POST") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          document_id: "doc-1",
+          rule_type: "SOURCE_TYPE",
+          rule_value: "editor",
+          rule_effect: "SOFT",
+          matched: true,
+          target_node_id: "node-1",
+          target_node_label: "billing"
+        })
+      });
+      return;
+    }
+    if (method === "PATCH") {
+      const body = route.request().postDataJSON() as Record<string, string>;
+      const target = rules.find((rule) => rule.id === path);
+      if (target) {
+        target.rule_type = (body.rule_type ?? target.rule_type).toString();
+        target.rule_value = (body.rule_value ?? target.rule_value).toString();
+        target.rule_effect = (body.rule_effect ?? target.rule_effect).toString();
+        target.node_id = (body.node_id ?? target.node_id).toString();
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: path,
+          rule_type: body.rule_type ?? "TITLE_CONTAINS",
+          rule_value: body.rule_value ?? "",
+          rule_effect: body.rule_effect ?? "HARD",
+          node_id: body.node_id ?? "node-1"
+        })
+      });
+      return;
+    }
+    if (method === "DELETE") {
+      const index = rules.findIndex((rule) => rule.id === path);
+      if (index >= 0) {
+        rules.splice(index, 1);
+      }
+      await route.fulfill({ status: 204, body: "" });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "" });
+  });
 
   await page.goto("/login");
   await page.getByPlaceholder("이메일 주소").fill("owner@autodoc.local");
@@ -189,4 +300,15 @@ test("loads tree debug page and renders neighbors table", async ({ page }) => {
   await expect(page.getByText("\"source\": \"OVERRIDE\"")).toBeVisible();
   await page.getByRole("button", { name: "저장" }).click();
   await expect(page.getByText("정책이 저장되었습니다. 다음 리빌드부터 반영됩니다.")).toBeVisible();
+
+  await page.getByRole("link", { name: "규칙 관리" }).click();
+  await expect(page.getByRole("heading", { name: "규칙 관리" })).toBeVisible();
+  await page.getByLabel("rule_type").selectOption("SOURCE_TYPE");
+  await page.getByLabel("rule_value").fill("editor");
+  await page.getByLabel("rule_effect").selectOption("SOFT");
+  await page.getByPlaceholder("문서 식별자(document_id)").fill("doc-1");
+  await page.getByRole("button", { name: "테스트" }).click();
+  await expect(page.getByText("\"matched\": true")).toBeVisible();
+  await page.getByRole("button", { name: "규칙 생성" }).click();
+  await expect(page.getByText("규칙을 생성했습니다.")).toBeVisible();
 });

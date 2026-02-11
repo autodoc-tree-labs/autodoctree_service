@@ -482,6 +482,7 @@ Response:
       "id": "rule_1",
       "rule_type": "TITLE_CONTAINS",
       "rule_value": "invoice",
+      "rule_effect": "HARD",
       "node_id": "n_2",
       "node_label": "billing",
       "enabled": true,
@@ -493,7 +494,58 @@ Response:
 
 ## POST /admin/tree/rules
 ```json
-{ "rule_type": "TITLE_CONTAINS", "rule_value": "invoice", "node_id": "n_2" }
+{
+  "rule_type": "TITLE_CONTAINS",
+  "rule_value": "invoice",
+  "rule_effect": "HARD",
+  "node_id": "n_2"
+}
+```
+
+지원 `rule_type`:
+- `TITLE_CONTAINS`
+- `ENTITY_CONTAINS`
+- `SOURCE_TYPE`
+- `AUTHOR`
+- `FILENAME_EXT`
+- `TAG`
+
+`rule_effect`:
+- `HARD` (강제 라우팅)
+- `SOFT` (낮은 확신 구간에서 우선 라우팅)
+
+## PATCH /admin/tree/rules/{ruleId}
+```json
+{
+  "rule_type": "SOURCE_TYPE",
+  "rule_value": "upload",
+  "rule_effect": "SOFT",
+  "node_id": "n_2"
+}
+```
+
+## POST /admin/tree/rules/preview
+샘플 문서 기준으로 규칙 매칭 결과와 라우팅 노드를 미리 확인한다.
+```json
+{
+  "document_id": "doc_1",
+  "rule_type": "SOURCE_TYPE",
+  "rule_value": "editor",
+  "rule_effect": "SOFT",
+  "node_id": "n_2"
+}
+```
+Response:
+```json
+{
+  "document_id": "doc_1",
+  "rule_type": "SOURCE_TYPE",
+  "rule_value": "editor",
+  "rule_effect": "SOFT",
+  "matched": true,
+  "target_node_id": "n_2",
+  "target_node_label": "billing"
+}
 ```
 
 ## DELETE /admin/tree/rules/{ruleId}

@@ -176,6 +176,7 @@ data class UserRuleRow(
     val workspaceId: String,
     val ruleType: String,
     val ruleValue: String,
+    val ruleEffect: String,
     val nodeId: String,
     val enabled: Boolean,
     val createdBy: String,
@@ -736,6 +737,12 @@ class AttachmentRepository(private val jdbcTemplate: JdbcTemplate) {
         mapper,
         workspaceId,
         documentId
+    )
+
+    fun listByWorkspace(workspaceId: String): List<AttachmentRow> = jdbcTemplate.query(
+        "SELECT * FROM attachments WHERE workspace_id = ? ORDER BY created_at",
+        mapper,
+        workspaceId
     )
 }
 
@@ -1532,6 +1539,7 @@ class UserRuleRepository(private val jdbcTemplate: JdbcTemplate) {
             workspaceId = rs.getString("workspace_id"),
             ruleType = rs.getString("rule_type"),
             ruleValue = rs.getString("rule_value"),
+            ruleEffect = rs.getString("rule_effect"),
             nodeId = rs.getString("node_id"),
             enabled = rs.getBoolean("enabled"),
             createdBy = rs.getString("created_by"),
@@ -1543,6 +1551,7 @@ class UserRuleRepository(private val jdbcTemplate: JdbcTemplate) {
         workspaceId: String,
         ruleType: String,
         ruleValue: String,
+        ruleEffect: String,
         nodeId: String,
         createdBy: String
     ): UserRuleRow {
@@ -1551,19 +1560,20 @@ class UserRuleRepository(private val jdbcTemplate: JdbcTemplate) {
         jdbcTemplate.update(
             """
             INSERT INTO user_rule(
-                id, workspace_id, rule_type, rule_value, node_id, enabled, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                id, workspace_id, rule_type, rule_value, rule_effect, node_id, enabled, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             id,
             workspaceId,
             ruleType,
             ruleValue,
+            ruleEffect,
             nodeId,
             true,
             createdBy,
             now
         )
-        return UserRuleRow(id, workspaceId, ruleType, ruleValue, nodeId, true, createdBy, now)
+        return UserRuleRow(id, workspaceId, ruleType, ruleValue, ruleEffect, nodeId, true, createdBy, now)
     }
 
     fun listByWorkspace(workspaceId: String): List<UserRuleRow> = jdbcTemplate.query(
@@ -1571,6 +1581,37 @@ class UserRuleRepository(private val jdbcTemplate: JdbcTemplate) {
         mapper,
         workspaceId
     )
+
+    fun findByWorkspaceAndId(workspaceId: String, ruleId: String): UserRuleRow? = jdbcTemplate.queryOneOrNull(
+        "SELECT * FROM user_rule WHERE workspace_id = ? AND id = ?",
+        mapper,
+        workspaceId,
+        ruleId
+    )
+
+    fun update(
+        workspaceId: String,
+        ruleId: String,
+        ruleType: String,
+        ruleValue: String,
+        ruleEffect: String,
+        nodeId: String
+    ): UserRuleRow? {
+        jdbcTemplate.update(
+            """
+            UPDATE user_rule
+            SET rule_type = ?, rule_value = ?, rule_effect = ?, node_id = ?
+            WHERE workspace_id = ? AND id = ?
+            """.trimIndent(),
+            ruleType,
+            ruleValue,
+            ruleEffect,
+            nodeId,
+            workspaceId,
+            ruleId
+        )
+        return findByWorkspaceAndId(workspaceId, ruleId)
+    }
 
     fun delete(workspaceId: String, ruleId: String) {
         jdbcTemplate.update(

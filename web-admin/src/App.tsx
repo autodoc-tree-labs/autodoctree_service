@@ -121,6 +121,45 @@ type TreePolicyResponse = {
   updated_by: string | null;
   updated_at: string | null;
 };
+type TreeActiveResponse = {
+  snapshot_id: string | null;
+  status: string;
+  nodes: Array<{
+    id: string;
+    parent_id: string | null;
+    label: string;
+    locked: boolean;
+  }>;
+};
+type UserRuleItem = {
+  id: string;
+  rule_type: string;
+  rule_value: string;
+  rule_effect: string;
+  node_id: string;
+  node_label: string | null;
+  enabled: boolean;
+  created_at: string;
+};
+type UserRuleListResponse = {
+  items: UserRuleItem[];
+};
+type UserRuleMutationResponse = {
+  id: string;
+  rule_type: string;
+  rule_value: string;
+  rule_effect: string;
+  node_id: string;
+};
+type UserRulePreviewResponse = {
+  document_id: string;
+  rule_type: string;
+  rule_value: string;
+  rule_effect: string;
+  matched: boolean;
+  target_node_id: string | null;
+  target_node_label: string | null;
+};
 
 type Member = { user_id: string; email: string; role: string };
 
@@ -210,6 +249,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           <Link to="/members">멤버</Link>
           <Link to="/tree-debug">트리 디버그</Link>
           <Link to="/tree-policy">정책 설정</Link>
+          <Link to="/tree-rules">규칙 관리</Link>
         </nav>
         <button
           onClick={() => {
@@ -962,6 +1002,279 @@ export default function App() {
     );
   }
 
+  function TreeRulesPage() {
+    const [rules, setRules] = useState<UserRuleItem[]>([]);
+    const [nodes, setNodes] = useState<Array<{ id: string; label: string }>>([]);
+    const [ruleType, setRuleType] = useState("TITLE_CONTAINS");
+    const [ruleValue, setRuleValue] = useState("");
+    const [ruleEffect, setRuleEffect] = useState("HARD");
+    const [nodeId, setNodeId] = useState("");
+    const [sampleDocId, setSampleDocId] = useState("");
+    const [preview, setPreview] = useState<UserRulePreviewResponse | null>(null);
+    const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [message, setMessage] = useState<string | null>(null);
+
+    const load = async () => {
+      if (!state.workspaceId) {
+        setRules([]);
+        setNodes([]);
+        setPreview(null);
+        return;
+      }
+      setError(null);
+      try {
+        const [ruleResponse, treeResponse] = await Promise.all([
+          api.request<UserRuleListResponse>("/admin/tree/rules", {}, true),
+          api.request<TreeActiveResponse>("/tree/active", {}, true)
+        ]);
+        setRules(ruleResponse.items);
+        const selectableNodes = treeResponse.nodes
+          .filter((node) => node.parent_id !== null && node.label !== "AutoDoc")
+          .map((node) => ({ id: node.id, label: node.label }));
+        setNodes(selectableNodes);
+        setNodeId((prev) => prev || selectableNodes[0]?.id || "");
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "규칙 목록을 불러오지 못했습니다."));
+      }
+    };
+
+    useEffect(() => {
+      void load();
+    }, [state.workspaceId]);
+
+    const resetForm = () => {
+      setRuleType("TITLE_CONTAINS");
+      setRuleValue("");
+      setRuleEffect("HARD");
+      setNodeId((prev) => prev || nodes[0]?.id || "");
+      setEditingRuleId(null);
+    };
+
+    const saveRule = async () => {
+      if (!state.workspaceId) {
+        setError("먼저 워크스페이스를 선택하세요.");
+        return;
+      }
+      if (!ruleValue.trim() || !nodeId) {
+        setError("규칙 값과 대상 노드를 입력하세요.");
+        return;
+      }
+      setError(null);
+      setMessage(null);
+      try {
+        if (editingRuleId) {
+          await api.request<UserRuleMutationResponse>(
+            `/admin/tree/rules/${editingRuleId}`,
+            {
+              method: "PATCH",
+              body: JSON.stringify({
+                rule_type: ruleType,
+                rule_value: ruleValue,
+                rule_effect: ruleEffect,
+                node_id: nodeId
+              })
+            },
+            true
+          );
+          setMessage("규칙을 수정했습니다.");
+        } else {
+          await api.request<UserRuleMutationResponse>(
+            "/admin/tree/rules",
+            {
+              method: "POST",
+              body: JSON.stringify({
+                rule_type: ruleType,
+                rule_value: ruleValue,
+                rule_effect: ruleEffect,
+                node_id: nodeId
+              })
+            },
+            true
+          );
+          setMessage("규칙을 생성했습니다.");
+        }
+        setPreview(null);
+        await load();
+        resetForm();
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "규칙 저장에 실패했습니다."));
+      }
+    };
+
+    const previewRule = async () => {
+      if (!sampleDocId.trim()) {
+        setError("테스트할 문서 식별자를 입력하세요.");
+        return;
+      }
+      if (!ruleValue.trim() || !nodeId) {
+        setError("규칙 값과 대상 노드를 입력하세요.");
+        return;
+      }
+      setError(null);
+      setMessage(null);
+      try {
+        const response = await api.request<UserRulePreviewResponse>(
+          "/admin/tree/rules/preview",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              document_id: sampleDocId,
+              rule_type: ruleType,
+              rule_value: ruleValue,
+              rule_effect: ruleEffect,
+              node_id: nodeId
+            })
+          },
+          true
+        );
+        setPreview(response);
+      } catch (e) {
+        setPreview(null);
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "규칙 테스트에 실패했습니다."));
+      }
+    };
+
+    const deleteRule = async (ruleId: string) => {
+      setError(null);
+      setMessage(null);
+      try {
+        await api.request(`/admin/tree/rules/${ruleId}`, { method: "DELETE" }, true);
+        if (editingRuleId === ruleId) {
+          resetForm();
+        }
+        setMessage("규칙을 삭제했습니다.");
+        await load();
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "규칙 삭제에 실패했습니다."));
+      }
+    };
+
+    const startEdit = (rule: UserRuleItem) => {
+      setEditingRuleId(rule.id);
+      setRuleType(rule.rule_type);
+      setRuleValue(rule.rule_value);
+      setRuleEffect(rule.rule_effect);
+      setNodeId(rule.node_id);
+      setPreview(null);
+      setMessage(null);
+      setError(null);
+    };
+
+    return (
+      <Layout>
+        <h2>규칙 관리</h2>
+        <p>조건 기반 라우팅 규칙을 생성/테스트/수정하고 즉시 적용할 수 있습니다.</p>
+        {error ? (
+          <div style={{ border: "1px solid #d33", padding: 10, marginBottom: 12, background: "#fff3f3" }}>{error}</div>
+        ) : null}
+        {message ? (
+          <div style={{ border: "1px solid #3a7", padding: 10, marginBottom: 12, background: "#effbf4" }}>{message}</div>
+        ) : null}
+
+        <section style={{ border: "1px solid #ccd", padding: 12, marginBottom: 14, maxWidth: 760 }}>
+          <h3 style={{ marginTop: 0 }}>{editingRuleId ? "규칙 수정" : "규칙 생성"}</h3>
+          <div style={{ display: "grid", gap: 8 }}>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span>rule_type</span>
+              <select value={ruleType} onChange={(e) => setRuleType(e.target.value)}>
+                <option value="TITLE_CONTAINS">TITLE_CONTAINS</option>
+                <option value="ENTITY_CONTAINS">ENTITY_CONTAINS</option>
+                <option value="SOURCE_TYPE">SOURCE_TYPE</option>
+                <option value="AUTHOR">AUTHOR</option>
+                <option value="FILENAME_EXT">FILENAME_EXT</option>
+                <option value="TAG">TAG</option>
+              </select>
+            </label>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span>rule_value</span>
+              <input value={ruleValue} onChange={(e) => setRuleValue(e.target.value)} />
+            </label>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span>rule_effect</span>
+              <select value={ruleEffect} onChange={(e) => setRuleEffect(e.target.value)}>
+                <option value="HARD">HARD</option>
+                <option value="SOFT">SOFT</option>
+              </select>
+            </label>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span>target node</span>
+              <select value={nodeId} onChange={(e) => setNodeId(e.target.value)}>
+                {nodes.map((node) => (
+                  <option key={node.id} value={node.id}>
+                    {node.label} ({node.id})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button onClick={() => void saveRule()}>{editingRuleId ? "수정 저장" : "규칙 생성"}</button>
+              <button onClick={resetForm}>입력 초기화</button>
+            </div>
+          </div>
+        </section>
+
+        <section style={{ border: "1px solid #ccd", padding: 12, marginBottom: 14, maxWidth: 760 }}>
+          <h3 style={{ marginTop: 0 }}>테스트 (Preview)</h3>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            <input
+              value={sampleDocId}
+              onChange={(e) => setSampleDocId(e.target.value)}
+              placeholder="문서 식별자(document_id)"
+              style={{ minWidth: 320 }}
+            />
+            <button onClick={() => void previewRule()}>테스트</button>
+          </div>
+          {preview ? (
+            <pre>{JSON.stringify(preview, null, 2)}</pre>
+          ) : (
+            <p>테스트 결과 없음</p>
+          )}
+        </section>
+
+        <section style={{ border: "1px solid #ccd", padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>규칙 목록</h3>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>rule_type</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>rule_value</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>effect</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>target</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rules.map((rule) => (
+                <tr key={rule.id}>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{rule.rule_type}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{rule.rule_value}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{rule.rule_effect}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>
+                    {rule.node_label ?? "-"} ({rule.node_id})
+                  </td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => startEdit(rule)}>수정</button>
+                      <button onClick={() => void deleteRule(rule.id)}>삭제</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {rules.length === 0 ? (
+                <tr>
+                  <td colSpan={5} style={{ padding: "8px 4px" }}>
+                    등록된 규칙이 없습니다.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </section>
+      </Layout>
+    );
+  }
+
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
@@ -1010,6 +1323,14 @@ export default function App() {
         element={
           <Protected>
             <TreePolicyPage />
+          </Protected>
+        }
+      />
+      <Route
+        path="/tree-rules"
+        element={
+          <Protected>
+            <TreeRulesPage />
           </Protected>
         }
       />

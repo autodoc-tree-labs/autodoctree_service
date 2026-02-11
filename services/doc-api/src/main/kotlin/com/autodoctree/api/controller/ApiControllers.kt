@@ -456,7 +456,41 @@ class AdminController(
             context = context,
             ruleType = body.ruleType,
             ruleValue = body.ruleValue,
-            nodeId = body.nodeId
+            nodeId = body.nodeId,
+            ruleEffect = body.ruleEffect
+        )
+    }
+
+    @PatchMapping("/tree/rules/{ruleId}")
+    fun updateUserRule(
+        request: HttpServletRequest,
+        @PathVariable ruleId: String,
+        @Valid @RequestBody body: UpdateUserRuleRequest
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.updateUserRule(
+            context = context,
+            ruleId = ruleId,
+            ruleType = body.ruleType,
+            ruleValue = body.ruleValue,
+            nodeId = body.nodeId,
+            ruleEffect = body.ruleEffect
+        )
+    }
+
+    @PostMapping("/tree/rules/preview")
+    fun previewUserRule(
+        request: HttpServletRequest,
+        @Valid @RequestBody body: PreviewUserRuleRequest
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.previewUserRule(
+            context = context,
+            documentId = body.documentId,
+            ruleType = body.ruleType,
+            ruleValue = body.ruleValue,
+            nodeId = body.nodeId,
+            ruleEffect = body.ruleEffect
         )
     }
 
@@ -554,5 +588,21 @@ data class UpdateTreePolicyRequest(
 data class CreateUserRuleRequest(
     @field:NotBlank val ruleType: String,
     @field:NotBlank val ruleValue: String,
-    @field:NotBlank val nodeId: String
+    @field:NotBlank val nodeId: String,
+    val ruleEffect: String? = null
+)
+
+data class UpdateUserRuleRequest(
+    @field:NotBlank val ruleType: String,
+    @field:NotBlank val ruleValue: String,
+    @field:NotBlank val nodeId: String,
+    val ruleEffect: String? = null
+)
+
+data class PreviewUserRuleRequest(
+    @field:NotBlank val documentId: String,
+    @field:NotBlank val ruleType: String,
+    @field:NotBlank val ruleValue: String,
+    @field:NotBlank val nodeId: String,
+    val ruleEffect: String? = null
 )

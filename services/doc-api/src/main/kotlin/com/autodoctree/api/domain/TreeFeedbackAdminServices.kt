@@ -2,6 +2,7 @@ package com.autodoctree.api.domain
 
 import com.autodoctree.api.config.FeatureFlags
 import com.autodoctree.api.config.TreeProperties
+import com.autodoctree.api.db.AttachmentRepository
 import com.autodoctree.api.db.AuditLogRepository
 import com.autodoctree.api.db.DocumentRow
 import com.autodoctree.api.db.DocumentRepository
@@ -41,6 +42,7 @@ import kotlin.math.sqrt
 @Service
 class TreeService(
     private val documentRepository: DocumentRepository,
+    private val attachmentRepository: AttachmentRepository,
     private val documentSectionRepository: DocumentSectionRepository,
     private val embeddingRepository: EmbeddingRepository,
     private val treeRepository: TreeRepository,
@@ -71,6 +73,8 @@ class TreeService(
     private val feedbackAppliedCounter = meterRegistry.counter("feedback_applied_total")
     private val correctedRatioSummary = meterRegistry.summary("corrected_ratio")
     private val rulesAppliedCounter = meterRegistry.counter("rules_applied_total")
+    private val ruleHitCounter = meterRegistry.counter("rule_hit_total")
+    private val ruleConflictCounter = meterRegistry.counter("rule_conflict_total")
     private val lockedNodePreservedCounter = meterRegistry.counter("locked_node_preserved_total")
     private val movedRatioSummary = meterRegistry.summary("moved_ratio")
     private val churnRatioSummary = meterRegistry.summary("churn_ratio")
@@ -174,6 +178,8 @@ class TreeService(
             val assignment = mutableMapOf<String, String>()
             val personalizedDocIds = mutableSetOf<String>()
             val ruledDocIds = mutableSetOf<String>()
+            val softRulePreferredLabelByDocument = mutableMapOf<String, String>()
+            var ruleConflictCount = 0
 
             documents.forEach { doc ->
                 val forced = lockedLabelByDocument[doc.id]
@@ -182,6 +188,11 @@ class TreeService(
                 }
             }
 
+            val ruleContextByDocument = if (featureFlags.userRulesV1) {
+                buildRuleContextByDocument(workspaceId, documents)
+            } else {
+                emptyMap()
+            }
             val rules = if (featureFlags.userRulesV1) {
                 resolveUserRules(workspaceId, activeNodes)
             } else {
@@ -191,11 +202,33 @@ class TreeService(
                 documents
                     .filterNot { assignment.containsKey(it.id) }
                     .forEach { doc ->
-                        val matched = userRuleMatcher.match(doc, rules)
-                        if (matched != null) {
-                            assignment[doc.id] = matched.targetLabel
+                        val context = ruleContextByDocument[doc.id] ?: UserRuleMatchContext()
+                        val matchedRules = userRuleMatcher.matchAll(doc, rules, context)
+                        if (matchedRules.isEmpty()) {
+                            return@forEach
+                        }
+                        ruleHitCounter.increment()
+                        val hardMatches = matchedRules.filter { it.ruleEffect == "HARD" }
+                        if (hardMatches.isNotEmpty()) {
+                            val hardTargets = hardMatches.map { it.targetLabel }.distinct()
+                            if (hardTargets.size > 1) {
+                                ruleConflictCounter.increment()
+                                ruleConflictCount += 1
+                            }
+                            assignment[doc.id] = hardMatches.first().targetLabel
                             ruledDocIds += doc.id
                             rulesAppliedCounter.increment()
+                            return@forEach
+                        }
+                        val preferredSoft = matchedRules
+                            .filter { it.ruleEffect == "SOFT" }
+                            .map { it.targetLabel }
+                            .groupingBy { it }
+                            .eachCount()
+                            .maxWithOrNull(compareBy<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+                            ?.key
+                        if (preferredSoft != null) {
+                            softRulePreferredLabelByDocument[doc.id] = preferredSoft
                         }
                     }
             }
@@ -223,7 +256,9 @@ class TreeService(
                 details = mapOf(
                     "feedback_event_count" to feedbackEvents.size,
                     "personalized_doc_count" to personalizedDocIds.size,
-                    "ruled_doc_count" to ruledDocIds.size
+                    "ruled_doc_count" to ruledDocIds.size,
+                    "soft_rule_doc_count" to softRulePreferredLabelByDocument.size,
+                    "rule_conflict_count" to ruleConflictCount
                 )
             )
 
@@ -317,6 +352,16 @@ class TreeService(
                     cluster.documentIds.forEach { docId ->
                         assignment[docId] = label
                     }
+                }
+                val softRuledDocIds = applySoftRules(
+                    documents = remaining,
+                    adjacency = graph.adjacency,
+                    assignment = assignment,
+                    preferredLabels = softRulePreferredLabelByDocument
+                )
+                if (softRuledDocIds.isNotEmpty()) {
+                    ruledDocIds += softRuledDocIds
+                    rulesAppliedCounter.increment(softRuledDocIds.size.toDouble())
                 }
                 if (assignmentPolicy.quarantineEnabled) {
                     quarantineReasonByDocument.putAll(
@@ -639,6 +684,8 @@ class TreeService(
                     "fused" to graphStats.similaritySourceBreakdown.fused
                 ),
                 "label_source_breakdown" to labelSourceBreakdown,
+                "rule_conflict_count" to ruleConflictCount,
+                "soft_rule_doc_count" to softRulePreferredLabelByDocument.size,
                 "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
             )
             treeTelemetry.logSummary(summaryPayload)
@@ -666,6 +713,8 @@ class TreeService(
                         "hub_doc_count" to graphStats.hubDocCount,
                         "auto_ratio" to autoRatio,
                         "recommend_ratio" to recommendRatio,
+                        "rule_conflict_count" to ruleConflictCount,
+                        "soft_rule_doc_count" to softRulePreferredLabelByDocument.size,
                         "policy_threshold" to mapOf(
                             "auto" to assignmentPolicy.autoThreshold,
                             "recommend" to assignmentPolicy.recommendThreshold,
@@ -1414,14 +1463,76 @@ class TreeService(
                 if (value.isBlank()) {
                     return@mapNotNull null
                 }
+                val normalizedType = userRuleMatcher.normalizeRuleType(row.ruleType)
+                if (normalizedType !in UserRuleMatcher.SUPPORTED_RULE_TYPES) {
+                    return@mapNotNull null
+                }
                 ResolvedUserRule(
                     id = row.id,
-                    ruleType = row.ruleType.uppercase(),
+                    ruleType = normalizedType,
                     ruleValue = value,
-                    targetLabel = label
+                    targetLabel = label,
+                    ruleEffect = userRuleMatcher.normalizeRuleEffect(row.ruleEffect)
                 )
             }
-            .distinctBy { "${it.ruleType}::${it.ruleValue}::${it.targetLabel}" }
+            .distinctBy { "${it.ruleType}::${it.ruleValue}::${it.ruleEffect}::${it.targetLabel}" }
+    }
+
+    private fun buildRuleContextByDocument(
+        workspaceId: String,
+        documents: List<DocumentRow>
+    ): Map<String, UserRuleMatchContext> {
+        if (documents.isEmpty()) {
+            return emptyMap()
+        }
+        val attachmentsByDocument = attachmentRepository.listByWorkspace(workspaceId).groupBy { it.documentId }
+        return documents.associate { document ->
+            val filenameExtensions = attachmentsByDocument[document.id].orEmpty()
+                .mapNotNull { attachment -> extractFilenameExtension(attachment.filename) }
+                .toSet()
+            document.id to UserRuleMatchContext(
+                filenameExtensions = filenameExtensions,
+                tags = userRuleMatcher.extractTags(document)
+            )
+        }
+    }
+
+    private fun extractFilenameExtension(filename: String): String? {
+        val normalized = filename.trim()
+        if (normalized.isBlank()) {
+            return null
+        }
+        val leaf = normalized.substringAfterLast('/').substringAfterLast('\\')
+        val dotIndex = leaf.lastIndexOf('.')
+        if (dotIndex <= 0 || dotIndex == leaf.length - 1) {
+            return null
+        }
+        return leaf.substring(dotIndex + 1).trim().lowercase().takeIf { it.isNotBlank() }
+    }
+
+    private fun applySoftRules(
+        documents: List<DocumentRow>,
+        adjacency: Map<String, List<NeighborLink>>,
+        assignment: MutableMap<String, String>,
+        preferredLabels: Map<String, String>
+    ): Set<String> {
+        if (documents.isEmpty() || preferredLabels.isEmpty()) {
+            return emptySet()
+        }
+        val applied = mutableSetOf<String>()
+        documents.forEach { doc ->
+            val preferredLabel = preferredLabels[doc.id] ?: return@forEach
+            val currentLabel = assignment[doc.id] ?: return@forEach
+            if (currentLabel.equals(preferredLabel, ignoreCase = true)) {
+                return@forEach
+            }
+            val confidence = estimateAssignmentConfidence(adjacency[doc.id].orEmpty())
+            if (confidence < 0.72) {
+                assignment[doc.id] = preferredLabel
+                applied += doc.id
+            }
+        }
+        return applied
     }
 
     private fun loadTreeEmbeddings(workspaceId: String, documents: List<DocumentRow>): Map<String, EmbeddingRow> {
@@ -1780,12 +1891,15 @@ class AdminService(
     private val outboxRepository: OutboxRepository,
     private val stageExecutionRepository: StageExecutionRepository,
     private val auditLogRepository: AuditLogRepository,
+    private val documentRepository: DocumentRepository,
+    private val attachmentRepository: AttachmentRepository,
     private val outboxService: OutboxService,
     private val auditService: AuditService,
     private val treeService: TreeService,
     private val treeRepository: TreeRepository,
     private val workspaceTreePolicyRepository: WorkspaceTreePolicyRepository,
     private val userRuleRepository: UserRuleRepository,
+    private val userRuleMatcher: UserRuleMatcher,
     private val treeProperties: TreeProperties,
     private val featureFlags: FeatureFlags,
     private val meterRegistry: MeterRegistry
@@ -2014,6 +2128,7 @@ class AdminService(
                     "id" to rule.id,
                     "rule_type" to rule.ruleType,
                     "rule_value" to rule.ruleValue,
+                    "rule_effect" to rule.ruleEffect,
                     "node_id" to rule.nodeId,
                     "node_label" to (nodesById[rule.nodeId]?.label
                         ?: treeRepository.findNodeByWorkspace(context.workspaceId, rule.nodeId)?.label),
@@ -2025,24 +2140,26 @@ class AdminService(
     }
 
     @Transactional
-    fun createUserRule(context: WorkspaceContext, ruleType: String, ruleValue: String, nodeId: String): Map<String, Any?> {
+    fun createUserRule(
+        context: WorkspaceContext,
+        ruleType: String,
+        ruleValue: String,
+        nodeId: String,
+        ruleEffect: String?
+    ): Map<String, Any?> {
         requireOwner(context)
         if (!featureFlags.userRulesV1) {
             throw ForbiddenException("user rules feature is disabled")
         }
-        val normalizedType = ruleType.trim().uppercase()
-        if (normalizedType !in setOf("ENTITY_CONTAINS", "TITLE_CONTAINS")) {
-            throw BadRequestException("unsupported rule_type")
-        }
-        val normalizedValue = ruleValue.trim()
-        if (normalizedValue.isBlank()) {
-            throw BadRequestException("rule_value must not be blank")
-        }
+        val normalizedType = validateRuleType(ruleType)
+        val normalizedValue = validateRuleValue(ruleValue)
+        val normalizedEffect = validateRuleEffect(ruleEffect)
         val node = treeRepository.findNodeByWorkspace(context.workspaceId, nodeId) ?: throw NotFoundException()
         val rule = userRuleRepository.create(
             workspaceId = context.workspaceId,
             ruleType = normalizedType,
             ruleValue = normalizedValue.take(255),
+            ruleEffect = normalizedEffect,
             nodeId = node.id,
             createdBy = context.userId
         )
@@ -2053,6 +2170,7 @@ class AdminService(
             mapOf(
                 "rule_id" to rule.id,
                 "rule_type" to rule.ruleType,
+                "rule_effect" to rule.ruleEffect,
                 "node_id" to node.id
             )
         )
@@ -2060,7 +2178,97 @@ class AdminService(
             "id" to rule.id,
             "rule_type" to rule.ruleType,
             "rule_value" to rule.ruleValue,
+            "rule_effect" to rule.ruleEffect,
             "node_id" to rule.nodeId
+        )
+    }
+
+    @Transactional
+    fun updateUserRule(
+        context: WorkspaceContext,
+        ruleId: String,
+        ruleType: String,
+        ruleValue: String,
+        nodeId: String,
+        ruleEffect: String?
+    ): Map<String, Any?> {
+        requireOwner(context)
+        if (!featureFlags.userRulesV1) {
+            throw ForbiddenException("user rules feature is disabled")
+        }
+        val existing = userRuleRepository.findByWorkspaceAndId(context.workspaceId, ruleId) ?: throw NotFoundException()
+        val normalizedType = validateRuleType(ruleType)
+        val normalizedValue = validateRuleValue(ruleValue)
+        val normalizedEffect = validateRuleEffect(ruleEffect)
+        val node = treeRepository.findNodeByWorkspace(context.workspaceId, nodeId) ?: throw NotFoundException()
+        val updated = userRuleRepository.update(
+            workspaceId = context.workspaceId,
+            ruleId = existing.id,
+            ruleType = normalizedType,
+            ruleValue = normalizedValue.take(255),
+            ruleEffect = normalizedEffect,
+            nodeId = node.id
+        ) ?: throw NotFoundException()
+        auditService.write(
+            context.workspaceId,
+            context.userId,
+            "admin.rule.updated",
+            mapOf(
+                "rule_id" to updated.id,
+                "rule_type" to updated.ruleType,
+                "rule_effect" to updated.ruleEffect,
+                "node_id" to updated.nodeId
+            )
+        )
+        return mapOf(
+            "id" to updated.id,
+            "rule_type" to updated.ruleType,
+            "rule_value" to updated.ruleValue,
+            "rule_effect" to updated.ruleEffect,
+            "node_id" to updated.nodeId
+        )
+    }
+
+    fun previewUserRule(
+        context: WorkspaceContext,
+        documentId: String,
+        ruleType: String,
+        ruleValue: String,
+        nodeId: String,
+        ruleEffect: String?
+    ): Map<String, Any?> {
+        requireOwner(context)
+        if (!featureFlags.userRulesV1) {
+            throw ForbiddenException("user rules feature is disabled")
+        }
+        val document = documentRepository.findByWorkspaceAndId(context.workspaceId, documentId) ?: throw NotFoundException()
+        val node = treeRepository.findNodeByWorkspace(context.workspaceId, nodeId) ?: throw NotFoundException()
+        val normalizedType = validateRuleType(ruleType)
+        val normalizedValue = validateRuleValue(ruleValue)
+        val normalizedEffect = validateRuleEffect(ruleEffect)
+        val contextData = UserRuleMatchContext(
+            filenameExtensions = attachmentRepository
+                .listByWorkspaceAndDocument(context.workspaceId, document.id)
+                .mapNotNull { attachment -> extractFilenameExtension(attachment.filename) }
+                .toSet(),
+            tags = userRuleMatcher.extractTags(document)
+        )
+        val previewRule = ResolvedUserRule(
+            id = "preview",
+            ruleType = normalizedType,
+            ruleValue = normalizedValue,
+            targetLabel = node.label,
+            ruleEffect = normalizedEffect
+        )
+        val matched = userRuleMatcher.match(document, listOf(previewRule), contextData) != null
+        return mapOf(
+            "document_id" to document.id,
+            "rule_type" to normalizedType,
+            "rule_value" to normalizedValue,
+            "rule_effect" to normalizedEffect,
+            "matched" to matched,
+            "target_node_id" to if (matched) node.id else null,
+            "target_node_label" to if (matched) node.label else null
         )
     }
 
@@ -2077,6 +2285,39 @@ class AdminService(
             "admin.rule.deleted",
             mapOf("rule_id" to ruleId)
         )
+    }
+
+    private fun validateRuleType(ruleType: String): String {
+        val normalizedType = userRuleMatcher.normalizeRuleType(ruleType)
+        if (normalizedType !in UserRuleMatcher.SUPPORTED_RULE_TYPES) {
+            throw BadRequestException("unsupported rule_type")
+        }
+        return normalizedType
+    }
+
+    private fun validateRuleValue(ruleValue: String): String {
+        val normalizedValue = userRuleMatcher.normalizeRuleValue(ruleValue)
+        if (normalizedValue.isBlank()) {
+            throw BadRequestException("rule_value must not be blank")
+        }
+        return normalizedValue
+    }
+
+    private fun validateRuleEffect(ruleEffect: String?): String {
+        val normalizedEffect = ruleEffect?.trim()?.uppercase().orEmpty().ifBlank { "HARD" }
+        if (normalizedEffect !in UserRuleMatcher.SUPPORTED_RULE_EFFECTS) {
+            throw BadRequestException("unsupported rule_effect")
+        }
+        return normalizedEffect
+    }
+
+    private fun extractFilenameExtension(filename: String): String? {
+        val leaf = filename.substringAfterLast('/').substringAfterLast('\\')
+        val dotIndex = leaf.lastIndexOf('.')
+        if (dotIndex <= 0 || dotIndex == leaf.length - 1) {
+            return null
+        }
+        return leaf.substring(dotIndex + 1).trim().lowercase().takeIf { it.isNotBlank() }
     }
 
     private fun counterTotal(name: String): Double {

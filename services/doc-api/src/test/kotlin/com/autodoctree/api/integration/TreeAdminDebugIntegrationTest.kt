@@ -356,6 +356,98 @@ class TreeAdminDebugIntegrationTest {
     }
 
     @Test
+    fun `rule preview returns routing result for sample doc`() {
+        val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
+        val targetNode = treeRepository.listNodes(workspaceId, active.id).firstOrNull { it.depth >= 1 && it.label != "AutoDoc" }
+            ?: error("target node missing")
+
+        mockMvc.perform(
+            post("/api/v1/admin/tree/rules/preview")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "document_id" to debugDocId,
+                            "rule_type" to "SOURCE_TYPE",
+                            "rule_value" to "editor",
+                            "rule_effect" to "SOFT",
+                            "node_id" to targetNode.id
+                        )
+                    )
+                )
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.document_id").value(debugDocId))
+            .andExpect(jsonPath("$.rule_type").value("SOURCE_TYPE"))
+            .andExpect(jsonPath("$.rule_effect").value("SOFT"))
+            .andExpect(jsonPath("$.matched").value(true))
+            .andExpect(jsonPath("$.target_node_id").value(targetNode.id))
+    }
+
+    @Test
+    fun `admin can update user rule effect and type`() {
+        val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
+        val targetNode = treeRepository.listNodes(workspaceId, active.id).firstOrNull { it.depth >= 1 && it.label != "AutoDoc" }
+            ?: error("target node missing")
+
+        val createResponse = mockMvc.perform(
+            post("/api/v1/admin/tree/rules")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "rule_type" to "TAG",
+                            "rule_value" to "quality",
+                            "rule_effect" to "SOFT",
+                            "node_id" to targetNode.id
+                        )
+                    )
+                )
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.rule_effect").value("SOFT"))
+            .andReturn()
+            .response
+            .contentAsString
+        val createdRuleId = objectMapper.readTree(createResponse).path("id").asText()
+
+        mockMvc.perform(
+            patch("/api/v1/admin/tree/rules/$createdRuleId")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "rule_type" to "SOURCE_TYPE",
+                            "rule_value" to "editor",
+                            "rule_effect" to "HARD",
+                            "node_id" to targetNode.id
+                        )
+                    )
+                )
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.rule_type").value("SOURCE_TYPE"))
+            .andExpect(jsonPath("$.rule_effect").value("HARD"))
+
+        val listResponse = mockMvc.perform(
+            get("/api/v1/admin/tree/rules")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+        val items = objectMapper.readTree(listResponse).path("items")
+        val updated = items.firstOrNull { item -> item.path("id").asText() == createdRuleId }
+        assertTrue(updated != null, "Expected updated rule in list response")
+        assertEquals("SOURCE_TYPE", updated?.path("rule_type")?.asText())
+        assertEquals("HARD", updated?.path("rule_effect")?.asText())
+    }
+
+    @Test
     fun `locked node keeps label and parent label across rebuild`() {
         val beforeSnapshot = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
         val beforeNodes = treeRepository.listNodes(workspaceId, beforeSnapshot.id)
