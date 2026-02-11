@@ -270,6 +270,31 @@ Query: `document_id` optional
 ## GET /admin/audit
 Query: `type`, `from`, `to`
 
+## GET /admin/tree/policy
+Response (example):
+```json
+{
+  "workspace_id": "ws_1",
+  "auto_threshold": 0.8,
+  "recommend_threshold": 0.6,
+  "quarantine_enabled": true,
+  "reranker_enabled": false,
+  "source": "DEFAULT",
+  "updated_by": null,
+  "updated_at": null
+}
+```
+
+## PATCH /admin/tree/policy
+```json
+{
+  "auto_threshold": 0.85,
+  "recommend_threshold": 0.65,
+  "quarantine_enabled": true,
+  "reranker_enabled": false
+}
+```
+
 ## GET /admin/tree/debug/neighbors
 Query: `document_id` (required)
 
@@ -369,7 +394,11 @@ Response (example):
     "neighbor_min_similarity": 0.25,
     "neighbor_mutual_knn_required": true,
     "neighbor_snn_threshold": 0.12,
-    "neighbor_edge_budget": 6
+    "neighbor_edge_budget": 6,
+    "assign_auto_threshold": 0.8,
+    "assign_recommend_threshold": 0.6,
+    "assign_quarantine_enabled": true,
+    "assign_reranker_enabled": false
   },
   "models": {
     "embedding_provider": "ollama",
@@ -379,7 +408,16 @@ Response (example):
     "status": "ACTIVE",
     "moved_ratio": 0.12,
     "churn_count": 2,
-    "unsorted_ratio": 0.08
+    "unsorted_ratio": 0.08,
+    "auto_ratio": 0.62,
+    "recommend_ratio": 0.18,
+    "policy_threshold": {
+      "auto": 0.8,
+      "recommend": 0.6,
+      "quarantine_enabled": true,
+      "reranker_enabled": false,
+      "source": "OVERRIDE"
+    }
   },
   "stage_logs": [
     { "stage": "graph", "duration_ms": 11.2, "details": { "edge_count": 42 } }
@@ -401,6 +439,8 @@ Response (example):
   "mutual_pass_rate": 0.84,
   "snn_pass_rate": 0.78,
   "hub_doc_count": 3,
+  "auto_ratio": 0.62,
+  "recommend_ratio": 0.18,
   "label_filtered_total": 3,
   "avg_label_length": 6.4,
   "tree_rebuild_duration_ms": 182.5,

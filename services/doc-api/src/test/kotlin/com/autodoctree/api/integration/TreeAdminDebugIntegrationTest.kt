@@ -21,6 +21,7 @@ import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.context.TestPropertySource
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
@@ -187,6 +188,61 @@ class TreeAdminDebugIntegrationTest {
             .andExpect(jsonPath("$.models.embedding_model").exists())
             .andExpect(jsonPath("$.decision_summary.status").exists())
             .andExpect(jsonPath("$.stage_logs").isArray)
+    }
+
+    @Test
+    fun `admin can update tree policy and rebuild debug reflects override`() {
+        mockMvc.perform(
+            patch("/api/v1/admin/tree/policy")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "auto_threshold" to 0.95,
+                            "recommend_threshold" to 0.80,
+                            "quarantine_enabled" to true,
+                            "reranker_enabled" to false
+                        )
+                    )
+                )
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.source").value("OVERRIDE"))
+            .andExpect(jsonPath("$.auto_threshold").value(0.95))
+            .andExpect(jsonPath("$.recommend_threshold").value(0.8))
+
+        treeService.rebuildWorkspace(workspaceId, ownerId, manual = true)
+        val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
+        mockMvc.perform(
+            get("/api/v1/admin/tree/debug/rebuilds/${active.id}")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.decision_summary.auto_ratio").exists())
+            .andExpect(jsonPath("$.decision_summary.recommend_ratio").exists())
+            .andExpect(jsonPath("$.decision_summary.policy_threshold.auto").value(0.95))
+            .andExpect(jsonPath("$.decision_summary.policy_threshold.recommend").value(0.8))
+    }
+
+    @Test
+    fun `member role cannot update tree policy`() {
+        mockMvc.perform(
+            patch("/api/v1/admin/tree/policy")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $memberToken")
+                .header("X-Workspace-Id", workspaceId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "auto_threshold" to 0.85,
+                            "recommend_threshold" to 0.65,
+                            "quarantine_enabled" to true,
+                            "reranker_enabled" to false
+                        )
+                    )
+                )
+        ).andExpect(status().isForbidden)
     }
 
     @Test

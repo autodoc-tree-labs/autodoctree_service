@@ -39,6 +39,8 @@ test("loads tree debug page and renders neighbors table", async ({ page }) => {
         label_filtered_total: 1,
         avg_label_length: 6.2,
         tree_rebuild_duration_ms: 120.3,
+        auto_ratio: 0.6,
+        recommend_ratio: 0.2,
         moved_ratio: 0.1,
         churn_ratio: 0.1
       })
@@ -124,6 +126,40 @@ test("loads tree debug page and renders neighbors table", async ({ page }) => {
       })
     });
   });
+  await page.route("**/api/v1/admin/tree/policy", async (route) => {
+    if (route.request().method() === "PATCH") {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          workspace_id: "ws-1",
+          auto_threshold: body.auto_threshold ?? 0.9,
+          recommend_threshold: body.recommend_threshold ?? 0.7,
+          quarantine_enabled: body.quarantine_enabled ?? true,
+          reranker_enabled: body.reranker_enabled ?? false,
+          source: "OVERRIDE",
+          updated_by: "user-1",
+          updated_at: "2026-02-11T00:00:00"
+        })
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        workspace_id: "ws-1",
+        auto_threshold: 0.9,
+        recommend_threshold: 0.7,
+        quarantine_enabled: true,
+        reranker_enabled: false,
+        source: "OVERRIDE",
+        updated_by: "user-1",
+        updated_at: "2026-02-11T00:00:00"
+      })
+    });
+  });
 
   await page.goto("/login");
   await page.getByPlaceholder("이메일 주소").fill("owner@autodoc.local");
@@ -147,4 +183,10 @@ test("loads tree debug page and renders neighbors table", async ({ page }) => {
   await page.getByPlaceholder("스냅샷 식별자(snapshot_id)").fill("snap-1");
   await page.getByRole("button", { name: "리빌드 조회" }).click();
   await expect(page.getByText("\"neighbor_top_k\": 5")).toBeVisible();
+
+  await page.getByRole("link", { name: "정책 설정" }).click();
+  await expect(page.getByRole("heading", { name: "정책 설정" })).toBeVisible();
+  await expect(page.getByText("\"source\": \"OVERRIDE\"")).toBeVisible();
+  await page.getByRole("button", { name: "저장" }).click();
+  await expect(page.getByText("정책이 저장되었습니다. 다음 리빌드부터 반영됩니다.")).toBeVisible();
 });

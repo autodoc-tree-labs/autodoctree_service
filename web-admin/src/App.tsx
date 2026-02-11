@@ -106,8 +106,20 @@ type ClusterStatsResponse = {
   label_filtered_total: number;
   avg_label_length: number;
   tree_rebuild_duration_ms: number;
+  auto_ratio: number;
+  recommend_ratio: number;
   moved_ratio: number;
   churn_ratio: number;
+};
+type TreePolicyResponse = {
+  workspace_id: string;
+  auto_threshold: number;
+  recommend_threshold: number;
+  quarantine_enabled: boolean;
+  reranker_enabled: boolean;
+  source: string;
+  updated_by: string | null;
+  updated_at: string | null;
 };
 
 type Member = { user_id: string; email: string; role: string };
@@ -197,6 +209,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           <Link to="/audit">감사 로그</Link>
           <Link to="/members">멤버</Link>
           <Link to="/tree-debug">트리 디버그</Link>
+          <Link to="/tree-policy">정책 설정</Link>
         </nav>
         <button
           onClick={() => {
@@ -653,6 +666,14 @@ export default function App() {
                   <td>churn_ratio</td>
                   <td>{formatMetric(stats.churn_ratio, 3)}</td>
                 </tr>
+                <tr>
+                  <td>auto_ratio</td>
+                  <td>{formatMetric(stats.auto_ratio, 3)}</td>
+                </tr>
+                <tr>
+                  <td>recommend_ratio</td>
+                  <td>{formatMetric(stats.recommend_ratio, 3)}</td>
+                </tr>
               </tbody>
             </table>
           ) : (
@@ -814,6 +835,133 @@ export default function App() {
     );
   }
 
+  function TreePolicyPage() {
+    const [policy, setPolicy] = useState<TreePolicyResponse | null>(null);
+    const [autoThreshold, setAutoThreshold] = useState("0.80");
+    const [recommendThreshold, setRecommendThreshold] = useState("0.60");
+    const [quarantineEnabled, setQuarantineEnabled] = useState(true);
+    const [rerankerEnabled, setRerankerEnabled] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [message, setMessage] = useState<string | null>(null);
+
+    const loadPolicy = async () => {
+      if (!state.workspaceId) {
+        setPolicy(null);
+        return;
+      }
+      setError(null);
+      try {
+        const response = await api.request<TreePolicyResponse>("/admin/tree/policy", {}, true);
+        setPolicy(response);
+        setAutoThreshold(response.auto_threshold.toFixed(2));
+        setRecommendThreshold(response.recommend_threshold.toFixed(2));
+        setQuarantineEnabled(response.quarantine_enabled);
+        setRerankerEnabled(response.reranker_enabled);
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "정책 설정을 불러오지 못했습니다."));
+      }
+    };
+
+    useEffect(() => {
+      void loadPolicy();
+    }, [state.workspaceId]);
+
+    const savePolicy = async () => {
+      if (!state.workspaceId) {
+        setError("먼저 워크스페이스를 선택하세요.");
+        return;
+      }
+      const auto = Number(autoThreshold);
+      const recommend = Number(recommendThreshold);
+      if (Number.isNaN(auto) || Number.isNaN(recommend)) {
+        setError("임계값은 숫자로 입력하세요.");
+        return;
+      }
+      if (recommend > auto) {
+        setError("recommend_threshold는 auto_threshold보다 작거나 같아야 합니다.");
+        return;
+      }
+
+      setError(null);
+      setMessage(null);
+      try {
+        const response = await api.request<TreePolicyResponse>(
+          "/admin/tree/policy",
+          {
+            method: "PATCH",
+            body: JSON.stringify({
+              auto_threshold: auto,
+              recommend_threshold: recommend,
+              quarantine_enabled: quarantineEnabled,
+              reranker_enabled: rerankerEnabled
+            })
+          },
+          true
+        );
+        setPolicy(response);
+        setMessage("정책이 저장되었습니다. 다음 리빌드부터 반영됩니다.");
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "정책 저장에 실패했습니다."));
+      }
+    };
+
+    return (
+      <Layout>
+        <h2>정책 설정</h2>
+        <p>워크스페이스별 자동 배치 임계값과 유보 정책을 조정합니다.</p>
+        {error ? (
+          <div style={{ border: "1px solid #d33", padding: 10, marginBottom: 12, background: "#fff3f3" }}>{error}</div>
+        ) : null}
+        {message ? (
+          <div style={{ border: "1px solid #3a7", padding: 10, marginBottom: 12, background: "#effbf4" }}>{message}</div>
+        ) : null}
+
+        <section style={{ border: "1px solid #ccd", padding: 12, marginBottom: 14, maxWidth: 620 }}>
+          <h3 style={{ marginTop: 0 }}>Threshold</h3>
+          <div style={{ display: "grid", gap: 8 }}>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span>auto_threshold (AUTO)</span>
+              <input value={autoThreshold} onChange={(e) => setAutoThreshold(e.target.value)} />
+            </label>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span>recommend_threshold (RECOMMEND)</span>
+              <input value={recommendThreshold} onChange={(e) => setRecommendThreshold(e.target.value)} />
+            </label>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                checked={quarantineEnabled}
+                onChange={(e) => setQuarantineEnabled(e.target.checked)}
+                type="checkbox"
+              />
+              quarantine_enabled
+            </label>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                checked={rerankerEnabled}
+                onChange={(e) => setRerankerEnabled(e.target.checked)}
+                type="checkbox"
+              />
+              reranker_enabled
+            </label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => void savePolicy()}>저장</button>
+              <button onClick={() => void loadPolicy()}>다시 불러오기</button>
+            </div>
+          </div>
+        </section>
+
+        <section style={{ border: "1px solid #ccd", padding: 12, maxWidth: 620 }}>
+          <h3 style={{ marginTop: 0 }}>현재 값</h3>
+          {policy ? (
+            <pre>{JSON.stringify(policy, null, 2)}</pre>
+          ) : (
+            <p>정책 데이터 없음</p>
+          )}
+        </section>
+      </Layout>
+    );
+  }
+
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
@@ -854,6 +1002,14 @@ export default function App() {
         element={
           <Protected>
             <TreeDebugPage />
+          </Protected>
+        }
+      />
+      <Route
+        path="/tree-policy"
+        element={
+          <Protected>
+            <TreePolicyPage />
           </Protected>
         }
       />

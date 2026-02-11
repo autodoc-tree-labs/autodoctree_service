@@ -419,6 +419,27 @@ class AdminController(
         return adminService.clusterStats(context)
     }
 
+    @GetMapping("/tree/policy")
+    fun getTreePolicy(request: HttpServletRequest): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.getTreePolicy(context)
+    }
+
+    @PatchMapping("/tree/policy")
+    fun updateTreePolicy(
+        request: HttpServletRequest,
+        @Valid @RequestBody body: UpdateTreePolicyRequest
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.updateTreePolicy(
+            context = context,
+            autoThreshold = body.autoThreshold,
+            recommendThreshold = body.recommendThreshold,
+            quarantineEnabled = body.quarantineEnabled,
+            rerankerEnabled = body.rerankerEnabled
+        )
+    }
+
     @GetMapping("/tree/rules")
     fun listUserRules(request: HttpServletRequest): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)
@@ -520,6 +541,13 @@ data class RenameRequest(
 data class RetryRequest(
     @field:NotBlank val documentId: String,
     @field:NotBlank val stage: String
+)
+
+data class UpdateTreePolicyRequest(
+    val autoThreshold: Double,
+    val recommendThreshold: Double,
+    val quarantineEnabled: Boolean,
+    val rerankerEnabled: Boolean
 )
 
 data class CreateUserRuleRequest(

@@ -62,6 +62,9 @@ tree_rebuild_stage {event=tree_rebuild_stage, workspace_id=ws_1, stage=graph, du
 - `tree.neighbor_builder.lexical_token_count`
 - `tree.neighbor_builder.tfidf_compute`
 - `tree.neighbor_builder.lexical_gate_pass_rate`
+- `tree.assign_policy_total{decision=AUTO|RECOMMEND|UNSORTED}`
+- `auto_ratio`
+- `recommend_ratio`
 - `explain_shown_total`
 - `explain_accept_total`
 

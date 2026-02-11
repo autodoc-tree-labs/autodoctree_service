@@ -182,6 +182,16 @@ data class UserRuleRow(
     val createdAt: LocalDateTime
 )
 
+data class WorkspaceTreePolicyRow(
+    val workspaceId: String,
+    val autoThreshold: Double,
+    val recommendThreshold: Double,
+    val quarantineEnabled: Boolean,
+    val rerankerEnabled: Boolean,
+    val updatedBy: String,
+    val updatedAt: LocalDateTime
+)
+
 data class AuditLogRow(
     val id: String,
     val workspaceId: String,
@@ -1413,6 +1423,105 @@ class FeedbackRepository(private val jdbcTemplate: JdbcTemplate) {
         workspaceId,
         limit
     )
+}
+
+@Repository
+class WorkspaceTreePolicyRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<WorkspaceTreePolicyRow> { rs: ResultSet, _: Int ->
+        WorkspaceTreePolicyRow(
+            workspaceId = rs.getString("workspace_id"),
+            autoThreshold = rs.getDouble("auto_threshold"),
+            recommendThreshold = rs.getDouble("recommend_threshold"),
+            quarantineEnabled = rs.getBoolean("quarantine_enabled"),
+            rerankerEnabled = rs.getBoolean("reranker_enabled"),
+            updatedBy = rs.getString("updated_by"),
+            updatedAt = rs.getTimestamp("updated_at").toLocalDateTime()
+        )
+    }
+
+    fun findByWorkspace(workspaceId: String): WorkspaceTreePolicyRow? = jdbcTemplate.queryOneOrNull(
+        "SELECT * FROM workspace_tree_policy WHERE workspace_id = ?",
+        mapper,
+        workspaceId
+    )
+
+    fun upsert(
+        workspaceId: String,
+        autoThreshold: Double,
+        recommendThreshold: Double,
+        quarantineEnabled: Boolean,
+        rerankerEnabled: Boolean,
+        updatedBy: String
+    ): WorkspaceTreePolicyRow {
+        val now = LocalDateTime.now()
+        val updated = jdbcTemplate.update(
+            """
+            UPDATE workspace_tree_policy
+            SET auto_threshold = ?,
+                recommend_threshold = ?,
+                quarantine_enabled = ?,
+                reranker_enabled = ?,
+                updated_by = ?,
+                updated_at = ?
+            WHERE workspace_id = ?
+            """.trimIndent(),
+            autoThreshold,
+            recommendThreshold,
+            quarantineEnabled,
+            rerankerEnabled,
+            updatedBy,
+            now,
+            workspaceId
+        )
+        if (updated == 0) {
+            try {
+                jdbcTemplate.update(
+                    """
+                    INSERT INTO workspace_tree_policy(
+                        workspace_id, auto_threshold, recommend_threshold, quarantine_enabled, reranker_enabled, updated_by, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """.trimIndent(),
+                    workspaceId,
+                    autoThreshold,
+                    recommendThreshold,
+                    quarantineEnabled,
+                    rerankerEnabled,
+                    updatedBy,
+                    now
+                )
+            } catch (_: DuplicateKeyException) {
+                jdbcTemplate.update(
+                    """
+                    UPDATE workspace_tree_policy
+                    SET auto_threshold = ?,
+                        recommend_threshold = ?,
+                        quarantine_enabled = ?,
+                        reranker_enabled = ?,
+                        updated_by = ?,
+                        updated_at = ?
+                    WHERE workspace_id = ?
+                    """.trimIndent(),
+                    autoThreshold,
+                    recommendThreshold,
+                    quarantineEnabled,
+                    rerankerEnabled,
+                    updatedBy,
+                    now,
+                    workspaceId
+                )
+            }
+        }
+        return findByWorkspace(workspaceId) ?: WorkspaceTreePolicyRow(
+            workspaceId,
+            autoThreshold = autoThreshold,
+            recommendThreshold = recommendThreshold,
+            quarantineEnabled = quarantineEnabled,
+            rerankerEnabled = rerankerEnabled,
+            updatedBy = updatedBy,
+            updatedAt = now
+        )
+    }
 }
 
 @Repository

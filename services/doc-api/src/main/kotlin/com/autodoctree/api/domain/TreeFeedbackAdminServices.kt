@@ -8,11 +8,13 @@ import com.autodoctree.api.db.DocumentRepository
 import com.autodoctree.api.db.DocumentSectionRepository
 import com.autodoctree.api.db.EmbeddingRow
 import com.autodoctree.api.db.EmbeddingRepository
+import com.autodoctree.api.db.FeedbackEventRow
 import com.autodoctree.api.db.FeedbackRepository
 import com.autodoctree.api.db.OutboxRepository
 import com.autodoctree.api.db.StageExecutionRepository
 import com.autodoctree.api.db.TreeMembershipRow
 import com.autodoctree.api.db.TreeNodeRow
+import com.autodoctree.api.db.WorkspaceTreePolicyRepository
 import com.autodoctree.api.db.TreeRepository
 import com.autodoctree.api.db.TreeSnapshotRow
 import com.autodoctree.api.db.UserRuleRepository
@@ -44,6 +46,7 @@ class TreeService(
     private val treeRepository: TreeRepository,
     private val feedbackRepository: FeedbackRepository,
     private val userRuleRepository: UserRuleRepository,
+    private val workspaceTreePolicyRepository: WorkspaceTreePolicyRepository,
     private val auditService: AuditService,
     private val objectMapper: ObjectMapper,
     private val treeProperties: TreeProperties,
@@ -76,8 +79,27 @@ class TreeService(
     private val unsortedHubCounter = meterRegistry.counter("unsorted_reason_total", "reason", "HUB")
     private val unsortedConflictCounter = meterRegistry.counter("unsorted_reason_total", "reason", "CONFLICT")
     private val unsortedTemplateCounter = meterRegistry.counter("unsorted_reason_total", "reason", "TEMPLATE")
+    private val policyDecisionAutoCounter = meterRegistry.counter("tree.assign_policy_total", "decision", "AUTO")
+    private val policyDecisionRecommendCounter = meterRegistry.counter("tree.assign_policy_total", "decision", "RECOMMEND")
+    private val policyDecisionUnsortedCounter = meterRegistry.counter("tree.assign_policy_total", "decision", "UNSORTED")
+    private val autoRatioSummary = meterRegistry.summary("auto_ratio")
+    private val recommendRatioSummary = meterRegistry.summary("recommend_ratio")
     private val explainShownCounter = meterRegistry.counter("explain_shown_total")
     private val explainAcceptCounter = meterRegistry.counter("explain_accept_total")
+
+    private data class AssignmentPolicy(
+        val autoThreshold: Double,
+        val recommendThreshold: Double,
+        val quarantineEnabled: Boolean,
+        val rerankerEnabled: Boolean,
+        val source: String
+    )
+
+    private data class AssignmentPolicyOutcome(
+        val confidenceByDocument: Map<String, Double>,
+        val decisionByDocument: Map<String, String>,
+        val reasonByDocument: Map<String, String>
+    )
 
     @Transactional
     fun rebuildWorkspace(workspaceId: String, actorUserId: String? = null, manual: Boolean = false): TreeSnapshotRow {
@@ -208,6 +230,12 @@ class TreeService(
             var graphStats = NeighborBuildStats()
             var labelSourceBreakdown = emptyMap<String, Int>()
             var labelCacheToPersist = previousLabelCache
+            val assignmentPolicy = resolveAssignmentPolicy(workspaceId)
+            var policyOutcome = AssignmentPolicyOutcome(
+                confidenceByDocument = emptyMap(),
+                decisionByDocument = emptyMap(),
+                reasonByDocument = emptyMap()
+            )
             val embeddingAvailableDocRatio = if (remaining.isEmpty()) {
                 1.0
             } else {
@@ -289,14 +317,26 @@ class TreeService(
                         assignment[docId] = label
                     }
                 }
-                quarantineReasonByDocument.putAll(
-                    applyQuarantinePolicies(
-                        workspaceId = workspaceId,
-                        documents = remaining,
-                        adjacency = graph.adjacency,
-                        assignment = assignment
+                if (assignmentPolicy.quarantineEnabled) {
+                    quarantineReasonByDocument.putAll(
+                        applyQuarantinePolicies(
+                            workspaceId = workspaceId,
+                            documents = remaining,
+                            adjacency = graph.adjacency,
+                            assignment = assignment
+                        )
                     )
+                }
+                policyOutcome = applyAssignmentPolicy(
+                    workspaceId = workspaceId,
+                    documents = remaining,
+                    adjacency = graph.adjacency,
+                    assignment = assignment,
+                    existingReasons = quarantineReasonByDocument,
+                    feedbackEvents = feedbackEvents,
+                    policy = assignmentPolicy
                 )
+                quarantineReasonByDocument.putAll(policyOutcome.reasonByDocument)
             } else {
                 treeTelemetry.recordStage(
                     trace = trace,
@@ -333,6 +373,15 @@ class TreeService(
             churnRatioSummary.record(churnRatio)
             val unsortedCount = assignment.values.count { isUnsortedLabel(it) }
             val unsortedRatio = if (assignment.isEmpty()) 0.0 else unsortedCount.toDouble() / assignment.size.toDouble()
+            val decisionCounts = policyOutcome.decisionByDocument.values.groupingBy { it }.eachCount()
+            val policyDocCount = policyOutcome.decisionByDocument.size
+            val autoCount = decisionCounts["AUTO"] ?: 0
+            val recommendCount = decisionCounts["RECOMMEND"] ?: 0
+            val policyUnsortedCount = decisionCounts["UNSORTED"] ?: 0
+            val autoRatio = if (policyDocCount == 0) 0.0 else autoCount.toDouble() / policyDocCount.toDouble()
+            val recommendRatio = if (policyDocCount == 0) 0.0 else recommendCount.toDouble() / policyDocCount.toDouble()
+            autoRatioSummary.record(autoRatio)
+            recommendRatioSummary.record(recommendRatio)
             treeTelemetry.recordUnsortedRatio(unsortedRatio)
             treeTelemetry.recordStage(
                 trace = trace,
@@ -344,6 +393,20 @@ class TreeService(
                     "moved_ratio" to String.format("%.3f", movedRatio),
                     "unsorted_count" to unsortedCount,
                     "unsorted_ratio" to String.format("%.3f", unsortedRatio),
+                    "auto_ratio" to String.format("%.3f", autoRatio),
+                    "recommend_ratio" to String.format("%.3f", recommendRatio),
+                    "policy_decision_count" to mapOf(
+                        "AUTO" to autoCount,
+                        "RECOMMEND" to recommendCount,
+                        "UNSORTED" to policyUnsortedCount
+                    ),
+                    "policy_threshold" to mapOf(
+                        "auto" to assignmentPolicy.autoThreshold,
+                        "recommend" to assignmentPolicy.recommendThreshold,
+                        "quarantine_enabled" to assignmentPolicy.quarantineEnabled,
+                        "reranker_enabled" to assignmentPolicy.rerankerEnabled,
+                        "source" to assignmentPolicy.source
+                    ),
                     "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
                 )
             )
@@ -560,6 +623,15 @@ class TreeService(
                 "mutual_pass_rate" to String.format("%.3f", graphStats.mutualPassRate),
                 "snn_pass_rate" to String.format("%.3f", graphStats.snnPassRate),
                 "hub_doc_count" to graphStats.hubDocCount,
+                "auto_ratio" to String.format("%.3f", autoRatio),
+                "recommend_ratio" to String.format("%.3f", recommendRatio),
+                "policy_threshold" to mapOf(
+                    "auto" to assignmentPolicy.autoThreshold,
+                    "recommend" to assignmentPolicy.recommendThreshold,
+                    "quarantine_enabled" to assignmentPolicy.quarantineEnabled,
+                    "reranker_enabled" to assignmentPolicy.rerankerEnabled,
+                    "source" to assignmentPolicy.source
+                ),
                 "similarity_source_breakdown" to mapOf(
                     "embedding_only" to graphStats.similaritySourceBreakdown.embeddingOnly,
                     "lexical_only" to graphStats.similaritySourceBreakdown.lexicalOnly,
@@ -591,6 +663,15 @@ class TreeService(
                         "unsorted_ratio" to unsortedRatio,
                         "embedding_available_doc_ratio" to embeddingAvailableDocRatio,
                         "hub_doc_count" to graphStats.hubDocCount,
+                        "auto_ratio" to autoRatio,
+                        "recommend_ratio" to recommendRatio,
+                        "policy_threshold" to mapOf(
+                            "auto" to assignmentPolicy.autoThreshold,
+                            "recommend" to assignmentPolicy.recommendThreshold,
+                            "quarantine_enabled" to assignmentPolicy.quarantineEnabled,
+                            "reranker_enabled" to assignmentPolicy.rerankerEnabled,
+                            "source" to assignmentPolicy.source
+                        ),
                         "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
                     )
                 )
@@ -940,7 +1021,9 @@ class TreeService(
             "moved_ratio" to snapshot.movedRatio,
             "churn_count" to snapshot.churnCount,
             "node_rename_count" to snapshot.nodeRenameCount,
-            "unsorted_ratio" to unsortedRatio
+            "unsorted_ratio" to unsortedRatio,
+            "auto_ratio" to 0.0,
+            "recommend_ratio" to 0.0
         )
         return mapOf(
             "snapshot_id" to snapshot.id,
@@ -1302,6 +1385,124 @@ class TreeService(
         return reasons
     }
 
+    private fun resolveAssignmentPolicy(workspaceId: String): AssignmentPolicy {
+        val policyOverride = workspaceTreePolicyRepository.findByWorkspace(workspaceId)
+        val source = if (policyOverride == null) "DEFAULT" else "OVERRIDE"
+        val auto = (policyOverride?.autoThreshold ?: treeProperties.assignAutoThreshold).coerceIn(0.0, 1.0)
+        val recommend = (policyOverride?.recommendThreshold ?: treeProperties.assignRecommendThreshold).coerceIn(0.0, 1.0)
+        val normalizedRecommend = minOf(auto, recommend)
+        return AssignmentPolicy(
+            autoThreshold = auto,
+            recommendThreshold = normalizedRecommend,
+            quarantineEnabled = policyOverride?.quarantineEnabled ?: treeProperties.assignQuarantineEnabled,
+            rerankerEnabled = policyOverride?.rerankerEnabled ?: treeProperties.assignRerankerEnabled,
+            source = source
+        )
+    }
+
+    private fun applyAssignmentPolicy(
+        workspaceId: String,
+        documents: List<DocumentRow>,
+        adjacency: Map<String, List<NeighborLink>>,
+        assignment: MutableMap<String, String>,
+        existingReasons: Map<String, String>,
+        feedbackEvents: List<FeedbackEventRow>,
+        policy: AssignmentPolicy
+    ): AssignmentPolicyOutcome {
+        if (documents.isEmpty()) {
+            return AssignmentPolicyOutcome(
+                confidenceByDocument = emptyMap(),
+                decisionByDocument = emptyMap(),
+                reasonByDocument = emptyMap()
+            )
+        }
+
+        val confidenceByDocument = mutableMapOf<String, Double>()
+        val decisionByDocument = mutableMapOf<String, String>()
+        val reasonByDocument = mutableMapOf<String, String>()
+        val correctionEvents = feedbackEvents.count { event ->
+            event.eventType.equals("MOVE", ignoreCase = true) ||
+                event.eventType.equals("RENAME", ignoreCase = true)
+        }
+        val correctionRate = if (feedbackEvents.isEmpty()) {
+            0.0
+        } else {
+            correctionEvents.toDouble() / feedbackEvents.size.toDouble()
+        }
+
+        logger.info(
+            "assignment_policy_applied workspace_id={} source={} auto_threshold={} recommend_threshold={} quarantine_enabled={} correction_rate={}",
+            workspaceId,
+            policy.source,
+            String.format("%.3f", policy.autoThreshold),
+            String.format("%.3f", policy.recommendThreshold),
+            policy.quarantineEnabled,
+            String.format("%.3f", correctionRate)
+        )
+
+        documents.forEach { doc ->
+            val calibrated = calibrateConfidence(
+                raw = estimateAssignmentConfidence(adjacency[doc.id].orEmpty()),
+                correctionRate = correctionRate
+            )
+            confidenceByDocument[doc.id] = calibrated
+
+            if (existingReasons.containsKey(doc.id)) {
+                decisionByDocument[doc.id] = "UNSORTED"
+                policyDecisionUnsortedCounter.increment()
+                return@forEach
+            }
+            if (!policy.quarantineEnabled) {
+                decisionByDocument[doc.id] = "AUTO"
+                policyDecisionAutoCounter.increment()
+                return@forEach
+            }
+
+            val decision = when {
+                calibrated >= policy.autoThreshold -> "AUTO"
+                calibrated >= policy.recommendThreshold -> "RECOMMEND"
+                else -> "UNSORTED"
+            }
+            decisionByDocument[doc.id] = decision
+            when (decision) {
+                "AUTO" -> policyDecisionAutoCounter.increment()
+                "RECOMMEND" -> {
+                    assignment[doc.id] = "general"
+                    reasonByDocument[doc.id] = "RECOMMEND"
+                    policyDecisionRecommendCounter.increment()
+                }
+                else -> {
+                    assignment[doc.id] = "general"
+                    reasonByDocument[doc.id] = "LOW_CONFIDENCE"
+                    policyDecisionUnsortedCounter.increment()
+                }
+            }
+        }
+
+        return AssignmentPolicyOutcome(
+            confidenceByDocument = confidenceByDocument,
+            decisionByDocument = decisionByDocument,
+            reasonByDocument = reasonByDocument
+        )
+    }
+
+    private fun estimateAssignmentConfidence(links: List<NeighborLink>): Double {
+        if (links.isEmpty()) {
+            return 0.0
+        }
+        val top1 = links.getOrNull(0)?.similarity ?: 0.0
+        val top2 = links.getOrNull(1)?.similarity ?: 0.0
+        val margin = (top1 - top2).coerceIn(0.0, 1.0)
+        return ((top1 * 0.7) + (margin * 0.3)).coerceIn(0.0, 1.0)
+    }
+
+    private fun calibrateConfidence(raw: Double, correctionRate: Double): Double {
+        val boundedRaw = raw.coerceIn(0.0, 1.0)
+        val temperature = 1.0 + (correctionRate * 2.0)
+        val scaled = ((boundedRaw - 0.5) * 4.0) / temperature
+        return (1.0 / (1.0 + kotlin.math.exp(-scaled))).coerceIn(0.0, 1.0)
+    }
+
     private fun parseLabelCache(labelCacheJson: String?): Map<String, String> {
         if (labelCacheJson.isNullOrBlank()) {
             return emptyMap()
@@ -1435,7 +1636,9 @@ class AdminService(
     private val auditService: AuditService,
     private val treeService: TreeService,
     private val treeRepository: TreeRepository,
+    private val workspaceTreePolicyRepository: WorkspaceTreePolicyRepository,
     private val userRuleRepository: UserRuleRepository,
+    private val treeProperties: TreeProperties,
     private val featureFlags: FeatureFlags,
     private val meterRegistry: MeterRegistry
 ) {
@@ -1558,6 +1761,8 @@ class AdminService(
                 "label_filtered_total" to counterTotal("label_filtered_total"),
                 "avg_label_length" to summaryAverage("avg_label_length"),
                 "tree_rebuild_duration_ms" to summaryAverage("tree_rebuild_duration_ms"),
+                "auto_ratio" to summaryAverage("auto_ratio"),
+                "recommend_ratio" to summaryAverage("recommend_ratio"),
                 "moved_ratio" to summaryAverage("moved_ratio"),
                 "churn_ratio" to summaryAverage("churn_ratio")
             )
@@ -1586,8 +1791,62 @@ class AdminService(
             "label_filtered_total" to counterTotal("label_filtered_total"),
             "avg_label_length" to summaryAverage("avg_label_length"),
             "tree_rebuild_duration_ms" to summaryAverage("tree_rebuild_duration_ms"),
+            "auto_ratio" to summaryAverage("auto_ratio"),
+            "recommend_ratio" to summaryAverage("recommend_ratio"),
             "moved_ratio" to summaryAverage("moved_ratio"),
             "churn_ratio" to summaryAverage("churn_ratio")
+        )
+    }
+
+    fun getTreePolicy(context: WorkspaceContext): Map<String, Any?> {
+        requireOwner(context)
+        val row = workspaceTreePolicyRepository.findByWorkspace(context.workspaceId)
+        return mapOf(
+            "workspace_id" to context.workspaceId,
+            "auto_threshold" to (row?.autoThreshold ?: treeProperties.assignAutoThreshold),
+            "recommend_threshold" to (row?.recommendThreshold ?: treeProperties.assignRecommendThreshold),
+            "quarantine_enabled" to (row?.quarantineEnabled ?: treeProperties.assignQuarantineEnabled),
+            "reranker_enabled" to (row?.rerankerEnabled ?: treeProperties.assignRerankerEnabled),
+            "source" to if (row == null) "DEFAULT" else "OVERRIDE",
+            "updated_by" to row?.updatedBy,
+            "updated_at" to row?.updatedAt?.toString()
+        )
+    }
+
+    @Transactional
+    fun updateTreePolicy(
+        context: WorkspaceContext,
+        autoThreshold: Double,
+        recommendThreshold: Double,
+        quarantineEnabled: Boolean,
+        rerankerEnabled: Boolean
+    ): Map<String, Any?> {
+        requireOwner(context)
+        val auto = autoThreshold.coerceIn(0.0, 1.0)
+        val recommend = recommendThreshold.coerceIn(0.0, 1.0)
+        if (recommend > auto) {
+            throw BadRequestException("recommend_threshold must be <= auto_threshold")
+        }
+        val updated = workspaceTreePolicyRepository.upsert(
+            workspaceId = context.workspaceId,
+            autoThreshold = auto,
+            recommendThreshold = recommend,
+            quarantineEnabled = quarantineEnabled,
+            rerankerEnabled = rerankerEnabled,
+            updatedBy = context.userId
+        )
+        val payload = mapOf(
+            "workspace_id" to context.workspaceId,
+            "auto_threshold" to updated.autoThreshold,
+            "recommend_threshold" to updated.recommendThreshold,
+            "quarantine_enabled" to updated.quarantineEnabled,
+            "reranker_enabled" to updated.rerankerEnabled
+        )
+        auditService.write(context.workspaceId, context.userId, "admin.tree_policy.updated", payload)
+        return payload + mapOf(
+            "source" to "OVERRIDE",
+            "updated_by" to updated.updatedBy,
+            "updated_at" to updated.updatedAt.toString()
         )
     }
 
