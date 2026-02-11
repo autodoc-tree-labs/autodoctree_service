@@ -122,6 +122,9 @@ class NeighborBuilder(
     private val averageSimilarityLegacySummary = meterRegistry.summary("avg_similarity")
     private val averageSemanticSummary = meterRegistry.summary("tree.neighbor_builder.avg_sem_similarity")
     private val averageLexicalSummary = meterRegistry.summary("tree.neighbor_builder.avg_lex_similarity")
+    private val lexicalTokenCountSummary = meterRegistry.summary("tree.neighbor_builder.lexical_token_count")
+    private val lexicalGatePassRateSummary = meterRegistry.summary("tree.neighbor_builder.lexical_gate_pass_rate")
+    private val tfidfComputeTimer = meterRegistry.timer("tree.neighbor_builder.tfidf_compute")
     private val mutualPassRateSummary = meterRegistry.summary("tree.neighbor_builder.mutual_pass_rate")
     private val snnPassRateSummary = meterRegistry.summary("tree.neighbor_builder.snn_pass_rate")
     private val hubDocCountSummary = meterRegistry.summary("tree.neighbor_builder.hub_doc_count")
@@ -159,7 +162,14 @@ class NeighborBuilder(
             }
             document.id to vector
         }
-        val lexicalVectors = buildLexicalVectors(documents)
+        val lexicalModel = buildLexicalModel(documents)
+        val lexicalVectors = lexicalModel.tfidfVectors
+        val lexicalTokenSets = lexicalModel.tokenSets
+        val lexicalTermFrequencies = lexicalModel.termFrequencies
+        val lexicalTokens = lexicalModel.tokens
+        lexicalTokens.values.forEach { tokens ->
+            lexicalTokenCountSummary.record(tokens.size.toDouble())
+        }
         val titleTokenSets = documents.associate { document ->
             document.id to treeLabeler.tokenize(document.title).filterNot { it.contains('-') }.toSet()
         }
@@ -184,7 +194,33 @@ class NeighborBuilder(
                 .mapNotNull { candidate ->
                     val candidateVector = vectorByDoc[candidate.id].orEmpty()
                     val candidateLexical = lexicalVectors[candidate.id].orEmpty()
-                    val lexicalSimilarity = cosineSparse(sourceLexical, candidateLexical).coerceIn(0.0, 1.0)
+                    val sourceTokens = lexicalTokens[document.id].orEmpty()
+                    val candidateTokens = lexicalTokens[candidate.id].orEmpty()
+                    val tokenOverlapScore = overlapCoefficient(
+                        lexicalTokenSets[document.id].orEmpty(),
+                        lexicalTokenSets[candidate.id].orEmpty()
+                    )
+                    val bm25Forward = bm25LiteScore(
+                        queryTokens = sourceTokens,
+                        candidateTermFreq = lexicalTermFrequencies[candidate.id].orEmpty(),
+                        candidateLength = candidateTokens.size,
+                        avgDocLength = lexicalModel.avgDocLength,
+                        idf = lexicalModel.idf
+                    )
+                    val bm25Reverse = bm25LiteScore(
+                        queryTokens = candidateTokens,
+                        candidateTermFreq = lexicalTermFrequencies[document.id].orEmpty(),
+                        candidateLength = sourceTokens.size,
+                        avgDocLength = lexicalModel.avgDocLength,
+                        idf = lexicalModel.idf
+                    )
+                    val bm25Similarity = normalizeBm25Lite((bm25Forward + bm25Reverse) / 2.0)
+                    val tfidfSimilarity = cosineSparse(sourceLexical, candidateLexical).coerceIn(0.0, 1.0)
+                    val lexicalSimilarity = (
+                        (tfidfSimilarity * 0.30) +
+                            (tokenOverlapScore * 0.35) +
+                            (bm25Similarity * 0.35)
+                        ).coerceIn(0.0, 1.0)
                     val titleOverlap = titleTokenSets[document.id].orEmpty().intersect(
                         titleTokenSets[candidate.id].orEmpty()
                     ).size
@@ -200,7 +236,8 @@ class NeighborBuilder(
                         null
                     }
 
-                    val lexicalGatePassed = lexicalSimilarity > lexicalGate && (sharedEntities > 0 || titleOverlap > 0)
+                    val lexicalConsensus = ((tokenOverlapScore + bm25Similarity) / 2.0).coerceIn(0.0, 1.0)
+                    val lexicalGatePassed = lexicalConsensus >= lexicalGate
                     val similarity = if (embeddingSimilarity != null) {
                         val semW = semanticWeight.coerceAtLeast(0.0)
                         val lexW = lexicalWeight.coerceAtLeast(0.0)
@@ -289,12 +326,18 @@ class NeighborBuilder(
         var embeddingOnlyEdges = 0
         var lexicalOnlyEdges = 0
         var fusedEdges = 0
+        var lexicalGateEvaluated = 0
+        var lexicalGatePassedCount = 0
 
         adjacency.values.forEach { links ->
             links.forEach { link ->
                 totalSimilarity += link.similarity
                 totalLexical += link.lexicalSimilarity
                 lexicalCount += 1
+                lexicalGateEvaluated += 1
+                if (link.lexicalGatePassed) {
+                    lexicalGatePassedCount += 1
+                }
                 if (link.semanticSimilarity != null) {
                     totalSemantic += link.semanticSimilarity
                     semanticCount += 1
@@ -328,11 +371,17 @@ class NeighborBuilder(
             snnPassed.toDouble() / snnEvaluated.toDouble()
         }
         val hubDocCount = adjacency.values.count { it.size >= effectiveEdgeBudget }
+        val lexicalGatePassRate = if (lexicalGateEvaluated == 0) {
+            0.0
+        } else {
+            lexicalGatePassedCount.toDouble() / lexicalGateEvaluated.toDouble()
+        }
 
         edgesSummary.record(edgeCount.toDouble())
         edgesTotalSummary.record(edgeCount.toDouble())
         edgesFilteredSummary.record(filteredOutCount.toDouble())
         legacyEdgesFilteredSummary.record(filteredOutCount.toDouble())
+        lexicalGatePassRateSummary.record(lexicalGatePassRate)
         mutualPassRateSummary.record(mutualPassRate)
         snnPassRateSummary.record(snnPassRate)
         hubDocCountSummary.record(hubDocCount.toDouble())
@@ -367,30 +416,110 @@ class NeighborBuilder(
         )
     }
 
-    private fun buildLexicalVectors(documents: List<DocumentRow>): Map<String, Map<String, Double>> {
+    private data class LexicalModel(
+        val tokens: Map<String, List<String>>,
+        val tokenSets: Map<String, Set<String>>,
+        val termFrequencies: Map<String, Map<String, Int>>,
+        val tfidfVectors: Map<String, Map<String, Double>>,
+        val idf: Map<String, Double>,
+        val avgDocLength: Double
+    )
+
+    private fun buildLexicalModel(documents: List<DocumentRow>): LexicalModel {
         if (documents.isEmpty()) {
-            return emptyMap()
+            return LexicalModel(
+                tokens = emptyMap(),
+                tokenSets = emptyMap(),
+                termFrequencies = emptyMap(),
+                tfidfVectors = emptyMap(),
+                idf = emptyMap(),
+                avgDocLength = 1.0
+            )
         }
 
-        val docTokens = documents.associate { document ->
-            document.id to treeLabeler.tokenize(document.title + " " + (document.bodyText ?: ""))
-                .filterNot { it.contains('-') }
-        }
-        val docCount = documents.size.toDouble().coerceAtLeast(1.0)
-        val df = mutableMapOf<String, Int>()
-        docTokens.values.forEach { tokens ->
-            tokens.distinct().forEach { token ->
-                df[token] = (df[token] ?: 0) + 1
+        val sample = Timer.start()
+        try {
+            val maxTokensPerDoc = 256
+            val tokensByDoc = documents.associate { document ->
+                val tokens = treeLabeler.tokenize(document.title + " " + (document.bodyText ?: ""))
+                    .filterNot { it.contains('-') }
+                    .take(maxTokensPerDoc)
+                document.id to tokens
             }
+            val tokenSetsByDoc = tokensByDoc.mapValues { (_, tokens) -> tokens.toSet() }
+            val termFrequencies = tokensByDoc.mapValues { (_, tokens) ->
+                tokens.groupingBy { it }.eachCount()
+            }
+            val docCount = documents.size.toDouble().coerceAtLeast(1.0)
+            val df = mutableMapOf<String, Int>()
+            tokenSetsByDoc.values.forEach { tokens ->
+                tokens.forEach { token ->
+                    df[token] = (df[token] ?: 0) + 1
+                }
+            }
+            val idf = df.mapValues { (_, freq) ->
+                ln((1.0 + docCount) / (1.0 + freq.toDouble())) + 1.0
+            }
+            val tfidfVectors = termFrequencies.mapValues { (_, tf) ->
+                tf.mapValues { (token, freq) ->
+                    freq.toDouble() * (idf[token] ?: 1.0)
+                }
+            }
+            val avgDocLength = tokensByDoc.values
+                .map { it.size.toDouble() }
+                .average()
+                .takeIf { !it.isNaN() && it > 0.0 }
+                ?: 1.0
+            return LexicalModel(
+                tokens = tokensByDoc,
+                tokenSets = tokenSetsByDoc,
+                termFrequencies = termFrequencies,
+                tfidfVectors = tfidfVectors,
+                idf = idf,
+                avgDocLength = avgDocLength
+            )
+        } finally {
+            sample.stop(tfidfComputeTimer)
         }
+    }
 
-        return docTokens.mapValues { (_, tokens) ->
-            val tf = tokens.groupingBy { it }.eachCount()
-            tf.mapValues { (token, freq) ->
-                val idf = ln((1.0 + docCount) / (1.0 + (df[token] ?: 0))) + 1.0
-                freq.toDouble() * idf
-            }
+    private fun overlapCoefficient(left: Set<String>, right: Set<String>): Double {
+        if (left.isEmpty() || right.isEmpty()) {
+            return 0.0
         }
+        val overlap = left.intersect(right).size.toDouble()
+        val denominator = minOf(left.size, right.size).toDouble().coerceAtLeast(1.0)
+        return (overlap / denominator).coerceIn(0.0, 1.0)
+    }
+
+    private fun bm25LiteScore(
+        queryTokens: List<String>,
+        candidateTermFreq: Map<String, Int>,
+        candidateLength: Int,
+        avgDocLength: Double,
+        idf: Map<String, Double>
+    ): Double {
+        if (queryTokens.isEmpty() || candidateTermFreq.isEmpty()) {
+            return 0.0
+        }
+        val k1 = 1.2
+        val b = 0.75
+        val normalizedLength = candidateLength.toDouble().coerceAtLeast(1.0) / avgDocLength.coerceAtLeast(1.0)
+        val lengthFactor = k1 * (1.0 - b + (b * normalizedLength))
+        var total = 0.0
+        queryTokens.distinct().forEach { token ->
+            val tf = candidateTermFreq[token] ?: return@forEach
+            val termIdf = idf[token] ?: return@forEach
+            total += termIdf * ((tf.toDouble() * (k1 + 1.0)) / (tf.toDouble() + lengthFactor))
+        }
+        return total
+    }
+
+    private fun normalizeBm25Lite(value: Double): Double {
+        if (value <= 0.0) {
+            return 0.0
+        }
+        return (1.0 - exp(-value / 6.0)).coerceIn(0.0, 1.0)
     }
 
     private fun extractEntityTokens(text: String): List<String> {

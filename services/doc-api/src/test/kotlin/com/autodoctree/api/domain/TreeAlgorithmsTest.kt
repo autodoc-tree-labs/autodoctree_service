@@ -105,6 +105,42 @@ class TreeAlgorithmsTest {
     }
 
     @Test
+    fun `neighbor builder lexical gate uses body overlap and bm25 lite`() {
+        val registry = SimpleMeterRegistry()
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
+        val docs = listOf(
+            doc("doc-a", "alpha", "회계 승인 회계 승인 예산 검토"),
+            doc("doc-b", "beta", "회계 승인 결산 보고 승인"),
+            doc("doc-c", "gamma", "축구 경기 일정 하이라이트")
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(1.0, 0.0)),
+            "doc-b" to embedding("doc-b", listOf(0.95, 0.05)),
+            "doc-c" to embedding("doc-c", listOf(0.0, 1.0))
+        )
+
+        val graph = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 2,
+            minSimilarity = 0.0,
+            semanticWeight = 0.6,
+            lexicalWeight = 0.4,
+            lexicalGate = 0.2,
+            mutualKnnRequired = false,
+            snnThreshold = 0.0
+        )
+
+        val link = graph.adjacency["doc-a"].orEmpty().firstOrNull { it.documentId == "doc-b" }
+            ?: error("doc-a to doc-b link missing")
+        assertEquals(0, link.sharedEntityCount)
+        assertEquals(0, link.titleOverlap)
+        assertTrue(link.lexicalGatePassed)
+        assertEquals("EMBEDDING_LEXICAL_GATED", link.reason)
+    }
+
+    @Test
     fun `neighbor builder enforces mutual knn when enabled`() {
         val registry = SimpleMeterRegistry()
         val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
@@ -450,14 +486,14 @@ class TreeAlgorithmsTest {
         )
     }
 
-    private fun doc(id: String, text: String): DocumentRow {
+    private fun doc(id: String, title: String, body: String = title): DocumentRow {
         val now = LocalDateTime.now()
         return DocumentRow(
             id = id,
             workspaceId = "ws-a",
-            title = text,
-            bodyMarkdown = text,
-            bodyText = text,
+            title = title,
+            bodyMarkdown = body,
+            bodyText = body,
             sourceType = "EDITOR",
             status = "READY",
             version = 1,
