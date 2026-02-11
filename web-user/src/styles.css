@@ -581,6 +581,25 @@ code {
   flex-wrap: wrap;
 }
 
+.view-selector {
+  display: grid;
+  gap: 4px;
+  min-width: 160px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.view-selector select {
+  min-height: 38px;
+  font-size: 0.88rem;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .document-meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

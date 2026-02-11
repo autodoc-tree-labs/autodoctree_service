@@ -84,6 +84,7 @@ data class TreeProperties(
     val assignQuarantineEnabled: Boolean = true,
     val assignRerankerEnabled: Boolean = false,
     val structureWorkerEnabled: Boolean = false,
+    val multiviewEnabled: Boolean = false,
     val conceptEnabled: Boolean = false,
     val conceptAssignThreshold: Double = 0.72,
     val conceptMinDocs: Int = 2,

@@ -96,6 +96,8 @@ tree_rebuild_stage {event=tree_rebuild_stage, workspace_id=ws_1, stage=graph, du
 - `optimizer_iterations`
 - `change_cost`
 - `objective_score`
+- `tree_view_request_total{view=topic|project|timeline|version|template}`
+- `tree_view_latency_ms`
 
 기존 호환 메트릭도 유지:
 - `tree_rebuild_duration_ms`

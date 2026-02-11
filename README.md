@@ -12,6 +12,7 @@
 - Web에서 문서 작성(Markdown) + 파일 업로드(PDF/DOCX/TXT/MD)
 - 비동기 파이프라인: ingest → embedding → index → auto-tree snapshot
 - 가상 트리(스냅샷): 2-depth 기본, recommended/apply, lock(고정)
+- (옵션) multi-view tree(`topic/project/timeline/version/template`)로 목적별 구조 분리
 - (옵션) consensus clustering(co-association strong edge)로 리빌드 흔들림 완화
 - (옵션) concept prototype 기반 증분 선배치 + objective optimizer(변경비용 정규화)
 - Explain(왜 여기에?) + Drag&Drop 피드백(move/rename) + 개인화 v1(간단 규칙/가중치)

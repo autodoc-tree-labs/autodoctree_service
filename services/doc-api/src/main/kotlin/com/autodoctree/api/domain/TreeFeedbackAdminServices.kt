@@ -75,6 +75,7 @@ class TreeService(
     meterRegistry: MeterRegistry
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
+    private val meterRegistryRef = meterRegistry
     private val rebuildDurationSummary = meterRegistry.summary("tree_rebuild_duration_ms")
     private val feedbackAppliedCounter = meterRegistry.counter("feedback_applied_total")
     private val correctedRatioSummary = meterRegistry.summary("corrected_ratio")
@@ -104,6 +105,7 @@ class TreeService(
     private val optimizerIterationsSummary = meterRegistry.summary("optimizer_iterations")
     private val changeCostSummary = meterRegistry.summary("change_cost")
     private val objectiveScoreSummary = meterRegistry.summary("objective_score")
+    private val treeViewLatencySummary = meterRegistry.summary("tree_view_latency_ms")
     private val unsortedReasonCodes = setOf("LOW_CONFIDENCE", "HUB", "CONFLICT", "TEMPLATE", "RECOMMEND")
 
     private data class AssignmentPolicy(
@@ -150,18 +152,30 @@ class TreeService(
         val after: ObjectiveBreakdown
     )
 
+    private data class ViewProjectionOutcome(
+        val assignmentByDocument: Map<String, String>,
+        val metadataByDocument: Map<String, String>,
+        val transformedDocCount: Int
+    )
+
     @Transactional
-    fun rebuildWorkspace(workspaceId: String, actorUserId: String? = null, manual: Boolean = false): TreeSnapshotRow {
+    fun rebuildWorkspace(
+        workspaceId: String,
+        actorUserId: String? = null,
+        manual: Boolean = false,
+        viewType: TreeViewType = TreeViewType.TOPIC
+    ): TreeSnapshotRow {
         val startedAt = System.nanoTime()
         val traceState = ensureTraceContext()
         val trace = treeTelemetry.begin(workspaceId)
         try {
+            val normalizedView = resolveViewType(viewType)
             val ingestStartedAt = System.nanoTime()
             val documents = documentRepository.listWorkspaceDocuments(workspaceId)
             val documentsById = documents.associateBy { it.id }
-            val active = treeRepository.findActiveSnapshot(workspaceId)
-            val activeNodes = active?.let { treeRepository.listNodes(workspaceId, it.id) } ?: emptyList()
-            val activeMemberships = active?.let { treeRepository.listMemberships(workspaceId, it.id) } ?: emptyList()
+            val active = treeRepository.findActiveSnapshot(workspaceId, normalizedView.name)
+            val activeNodes = active?.let { treeRepository.listNodes(workspaceId, it.id, normalizedView.name) } ?: emptyList()
+            val activeMemberships = active?.let { treeRepository.listMemberships(workspaceId, it.id, normalizedView.name) } ?: emptyList()
             val previousLabelCache = parseLabelCache(active?.labelCacheJson)
 
             val lockedNodes = activeNodes.filter { it.locked }
@@ -188,7 +202,8 @@ class TreeService(
                 details = mapOf(
                     "document_count" to documents.size,
                     "active_snapshot_id" to active?.id,
-                    "locked_node_count" to lockedNodes.size
+                    "locked_node_count" to lockedNodes.size,
+                    "view_type" to normalizedView.apiValue
                 )
             )
 
@@ -317,7 +332,7 @@ class TreeService(
                 reasonByDocument = emptyMap()
             )
             val activeConcepts = if (treeProperties.conceptEnabled) {
-                conceptPrototypeRepository.listByWorkspaceAndActiveSnapshot(workspaceId)
+                conceptPrototypeRepository.listByWorkspaceAndActiveSnapshot(workspaceId, normalizedView.name)
                     .mapNotNull { concept ->
                         parseVector(concept.prototypeVectorJson).takeIf { it.isNotEmpty() }?.let { vector ->
                             ConceptCandidate(
@@ -546,6 +561,16 @@ class TreeService(
             documents.forEach { doc ->
                 assignment.putIfAbsent(doc.id, "general")
             }
+            val viewProjection = applyViewProjection(
+                viewType = normalizedView,
+                documents = documents,
+                assignment = assignment.toMap(),
+                frozenDocIds = lockedLabelByDocument.keys + quarantineReasonByDocument.keys
+            )
+            if (viewProjection.transformedDocCount > 0) {
+                assignment.putAll(viewProjection.assignmentByDocument)
+            }
+            val viewMetadataByDocument = viewProjection.metadataByDocument
 
             val previousDocToLabel = activeMemberships.associate { membership ->
                 val node = activeNodes.firstOrNull { it.id == membership.nodeId }
@@ -646,6 +671,8 @@ class TreeService(
                         "%.3f",
                         optimizerOutcome?.after?.objectiveScore ?: 0.0
                     ),
+                    "view_type" to normalizedView.apiValue,
+                    "view_transformed_doc_count" to viewProjection.transformedDocCount,
                     "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
                 )
             )
@@ -718,12 +745,13 @@ class TreeService(
             }
 
             if (nextStatus == "ACTIVE") {
-                treeRepository.markAllSnapshotsRecommended(workspaceId)
+                treeRepository.markAllSnapshotsRecommended(workspaceId, normalizedView.name)
             }
 
             val treeExtractStartedAt = System.nanoTime()
             val snapshot = treeRepository.createSnapshot(
                 workspaceId = workspaceId,
+                viewType = normalizedView.name,
                 status = nextStatus,
                 movedRatio = movedRatio,
                 churnCount = churnCount,
@@ -734,6 +762,7 @@ class TreeService(
             val root = treeRepository.insertNode(
                 workspaceId = workspaceId,
                 snapshotId = snapshot.id,
+                viewType = normalizedView.name,
                 parentId = null,
                 label = "AutoDoc",
                 depth = 0,
@@ -751,6 +780,7 @@ class TreeService(
                     topNodes[topLabel] = treeRepository.insertNode(
                         workspaceId = workspaceId,
                         snapshotId = snapshot.id,
+                        viewType = normalizedView.name,
                         parentId = root.id,
                         label = topLabel,
                         depth = 1,
@@ -771,6 +801,7 @@ class TreeService(
                 val node = treeRepository.insertNode(
                     workspaceId = workspaceId,
                     snapshotId = snapshot.id,
+                    viewType = normalizedView.name,
                     parentId = parent?.id ?: root.id,
                     label = label,
                     depth = if (parent == null) 1 else 2,
@@ -796,6 +827,7 @@ class TreeService(
                     conceptPreassigned = conceptAssignedDocIds.contains(doc.id),
                     conceptSource = conceptSourceByDocument[doc.id],
                     optimizerAdjusted = optimizerOutcome?.optimizedDocIds?.contains(doc.id) == true,
+                    viewSignal = viewMetadataByDocument[doc.id],
                     quarantineReason = quarantineReasonByDocument[doc.id]
                 )
                 val llmSentence = llmExplainGenerator.generate(
@@ -813,6 +845,7 @@ class TreeService(
                 treeRepository.insertMembership(
                     workspaceId = workspaceId,
                     snapshotId = snapshot.id,
+                    viewType = normalizedView.name,
                     nodeId = node.id,
                     documentId = doc.id,
                     rationaleJson = objectMapper.writeValueAsString(rationale)
@@ -914,6 +947,8 @@ class TreeService(
                 "optimizer_iterations" to (optimizerOutcome?.iterations ?: 0),
                 "objective_score" to String.format("%.3f", optimizerOutcome?.after?.objectiveScore ?: 0.0),
                 "change_cost" to String.format("%.3f", optimizerOutcome?.after?.changeCost ?: 0.0),
+                "view_type" to normalizedView.apiValue,
+                "view_transformed_doc_count" to viewProjection.transformedDocCount,
                 "policy_threshold" to mapOf(
                     "auto" to assignmentPolicy.autoThreshold,
                     "recommend" to assignmentPolicy.recommendThreshold,
@@ -971,6 +1006,8 @@ class TreeService(
                         "change_cost" to (optimizerOutcome?.after?.changeCost ?: 0.0),
                         "cannot_violations" to (optimizerOutcome?.after?.cannotViolations ?: 0),
                         "size_penalty" to (optimizerOutcome?.after?.sizePenalty ?: 0.0),
+                        "view_type" to normalizedView.apiValue,
+                        "view_transformed_doc_count" to viewProjection.transformedDocCount,
                         "rule_conflict_count" to ruleConflictCount,
                         "soft_rule_doc_count" to softRulePreferredLabelByDocument.size,
                         "policy_threshold" to mapOf(
@@ -993,11 +1030,17 @@ class TreeService(
         }
     }
 
-    fun getActiveTree(context: WorkspaceContext): Map<String, Any?> {
-        val active = treeRepository.findActiveSnapshot(context.workspaceId)
-            ?: return mapOf("snapshot_id" to null, "status" to "EMPTY", "nodes" to emptyList<Any>())
-        val nodes = treeRepository.listNodes(context.workspaceId, active.id)
-        val memberships = treeRepository.listMemberships(context.workspaceId, active.id)
+    fun getActiveTree(context: WorkspaceContext, viewType: TreeViewType = TreeViewType.TOPIC): Map<String, Any?> {
+        val normalizedView = resolveViewType(viewType)
+        val active = treeRepository.findActiveSnapshot(context.workspaceId, normalizedView.name)
+            ?: return mapOf(
+                "snapshot_id" to null,
+                "status" to "EMPTY",
+                "view_type" to normalizedView.apiValue,
+                "nodes" to emptyList<Any>()
+            )
+        val nodes = treeRepository.listNodes(context.workspaceId, active.id, normalizedView.name)
+        val memberships = treeRepository.listMemberships(context.workspaceId, active.id, normalizedView.name)
         val documentsById = documentRepository.listWorkspaceDocuments(context.workspaceId).associateBy { it.id }
         val membershipsByNode = memberships.groupBy { it.nodeId }
         val membershipByDocumentId = memberships.associateBy { it.documentId }
@@ -1006,6 +1049,7 @@ class TreeService(
         return mapOf(
             "snapshot_id" to active.id,
             "status" to active.status,
+            "view_type" to normalizedView.apiValue,
             "nodes" to nodes.map {
                 val nodeMemberships = membershipsByNode[it.id].orEmpty()
                 val nodeDocumentIds = nodeMemberships.map(TreeMembershipRow::documentId)
@@ -1036,11 +1080,39 @@ class TreeService(
         )
     }
 
-    fun listSnapshots(context: WorkspaceContext): Map<String, Any?> {
+    @Transactional
+    fun getTreeByView(context: WorkspaceContext, viewType: TreeViewType): Map<String, Any?> {
+        val startedAt = System.nanoTime()
+        val normalizedView = resolveViewType(viewType)
+        val existing = treeRepository.findActiveSnapshot(context.workspaceId, normalizedView.name)
+        var generated = false
+        if (existing == null) {
+            rebuildWorkspace(
+                workspaceId = context.workspaceId,
+                actorUserId = context.userId,
+                manual = true,
+                viewType = normalizedView
+            )
+            generated = true
+        }
+        meterRegistryRef.counter("tree_view_request_total", "view", normalizedView.apiValue).increment()
+        treeViewLatencySummary.record((System.nanoTime() - startedAt).toDouble() / 1_000_000.0)
+        logger.info(
+            "tree_view_resolved workspace_id={} view_type={} generated={}",
+            context.workspaceId,
+            normalizedView.apiValue,
+            generated
+        )
+        return getActiveTree(context, normalizedView)
+    }
+
+    fun listSnapshots(context: WorkspaceContext, viewType: TreeViewType = TreeViewType.TOPIC): Map<String, Any?> {
+        val normalizedView = resolveViewType(viewType)
         return mapOf(
-            "items" to treeRepository.listSnapshots(context.workspaceId).map {
+            "items" to treeRepository.listSnapshots(context.workspaceId, normalizedView.name).map {
                 mapOf(
                     "id" to it.id,
+                    "view_type" to TreeViewType.fromDb(it.viewType).apiValue,
                     "status" to it.status,
                     "moved_ratio" to it.movedRatio,
                     "churn_count" to it.churnCount,
@@ -1052,7 +1124,8 @@ class TreeService(
     }
 
     @Transactional
-    fun requestRebuild(context: WorkspaceContext, mode: String): Map<String, Any?> {
+    fun requestRebuild(context: WorkspaceContext, mode: String, viewType: TreeViewType = TreeViewType.TOPIC): Map<String, Any?> {
+        val normalizedView = resolveViewType(viewType)
         requireEditor(context)
         val manual = mode.equals("IMMEDIATE", ignoreCase = true)
         if (!manual) {
@@ -1060,18 +1133,19 @@ class TreeService(
             return mapOf(
                 "snapshot_id" to null,
                 "status" to "QUEUED",
+                "view_type" to normalizedView.apiValue,
                 "pending_count" to rebuildDebounceQueue.pendingCount(context.workspaceId)
             )
         }
-        val snapshot = rebuildWorkspace(context.workspaceId, context.userId, manual = manual)
-        return mapOf("snapshot_id" to snapshot.id, "status" to snapshot.status)
+        val snapshot = rebuildWorkspace(context.workspaceId, context.userId, manual = manual, viewType = normalizedView)
+        return mapOf("snapshot_id" to snapshot.id, "status" to snapshot.status, "view_type" to normalizedView.apiValue)
     }
 
     @Transactional
     fun activateSnapshot(context: WorkspaceContext, snapshotId: String) {
         requireEditor(context)
         val snapshot = treeRepository.findSnapshotByWorkspace(context.workspaceId, snapshotId) ?: throw NotFoundException()
-        treeRepository.activateSnapshot(context.workspaceId, snapshot.id, context.userId)
+        treeRepository.activateSnapshot(context.workspaceId, snapshot.id, context.userId, snapshot.viewType)
         auditService.write(
             context.workspaceId,
             context.userId,
@@ -1321,8 +1395,8 @@ class TreeService(
 
     fun debugRebuild(workspaceId: String, snapshotId: String): Map<String, Any?> {
         val snapshot = treeRepository.findSnapshotByWorkspace(workspaceId, snapshotId) ?: throw NotFoundException()
-        val nodes = treeRepository.listNodes(workspaceId, snapshot.id)
-        val memberships = treeRepository.listMemberships(workspaceId, snapshot.id)
+        val nodes = treeRepository.listNodes(workspaceId, snapshot.id, snapshot.viewType)
+        val memberships = treeRepository.listMemberships(workspaceId, snapshot.id, snapshot.viewType)
         val nodeById = nodes.associateBy { it.id }
         val unsortedCount = memberships.count { membership ->
             isUnsortedLabel(nodeById[membership.nodeId]?.label ?: "")
@@ -1351,6 +1425,7 @@ class TreeService(
         return mapOf(
             "snapshot_id" to snapshot.id,
             "status" to snapshot.status,
+            "view_type" to TreeViewType.fromDb(snapshot.viewType).apiValue,
             "created_at" to snapshot.createdAt.toString(),
             "parameters" to params,
             "models" to models,
@@ -1377,6 +1452,7 @@ class TreeService(
         conceptPreassigned: Boolean,
         conceptSource: String? = null,
         optimizerAdjusted: Boolean,
+        viewSignal: String? = null,
         quarantineReason: String? = null
     ): List<String> {
         val signals = mutableListOf<String>()
@@ -1390,6 +1466,7 @@ class TreeService(
             }
         }
         if (optimizerAdjusted) signals += "OBJECTIVE_OPTIMIZED"
+        viewSignal?.takeIf { it.isNotBlank() }?.let { signals += it }
         quarantineReason?.takeIf { it.isNotBlank() }?.let { signals += it }
         if (signals.isEmpty()) {
             signals += "CLUSTER_DEFAULT"
@@ -1644,6 +1721,116 @@ class TreeService(
                     "score" to (kotlin.math.round(score.coerceIn(0.0, 1.0) * 1000.0) / 1000.0)
                 )
             }
+    }
+
+    private fun applyViewProjection(
+        viewType: TreeViewType,
+        documents: List<DocumentRow>,
+        assignment: Map<String, String>,
+        frozenDocIds: Set<String>
+    ): ViewProjectionOutcome {
+        if (documents.isEmpty() || assignment.isEmpty() || viewType == TreeViewType.TOPIC) {
+            return ViewProjectionOutcome(
+                assignmentByDocument = assignment,
+                metadataByDocument = emptyMap(),
+                transformedDocCount = 0
+            )
+        }
+        val documentById = documents.associateBy { document -> document.id }
+        val projected = assignment.toMutableMap()
+        val metadataByDocument = mutableMapOf<String, String>()
+        var transformedDocCount = 0
+        val versionFingerprintByDocument = if (viewType == TreeViewType.VERSION) {
+            documents.associate { document ->
+                document.id to versionFingerprint(document)
+            }
+        } else {
+            emptyMap()
+        }
+        val versionChainSize = if (viewType == TreeViewType.VERSION) {
+            versionFingerprintByDocument.values.groupingBy { it }.eachCount()
+        } else {
+            emptyMap()
+        }
+
+        assignment.forEach { (documentId, currentLabel) ->
+            if (frozenDocIds.contains(documentId) || isUnsortedLabel(currentLabel)) {
+                return@forEach
+            }
+            val document = documentById[documentId] ?: return@forEach
+            val projectedLabel = when (viewType) {
+                TreeViewType.TOPIC -> currentLabel
+                TreeViewType.PROJECT -> {
+                    metadataByDocument[documentId] = "VIEW_PROJECT"
+                    projectLabelFor(document, currentLabel)
+                }
+                TreeViewType.TIMELINE -> {
+                    metadataByDocument[documentId] = "VIEW_TIMELINE"
+                    timelineLabelFor(document)
+                }
+                TreeViewType.VERSION -> {
+                    val fingerprint = versionFingerprintByDocument[documentId] ?: return@forEach
+                    if ((versionChainSize[fingerprint] ?: 0) >= 2) {
+                        metadataByDocument[documentId] = "VIEW_VERSION_CHAIN"
+                    } else {
+                        metadataByDocument[documentId] = "VIEW_VERSION"
+                    }
+                    "version-${fingerprint.take(8)}"
+                }
+                TreeViewType.TEMPLATE -> {
+                    metadataByDocument[documentId] = "VIEW_TEMPLATE"
+                    templateLabelFor(document)
+                }
+            }
+            if (projectedLabel != currentLabel) {
+                projected[documentId] = projectedLabel
+                transformedDocCount += 1
+            }
+        }
+        return ViewProjectionOutcome(
+            assignmentByDocument = projected,
+            metadataByDocument = metadataByDocument,
+            transformedDocCount = transformedDocCount
+        )
+    }
+
+    private fun projectLabelFor(document: DocumentRow, fallbackLabel: String): String {
+        val text = "${document.title} ${document.bodyText.orEmpty()}"
+        val projectToken = Regex("(?:project|proj|프로젝트)\\s*[:#-]?\\s*([\\p{L}\\p{N}_-]{2,24})", RegexOption.IGNORE_CASE)
+            .find(text)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            ?.lowercase()
+        val base = projectToken
+            ?.replace(Regex("[^\\p{L}\\p{N}_-]+"), "_")
+            ?.takeIf { token -> token.isNotBlank() }
+            ?: normalizeConceptKey(fallbackLabel)
+        return "project-${base.take(24)}".take(40)
+    }
+
+    private fun timelineLabelFor(document: DocumentRow): String {
+        val text = "${document.title} ${document.bodyText.orEmpty()}"
+        val match = Regex("(20\\d{2})[./년\\-\\s]?([01]?\\d)").find(text)
+        val year = match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: document.updatedAt.year
+        val month = match?.groupValues?.getOrNull(2)?.toIntOrNull()?.coerceIn(1, 12) ?: document.updatedAt.monthValue
+        return String.format("%04d-%02d", year, month)
+    }
+
+    private fun templateLabelFor(document: DocumentRow): String {
+        val source = document.sourceType.trim().lowercase().ifBlank { "document" }
+        return "template-${source.take(24)}".take(40)
+    }
+
+    private fun versionFingerprint(document: DocumentRow): String {
+        val normalized = (document.title + " " + (document.bodyText ?: ""))
+            .lowercase()
+            .replace(Regex("\\b(v|ver|version|rev)[\\s._-]*\\d+\\b"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(320)
+        val digest = MessageDigest.getInstance("SHA-256").digest(normalized.toByteArray(Charsets.UTF_8))
+        return digest.joinToString(separator = "") { byte -> "%02x".format(byte) }
     }
 
     private fun preassignByConcept(
@@ -2535,6 +2722,13 @@ class TreeService(
             "hash" to "sha256:$hash",
             "length" to normalized.length
         )
+    }
+
+    private fun resolveViewType(requested: TreeViewType): TreeViewType {
+        if (requested != TreeViewType.TOPIC && !treeProperties.multiviewEnabled) {
+            return TreeViewType.TOPIC
+        }
+        return requested
     }
 
     private fun isUnsortedLabel(label: String): Boolean {

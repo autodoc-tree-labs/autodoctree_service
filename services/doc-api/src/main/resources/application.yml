@@ -85,6 +85,7 @@ tree:
   assign-quarantine-enabled: ${TREE_ASSIGN_QUARANTINE_ENABLED:true}
   assign-reranker-enabled: ${TREE_ASSIGN_RERANKER_ENABLED:false}
   structure-worker-enabled: ${TREE_STRUCTURE_WORKER_ENABLED:false}
+  multiview-enabled: ${TREE_MULTIVIEW_ENABLED:false}
   concept-enabled: ${TREE_CONCEPT_ENABLED:false}
   concept-assign-threshold: ${TREE_CONCEPT_ASSIGN_THRESHOLD:0.72}
   concept-min-docs: ${TREE_CONCEPT_MIN_DOCS:2}

@@ -35,7 +35,8 @@ import java.time.LocalDateTime
     properties = [
         "feature.user-rules-v1=true",
         "feature.feedback-routing-v2=true",
-        "feature.admin-tree-debug=true"
+        "feature.admin-tree-debug=true",
+        "tree.multiview-enabled=true"
     ]
 )
 class TreeAdminDebugIntegrationTest {
@@ -553,6 +554,37 @@ class TreeAdminDebugIntegrationTest {
                 .header("X-Workspace-Id", workspaceId)
         ).andExpect(status().isOk)
             .andExpect(jsonPath("$.expired_count").isNumber)
+    }
+
+    @Test
+    fun `tree multi-view endpoint creates and returns view partition snapshots`() {
+        mockMvc.perform(
+            get("/api/v1/trees")
+                .param("view", "project")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.view_type").value("project"))
+            .andExpect(jsonPath("$.snapshot_id").exists())
+            .andExpect(jsonPath("$.nodes").isArray)
+
+        mockMvc.perform(
+            get("/api/v1/trees")
+                .param("view", "version")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.view_type").value("version"))
+            .andExpect(jsonPath("$.snapshot_id").exists())
+            .andExpect(jsonPath("$.nodes").isArray)
+
+        mockMvc.perform(
+            get("/api/v1/tree/snapshots")
+                .param("view", "version")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.items[0].view_type").value("version"))
     }
 
     @Test

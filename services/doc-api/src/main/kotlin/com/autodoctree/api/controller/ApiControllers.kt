@@ -8,6 +8,7 @@ import com.autodoctree.api.domain.FeedbackService
 import com.autodoctree.api.domain.QuestionService
 import com.autodoctree.api.domain.SearchService
 import com.autodoctree.api.domain.TreeService
+import com.autodoctree.api.domain.TreeViewType
 import com.autodoctree.api.domain.WorkspaceService
 import com.autodoctree.api.security.CurrentUserProvider
 import com.autodoctree.api.tenant.WorkspaceContextResolver
@@ -272,15 +273,21 @@ class TreeController(
 ) {
 
     @GetMapping("/active")
-    fun active(request: HttpServletRequest): Map<String, Any?> {
+    fun active(
+        request: HttpServletRequest,
+        @RequestParam(required = false) view: String?
+    ): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)
-        return treeService.getActiveTree(context)
+        return treeService.getActiveTree(context, TreeViewType.fromApi(view))
     }
 
     @GetMapping("/snapshots")
-    fun snapshots(request: HttpServletRequest): Map<String, Any?> {
+    fun snapshots(
+        request: HttpServletRequest,
+        @RequestParam(required = false) view: String?
+    ): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)
-        return treeService.listSnapshots(context)
+        return treeService.listSnapshots(context, TreeViewType.fromApi(view))
     }
 
     @PostMapping("/rebuild")
@@ -289,7 +296,11 @@ class TreeController(
         @Valid @RequestBody body: RebuildRequest
     ): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)
-        return treeService.requestRebuild(context, body.mode)
+        return treeService.requestRebuild(
+            context = context,
+            mode = body.mode,
+            viewType = TreeViewType.fromApi(body.view)
+        )
     }
 
     @PostMapping("/snapshots/{snapshotId}/activate")
@@ -311,6 +322,23 @@ class TreeController(
         val context = workspaceContextResolver.resolve(request)
         treeService.lockNode(context, nodeId, body.locked)
         return ResponseEntity.noContent().build()
+    }
+}
+
+@RestController
+@RequestMapping("/api/v1/trees")
+class TreesController(
+    private val treeService: TreeService,
+    private val workspaceContextResolver: WorkspaceContextResolver
+) {
+
+    @GetMapping
+    fun treeByView(
+        request: HttpServletRequest,
+        @RequestParam(required = false) view: String?
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return treeService.getTreeByView(context, TreeViewType.fromApi(view))
     }
 }
 
@@ -610,7 +638,8 @@ data class CompleteAttachmentRequest(
 )
 
 data class RebuildRequest(
-    @field:NotBlank val mode: String = "DEBOUNCED"
+    @field:NotBlank val mode: String = "DEBOUNCED",
+    val view: String? = null
 )
 
 data class LockNodeRequest(

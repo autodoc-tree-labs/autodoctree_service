@@ -155,12 +155,13 @@ Response:
 ---
 
 # 6) Tree
-## GET /tree/active
+## GET /tree/active?view=topic|project|timeline|version|template
 Response:
 ```json
 {
   "snapshot_id": "ts_1",
   "status": "ACTIVE",
+  "view_type": "topic",
   "nodes": [
     {
       "id": "n_1",
@@ -185,13 +186,14 @@ Response:
 }
 ```
 
-## GET /tree/snapshots
+## GET /tree/snapshots?view=topic|project|timeline|version|template
 Response:
 ```json
 {
   "items": [
     {
       "id": "ts_1",
+      "view_type": "project",
       "status": "ACTIVE",
       "moved_ratio": 0.12,
       "churn_count": 3,
@@ -203,7 +205,18 @@ Response:
 ```
 ## POST /tree/rebuild
 ```json
-{ "mode": "DEBOUNCED" }
+{ "mode": "DEBOUNCED", "view": "topic" }
+```
+
+## GET /trees?view=topic|project|timeline|version|template
+Response:
+```json
+{
+  "snapshot_id": "ts_2",
+  "status": "ACTIVE",
+  "view_type": "project",
+  "nodes": []
+}
 ```
 
 ## POST /tree/snapshots/{snapshotId}/activate

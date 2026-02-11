@@ -164,6 +164,7 @@ class TreeTelemetry(
             "assign_quarantine_enabled" to tree.assignQuarantineEnabled,
             "assign_reranker_enabled" to tree.assignRerankerEnabled,
             "structure_worker_enabled" to tree.structureWorkerEnabled,
+            "multiview_enabled" to tree.multiviewEnabled,
             "concept_enabled" to tree.conceptEnabled,
             "concept_assign_threshold" to tree.conceptAssignThreshold,
             "concept_min_docs" to tree.conceptMinDocs,

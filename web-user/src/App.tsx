@@ -36,8 +36,11 @@ type TreeNode = {
 type TreeActiveResponse = {
   snapshot_id: string | null;
   status: string;
+  view_type?: string;
   nodes: TreeNode[];
 };
+
+type TreeView = "topic" | "project" | "timeline" | "version" | "template";
 
 type TreeDocumentView = {
   id: string;
@@ -130,6 +133,14 @@ const ROLE_TEXT: Record<string, string> = {
 
 const TREE_INBOX_NODE_ID = "__virtual_inbox__";
 const TREE_TEMPLATES_NODE_ID = "__virtual_templates__";
+const TREE_VIEW_PREFERENCE_KEY = "autodoc.tree.view.by_workspace.v1";
+const TREE_VIEW_OPTIONS: Array<{ value: TreeView; label: string }> = [
+  { value: "topic", label: "Topic" },
+  { value: "project", label: "Project" },
+  { value: "timeline", label: "Timeline" },
+  { value: "version", label: "Version" },
+  { value: "template", label: "Template" }
+];
 
 const REASON_TEXT: Record<string, string> = {
   LOW_CONFIDENCE: "신뢰도 낮음",
@@ -219,6 +230,40 @@ const reasonText = (value: string | null): string | null => {
   }
   const normalized = value.trim().toUpperCase();
   return REASON_TEXT[normalized] ?? normalized;
+};
+
+const isTreeView = (value: unknown): value is TreeView =>
+  typeof value === "string" && TREE_VIEW_OPTIONS.some((option) => option.value === value);
+
+const loadTreeViewPreference = (workspaceId: string | null): TreeView => {
+  if (!workspaceId || typeof window === "undefined") {
+    return "topic";
+  }
+  try {
+    const raw = window.localStorage.getItem(TREE_VIEW_PREFERENCE_KEY);
+    if (!raw) {
+      return "topic";
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const saved = parsed[workspaceId];
+    return isTreeView(saved) ? saved : "topic";
+  } catch {
+    return "topic";
+  }
+};
+
+const saveTreeViewPreference = (workspaceId: string | null, view: TreeView) => {
+  if (!workspaceId || typeof window === "undefined") {
+    return;
+  }
+  try {
+    const raw = window.localStorage.getItem(TREE_VIEW_PREFERENCE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    parsed[workspaceId] = view;
+    window.localStorage.setItem(TREE_VIEW_PREFERENCE_KEY, JSON.stringify(parsed));
+  } catch {
+    // Ignore preference write failures in local environments.
+  }
 };
 
 const toTreeDocumentView = (node: TreeNode, summary: TreeNodeDocumentSummary): TreeDocumentView => ({
@@ -1390,6 +1435,7 @@ export default function App() {
 
   function TreePage() {
     const [tree, setTree] = useState<TreeActiveResponse | null>(null);
+    const [selectedView, setSelectedView] = useState<TreeView>("topic");
     const [selectedNode, setSelectedNode] = useState<string | null>(null);
     const [docIdForMove, setDocIdForMove] = useState("");
     const [renameNodeId, setRenameNodeId] = useState("");
@@ -1398,6 +1444,12 @@ export default function App() {
     const [dragSourceNodeId, setDragSourceNodeId] = useState<string | null>(null);
     const [treeError, setTreeError] = useState<UiError | null>(null);
     const [treeNotice, setTreeNotice] = useState<UiNotice | null>(null);
+    const isTopicView = selectedView === "topic";
+
+    useEffect(() => {
+      setSelectedView(loadTreeViewPreference(state.workspaceId));
+      setSelectedNode(null);
+    }, [state.workspaceId]);
 
     const refreshTree = useCallback(async () => {
       if (!state.workspaceId) {
@@ -1408,7 +1460,8 @@ export default function App() {
       }
 
       try {
-        const payload = await api.request<TreeActiveResponse>("/tree/active", {}, true);
+        const params = new URLSearchParams({ view: selectedView });
+        const payload = await api.request<TreeActiveResponse>(`/trees?${params.toString()}`, {}, true);
         setTree(payload);
         setSelectedNode((prev) => {
           if (!prev) {
@@ -1427,10 +1480,14 @@ export default function App() {
         setTreeNotice(null);
         setTreeError(toUiError(e, "트리 로드에 실패했습니다"));
       }
-    }, [api, state.workspaceId]);
+    }, [api, selectedView, state.workspaceId]);
 
     const moveDocument = useCallback(
       async (documentId: string, fromNodeId: string | null, toNodeId: string, source: "DRAG" | "MANUAL" | "QUICK_CONFIRM" = "MANUAL") => {
+        if (!isTopicView) {
+          setTreeError({ message: "이동/피드백은 Topic 뷰에서만 지원됩니다.", status: null });
+          return;
+        }
         if (!tree) {
           return;
         }
@@ -1458,13 +1515,13 @@ export default function App() {
           setTreeError(toUiError(e, "이동에 실패했습니다"));
         }
       },
-      [api, refreshTree, tree]
+      [api, isTopicView, refreshTree, tree]
     );
 
     useEffect(() => {
       setTreeNotice(null);
       void refreshTree();
-    }, [refreshTree, state.workspaceId]);
+    }, [refreshTree, state.workspaceId, selectedView]);
 
     const allDocuments = useMemo<TreeDocumentView[]>(() => {
       if (!tree) {
@@ -1515,9 +1572,29 @@ export default function App() {
         <section className="panel">
           <PageHeader
             title="트리"
-            subtitle="가상 폴더 스냅샷을 탐색하고 잠금 및 이동/이름변경 피드백을 관리하세요."
+            subtitle={`가상 폴더 스냅샷을 탐색합니다. 현재 뷰: ${selectedView.toUpperCase()}`}
             action={
               <div className="action-row">
+                <label className="view-selector" htmlFor="tree-view-select">
+                  <span>뷰</span>
+                  <select
+                    className="field-input"
+                    id="tree-view-select"
+                    onChange={(event) => {
+                      const next = event.target.value as TreeView;
+                      setSelectedView(next);
+                      saveTreeViewPreference(state.workspaceId, next);
+                      setSelectedNode(null);
+                    }}
+                    value={selectedView}
+                  >
+                    {TREE_VIEW_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <button
                   className="btn btn-secondary"
                   disabled={!state.workspaceId}
@@ -1527,7 +1604,7 @@ export default function App() {
                     try {
                       const rebuild = await api.request<{ snapshot_id: string | null; status: string; pending_count?: number }>(
                         "/tree/rebuild",
-                        { method: "POST", body: JSON.stringify({ mode: "IMMEDIATE" }) },
+                        { method: "POST", body: JSON.stringify({ mode: "IMMEDIATE", view: selectedView }) },
                         true
                       );
                       await refreshTree();
@@ -1558,7 +1635,11 @@ export default function App() {
                     setTreeError(null);
                     setTreeNotice({ tone: "info", message: "추천 스냅샷을 확인하는 중입니다..." });
                     try {
-                      const snaps = await api.request<{ items: Array<{ id: string; status: string }> }>("/tree/snapshots", {}, true);
+                      const snaps = await api.request<{ items: Array<{ id: string; status: string }> }>(
+                        `/tree/snapshots?view=${selectedView}`,
+                        {},
+                        true
+                      );
                       const recommended = snaps.items.find((item) => item.status === "RECOMMENDED");
                       if (recommended) {
                         await api.request(`/tree/snapshots/${recommended.id}/activate`, { method: "POST", body: "{}" }, true);
@@ -1588,6 +1669,7 @@ export default function App() {
             }}
           />
           <NoticePanel notice={treeNotice} />
+          {!isTopicView ? <p className="muted">현재 뷰는 탐색 전용입니다. 이동/이름변경 피드백은 Topic 뷰에서 지원됩니다.</p> : null}
 
           <div className="tree-layout">
             <div className="panel panel-soft">
@@ -1638,6 +1720,7 @@ export default function App() {
                     </button>
                     <button
                       className="btn btn-ghost btn-small"
+                      disabled={!isTopicView}
                       onClick={async () => {
                         try {
                           await api.request(`/tree/nodes/${node.id}/lock`, { method: "POST", body: JSON.stringify({ locked: !node.locked }) }, true);
@@ -1703,6 +1786,7 @@ export default function App() {
                               {quickCandidates.map((candidate) => (
                                 <button
                                   className="btn btn-ghost btn-small"
+                                  disabled={!isTopicView}
                                   key={`${document.id}-${candidate.node_id}`}
                                   onClick={async () => {
                                     await moveDocument(document.id, document.node_id, candidate.node_id, "QUICK_CONFIRM");
@@ -1721,7 +1805,8 @@ export default function App() {
                         </div>
                         <button
                           className="btn btn-ghost btn-small"
-                          draggable
+                          disabled={!isTopicView}
+                          draggable={isTopicView}
                           onDragEnd={() => {
                             setDraggingDocId(null);
                             setDragSourceNodeId(null);
@@ -1752,7 +1837,7 @@ export default function App() {
                 <input className="field-input field-grow" onChange={(e) => setDocIdForMove(e.target.value)} placeholder="문서 식별자" value={docIdForMove} />
                 <button
                   className="btn btn-secondary"
-                  disabled={!selected || !docIdForMove}
+                  disabled={!isTopicView || !selected || !docIdForMove}
                   onClick={async () => {
                     if (!selected || !docIdForMove) {
                       return;
@@ -1775,7 +1860,7 @@ export default function App() {
                   <input className="field-input field-grow" onChange={(e) => setNewLabel(e.target.value)} placeholder="새 라벨" value={newLabel} />
                   <button
                     className="btn btn-secondary"
-                    disabled={!renameNodeId || !newLabel.trim()}
+                    disabled={!isTopicView || !renameNodeId || !newLabel.trim()}
                     onClick={async () => {
                       if (!renameNodeId || !newLabel.trim()) {
                         return;

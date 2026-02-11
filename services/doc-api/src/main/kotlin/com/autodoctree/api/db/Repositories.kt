@@ -131,6 +131,7 @@ data class StageExecutionRow(
 data class TreeSnapshotRow(
     val id: String,
     val workspaceId: String,
+    val viewType: String,
     val status: String,
     val movedRatio: Double,
     val churnCount: Int,
@@ -145,6 +146,7 @@ data class TreeNodeRow(
     val id: String,
     val workspaceId: String,
     val snapshotId: String,
+    val viewType: String,
     val parentId: String?,
     val label: String,
     val depth: Int,
@@ -156,6 +158,7 @@ data class TreeMembershipRow(
     val id: String,
     val workspaceId: String,
     val snapshotId: String,
+    val viewType: String,
     val nodeId: String,
     val documentId: String,
     val rationaleJson: String,
@@ -1203,6 +1206,7 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
         TreeSnapshotRow(
             id = rs.getString("id"),
             workspaceId = rs.getString("workspace_id"),
+            viewType = rs.getString("view_type"),
             status = rs.getString("status"),
             movedRatio = rs.getDouble("moved_ratio"),
             churnCount = rs.getInt("churn_count"),
@@ -1219,6 +1223,7 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
             id = rs.getString("id"),
             workspaceId = rs.getString("workspace_id"),
             snapshotId = rs.getString("snapshot_id"),
+            viewType = rs.getString("view_type"),
             parentId = rs.getString("parent_id"),
             label = rs.getString("label"),
             depth = rs.getInt("depth"),
@@ -1232,6 +1237,7 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
             id = rs.getString("id"),
             workspaceId = rs.getString("workspace_id"),
             snapshotId = rs.getString("snapshot_id"),
+            viewType = rs.getString("view_type"),
             nodeId = rs.getString("node_id"),
             documentId = rs.getString("document_id"),
             rationaleJson = rs.getString("rationale_json"),
@@ -1241,6 +1247,7 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
 
     fun createSnapshot(
         workspaceId: String,
+        viewType: String = "TOPIC",
         status: String,
         movedRatio: Double,
         churnCount: Int,
@@ -1252,11 +1259,12 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
         jdbcTemplate.update(
             """
             INSERT INTO tree_snapshot(
-                id, workspace_id, status, moved_ratio, churn_count, node_rename_count, label_cache_json, created_at, activated_at, activated_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                id, workspace_id, view_type, status, moved_ratio, churn_count, node_rename_count, label_cache_json, created_at, activated_at, activated_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
             """.trimIndent(),
             id,
             workspaceId,
+            viewType,
             status,
             movedRatio,
             churnCount,
@@ -1264,22 +1272,32 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
             labelCacheJson,
             now
         )
-        return TreeSnapshotRow(id, workspaceId, status, movedRatio, churnCount, nodeRenameCount, labelCacheJson, now, null, null)
+        return TreeSnapshotRow(id, workspaceId, viewType, status, movedRatio, churnCount, nodeRenameCount, labelCacheJson, now, null, null)
     }
 
-    fun findActiveSnapshot(workspaceId: String): TreeSnapshotRow? = jdbcTemplate.queryOneOrNull(
-        "SELECT * FROM tree_snapshot WHERE workspace_id = ? AND status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1",
+    fun findActiveSnapshot(workspaceId: String, viewType: String = "TOPIC"): TreeSnapshotRow? = jdbcTemplate.queryOneOrNull(
+        """
+        SELECT *
+        FROM tree_snapshot
+        WHERE workspace_id = ?
+          AND view_type = ?
+          AND status = 'ACTIVE'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """.trimIndent(),
         snapshotMapper,
-        workspaceId
+        workspaceId,
+        viewType
     )
 
-    fun listLockedNodesInActiveSnapshot(workspaceId: String): List<TreeNodeRow> {
-        val active = findActiveSnapshot(workspaceId) ?: return emptyList()
+    fun listLockedNodesInActiveSnapshot(workspaceId: String, viewType: String = "TOPIC"): List<TreeNodeRow> {
+        val active = findActiveSnapshot(workspaceId, viewType) ?: return emptyList()
         return jdbcTemplate.query(
-            "SELECT * FROM tree_node WHERE workspace_id = ? AND snapshot_id = ? AND locked = true",
+            "SELECT * FROM tree_node WHERE workspace_id = ? AND snapshot_id = ? AND view_type = ? AND locked = true",
             nodeMapper,
             workspaceId,
-            active.id
+            active.id,
+            viewType
         )
     }
 
@@ -1290,40 +1308,45 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
         snapshotId
     )
 
-    fun listSnapshots(workspaceId: String): List<TreeSnapshotRow> = jdbcTemplate.query(
-        "SELECT * FROM tree_snapshot WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 30",
+    fun listSnapshots(workspaceId: String, viewType: String = "TOPIC"): List<TreeSnapshotRow> = jdbcTemplate.query(
+        "SELECT * FROM tree_snapshot WHERE workspace_id = ? AND view_type = ? ORDER BY created_at DESC LIMIT 30",
         snapshotMapper,
-        workspaceId
+        workspaceId,
+        viewType
     )
 
-    fun markAllSnapshotsRecommended(workspaceId: String) {
+    fun markAllSnapshotsRecommended(workspaceId: String, viewType: String = "TOPIC") {
         jdbcTemplate.update(
-            "UPDATE tree_snapshot SET status = 'RECOMMENDED' WHERE workspace_id = ? AND status = 'ACTIVE'",
-            workspaceId
+            "UPDATE tree_snapshot SET status = 'RECOMMENDED' WHERE workspace_id = ? AND view_type = ? AND status = 'ACTIVE'",
+            workspaceId,
+            viewType
         )
     }
 
-    fun activateSnapshot(workspaceId: String, snapshotId: String, actorUserId: String) {
+    fun activateSnapshot(workspaceId: String, snapshotId: String, actorUserId: String, viewType: String = "TOPIC") {
         jdbcTemplate.update(
-            "UPDATE tree_snapshot SET status = 'RECOMMENDED' WHERE workspace_id = ? AND status = 'ACTIVE'",
-            workspaceId
+            "UPDATE tree_snapshot SET status = 'RECOMMENDED' WHERE workspace_id = ? AND view_type = ? AND status = 'ACTIVE'",
+            workspaceId,
+            viewType
         )
         jdbcTemplate.update(
             """
             UPDATE tree_snapshot
             SET status = 'ACTIVE', activated_at = ?, activated_by = ?
-            WHERE workspace_id = ? AND id = ?
+            WHERE workspace_id = ? AND id = ? AND view_type = ?
             """.trimIndent(),
             LocalDateTime.now(),
             actorUserId,
             workspaceId,
-            snapshotId
+            snapshotId,
+            viewType
         )
     }
 
     fun insertNode(
         workspaceId: String,
         snapshotId: String,
+        viewType: String = "TOPIC",
         parentId: String?,
         label: String,
         depth: Int,
@@ -1333,26 +1356,28 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
         val now = LocalDateTime.now()
         jdbcTemplate.update(
             """
-            INSERT INTO tree_node(id, workspace_id, snapshot_id, parent_id, label, depth, locked, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tree_node(id, workspace_id, snapshot_id, view_type, parent_id, label, depth, locked, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             id,
             workspaceId,
             snapshotId,
+            viewType,
             parentId,
             label,
             depth,
             locked,
             now
         )
-        return TreeNodeRow(id, workspaceId, snapshotId, parentId, label, depth, locked, now)
+        return TreeNodeRow(id, workspaceId, snapshotId, viewType, parentId, label, depth, locked, now)
     }
 
-    fun listNodes(workspaceId: String, snapshotId: String): List<TreeNodeRow> = jdbcTemplate.query(
-        "SELECT * FROM tree_node WHERE workspace_id = ? AND snapshot_id = ? ORDER BY depth, label",
+    fun listNodes(workspaceId: String, snapshotId: String, viewType: String = "TOPIC"): List<TreeNodeRow> = jdbcTemplate.query(
+        "SELECT * FROM tree_node WHERE workspace_id = ? AND snapshot_id = ? AND view_type = ? ORDER BY depth, label",
         nodeMapper,
         workspaceId,
-        snapshotId
+        snapshotId,
+        viewType
     )
 
     fun findNodeByWorkspace(workspaceId: String, nodeId: String): TreeNodeRow? = jdbcTemplate.queryOneOrNull(
@@ -1383,18 +1408,20 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
     fun insertMembership(
         workspaceId: String,
         snapshotId: String,
+        viewType: String = "TOPIC",
         nodeId: String,
         documentId: String,
         rationaleJson: String
     ) {
         jdbcTemplate.update(
             """
-            INSERT INTO tree_membership(id, workspace_id, snapshot_id, node_id, document_id, rationale_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tree_membership(id, workspace_id, snapshot_id, view_type, node_id, document_id, rationale_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             UUID.randomUUID().toString(),
             workspaceId,
             snapshotId,
+            viewType,
             nodeId,
             documentId,
             rationaleJson,
@@ -1402,35 +1429,38 @@ class TreeRepository(private val jdbcTemplate: JdbcTemplate) {
         )
     }
 
-    fun listMemberships(workspaceId: String, snapshotId: String): List<TreeMembershipRow> = jdbcTemplate.query(
-        "SELECT * FROM tree_membership WHERE workspace_id = ? AND snapshot_id = ?",
-        membershipMapper,
-        workspaceId,
-        snapshotId
-    )
-
-    fun findMembershipByDocInSnapshot(workspaceId: String, snapshotId: String, documentId: String): TreeMembershipRow? = jdbcTemplate.queryOneOrNull(
-        "SELECT * FROM tree_membership WHERE workspace_id = ? AND snapshot_id = ? AND document_id = ?",
+    fun listMemberships(workspaceId: String, snapshotId: String, viewType: String = "TOPIC"): List<TreeMembershipRow> = jdbcTemplate.query(
+        "SELECT * FROM tree_membership WHERE workspace_id = ? AND snapshot_id = ? AND view_type = ?",
         membershipMapper,
         workspaceId,
         snapshotId,
-        documentId
+        viewType
     )
 
-    fun moveDocumentInActiveSnapshot(workspaceId: String, documentId: String, toNodeId: String) {
-        val active = findActiveSnapshot(workspaceId) ?: return
+    fun findMembershipByDocInSnapshot(workspaceId: String, snapshotId: String, documentId: String, viewType: String = "TOPIC"): TreeMembershipRow? = jdbcTemplate.queryOneOrNull(
+        "SELECT * FROM tree_membership WHERE workspace_id = ? AND snapshot_id = ? AND document_id = ? AND view_type = ?",
+        membershipMapper,
+        workspaceId,
+        snapshotId,
+        documentId,
+        viewType
+    )
+
+    fun moveDocumentInActiveSnapshot(workspaceId: String, documentId: String, toNodeId: String, viewType: String = "TOPIC") {
+        val active = findActiveSnapshot(workspaceId, viewType) ?: return
         jdbcTemplate.update(
-            "UPDATE tree_membership SET node_id = ? WHERE workspace_id = ? AND snapshot_id = ? AND document_id = ?",
+            "UPDATE tree_membership SET node_id = ? WHERE workspace_id = ? AND snapshot_id = ? AND document_id = ? AND view_type = ?",
             toNodeId,
             workspaceId,
             active.id,
-            documentId
+            documentId,
+            viewType
         )
     }
 
-    fun findMembershipByWorkspaceAndDocument(workspaceId: String, documentId: String): TreeMembershipRow? {
-        val active = findActiveSnapshot(workspaceId) ?: return null
-        return findMembershipByDocInSnapshot(workspaceId, active.id, documentId)
+    fun findMembershipByWorkspaceAndDocument(workspaceId: String, documentId: String, viewType: String = "TOPIC"): TreeMembershipRow? {
+        val active = findActiveSnapshot(workspaceId, viewType) ?: return null
+        return findMembershipByDocInSnapshot(workspaceId, active.id, documentId, viewType)
     }
 }
 
@@ -1464,17 +1494,19 @@ class ConceptPrototypeRepository(private val jdbcTemplate: JdbcTemplate) {
         snapshotId
     )
 
-    fun listByWorkspaceAndActiveSnapshot(workspaceId: String): List<ConceptPrototypeRow> = jdbcTemplate.query(
+    fun listByWorkspaceAndActiveSnapshot(workspaceId: String, viewType: String = "TOPIC"): List<ConceptPrototypeRow> = jdbcTemplate.query(
         """
         SELECT cp.*
         FROM concept_prototype cp
         JOIN tree_snapshot ts ON ts.id = cp.snapshot_id AND ts.workspace_id = cp.workspace_id
         WHERE cp.workspace_id = ?
           AND ts.status = 'ACTIVE'
+          AND ts.view_type = ?
         ORDER BY cp.doc_count DESC, cp.label
         """.trimIndent(),
         mapper,
-        workspaceId
+        workspaceId,
+        viewType
     )
 
     fun replaceSnapshotConcepts(workspaceId: String, snapshotId: String, concepts: List<ConceptPrototypeRow>) {
