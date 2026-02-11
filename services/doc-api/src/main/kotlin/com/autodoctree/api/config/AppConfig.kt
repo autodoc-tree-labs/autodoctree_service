@@ -83,6 +83,7 @@ data class TreeProperties(
     val assignRecommendThreshold: Double = 0.60,
     val assignQuarantineEnabled: Boolean = true,
     val assignRerankerEnabled: Boolean = false,
+    val structureWorkerEnabled: Boolean = false,
     val maxClusterSize: Int,
     val minClusterSize: Int,
     val communityResolution: Double,
@@ -144,6 +145,16 @@ data class RerankerProperties(
     val batchSize: Int = 64,
     val maxRetries: Int = 1,
     val retryBackoffMs: Long = 150
+)
+
+@ConfigurationProperties(prefix = "structure-worker")
+data class StructureWorkerProperties(
+    val enabled: Boolean = false,
+    val baseUrl: String = "http://localhost:18081",
+    val timeoutMs: Long = 2500,
+    val maxRetries: Int = 1,
+    val retryBackoffMs: Long = 200,
+    val maxDepth: Int = 3
 )
 
 data class OllamaLlmProperties(

@@ -71,6 +71,20 @@ Smoke check:
 
 If host port `18080` is already used, override with `RERANKER_PORT`.
 
+## 1-3. Optional local structure worker (hSBM import fallback)
+Start structure worker service with compose profile:
+```bash
+docker compose --profile structure up -d structure-worker
+docker compose ps structure-worker
+```
+
+Smoke check:
+```bash
+./scripts/structure_worker_smoke.sh
+```
+
+If host port `18081` is already used, override with `STRUCTURE_WORKER_PORT`.
+
 ## 2. Backend (IntelliJ)
 1. Open `services/` as Gradle project.
 2. Run `doc-api` main class: `com.autodoctree.api.DocApiApplicationKt`
@@ -134,6 +148,7 @@ Important flags:
 - `TREE_ASSIGN_RECOMMEND_THRESHOLD`
 - `TREE_ASSIGN_QUARANTINE_ENABLED`
 - `TREE_ASSIGN_RERANKER_ENABLED`
+- `TREE_STRUCTURE_WORKER_ENABLED`
 - `TREE_RERANKER_PER_DOC_BUDGET`
 - `TREE_RERANKER_PASS_THRESHOLD`
 - `TREE_QUESTION_MAX_OPEN`
@@ -145,6 +160,12 @@ Important flags:
 - `RERANKER_BATCH_SIZE`
 - `RERANKER_MAX_RETRIES`
 - `RERANKER_RETRY_BACKOFF_MS`
+- `STRUCTURE_WORKER_ENABLED`
+- `STRUCTURE_WORKER_BASE_URL`
+- `STRUCTURE_WORKER_TIMEOUT_MS`
+- `STRUCTURE_WORKER_MAX_RETRIES`
+- `STRUCTURE_WORKER_RETRY_BACKOFF_MS`
+- `STRUCTURE_WORKER_MAX_DEPTH`
 - `TREE_EMBEDDING_DOCUMENT_WEIGHT` / `TREE_EMBEDDING_SUMMARY_WEIGHT` / `TREE_EMBEDDING_SECTION_WEIGHT`
   - 채널별 임베딩 결합 가중치(TITLE, BODY_SUMMARY, SECTION_CENTROID)
 

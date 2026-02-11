@@ -84,6 +84,7 @@ tree:
   assign-recommend-threshold: ${TREE_ASSIGN_RECOMMEND_THRESHOLD:0.60}
   assign-quarantine-enabled: ${TREE_ASSIGN_QUARANTINE_ENABLED:true}
   assign-reranker-enabled: ${TREE_ASSIGN_RERANKER_ENABLED:false}
+  structure-worker-enabled: ${TREE_STRUCTURE_WORKER_ENABLED:false}
   max-cluster-size: ${TREE_MAX_CLUSTER_SIZE:20}
   min-cluster-size: ${TREE_MIN_CLUSTER_SIZE:2}
   community-resolution: ${TREE_COMMUNITY_RESOLUTION:1.0}
@@ -140,3 +141,11 @@ reranker:
   batch-size: ${RERANKER_BATCH_SIZE:64}
   max-retries: ${RERANKER_MAX_RETRIES:1}
   retry-backoff-ms: ${RERANKER_RETRY_BACKOFF_MS:150}
+
+structure-worker:
+  enabled: ${STRUCTURE_WORKER_ENABLED:false}
+  base-url: ${STRUCTURE_WORKER_BASE_URL:http://localhost:18081}
+  timeout-ms: ${STRUCTURE_WORKER_TIMEOUT_MS:2500}
+  max-retries: ${STRUCTURE_WORKER_MAX_RETRIES:1}
+  retry-backoff-ms: ${STRUCTURE_WORKER_RETRY_BACKOFF_MS:200}
+  max-depth: ${STRUCTURE_WORKER_MAX_DEPTH:3}

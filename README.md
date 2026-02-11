@@ -21,7 +21,7 @@
 - `web-admin`: 5173
 - `web-user`: 5174
 - `doc-api`: 8080 (권장)
-- (선택) OpenSearch: 59200, Redis: 56379, Postgres: 5432, MinIO: 59000/59001, Ollama: 11434 (`--profile llm`), Reranker: 18080 (`--profile ml`)
+- (선택) OpenSearch: 59200, Redis: 56379, Postgres: 5432, MinIO: 59000/59001, Ollama: 11434 (`--profile llm`), Reranker: 18080 (`--profile ml`), Structure Worker: 18081 (`--profile structure`)
 
 ## Quickstart
 
@@ -51,6 +51,12 @@ docker compose --profile ml up -d reranker-api
 ./scripts/reranker_smoke.sh
 ```
 
+Optional local structure worker runtime (hSBM import fallback path):
+```bash
+docker compose --profile structure up -d structure-worker
+./scripts/structure_worker_smoke.sh
+```
+
 Optional local observability stack:
 ```bash
 docker compose --profile observability up -d prometheus grafana
@@ -74,6 +80,7 @@ pnpm -C web-admin dev --port 5173
 ./gradlew -p services test
 ./scripts/llm_smoke.sh
 ./scripts/reranker_smoke.sh
+./scripts/structure_worker_smoke.sh
 pnpm build
 pnpm test:e2e
 ```

@@ -132,6 +132,21 @@ services:
     volumes:
       - reranker-data:/models
 
+  structure-worker:
+    build:
+      context: ./services/structure-worker
+      dockerfile: Dockerfile
+    profiles: ["structure"]
+    ports:
+      - "${STRUCTURE_WORKER_PORT:-18081}:18081"
+    environment:
+      STRUCTURE_WORKER_MODE: ${STRUCTURE_WORKER_MODE:-heuristic}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:18081/health', timeout=2)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
   prometheus:
     image: prom/prometheus:v2.54.1
     profiles: ["observability"]

@@ -85,6 +85,11 @@ tree_rebuild_stage {event=tree_rebuild_stage, workspace_id=ws_1, stage=graph, du
 - `reranker_fallback_total`
 - `consensus_strength`
 - `unstable_cluster_count`
+- `structure_worker_latency_ms`
+- `structure_worker_request_total`
+- `structure_worker_error_total`
+- `worker_fallback_total`
+- `worker_fallback_rate`
 
 기존 호환 메트릭도 유지:
 - `tree_rebuild_duration_ms`

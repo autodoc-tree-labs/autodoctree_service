@@ -25,6 +25,7 @@ import com.autodoctree.api.infra.NotFoundException
 import com.autodoctree.api.infra.requireEditor
 import com.autodoctree.api.infra.requireOwner
 import com.autodoctree.api.llm.LlmTextGenerator
+import com.autodoctree.api.structure.StructureWorkerClient
 import com.autodoctree.api.tenant.WorkspaceContext
 import com.autodoctree.api.worker.EmbeddingProvider
 import com.autodoctree.api.worker.EmbeddingQualityScorer
@@ -55,6 +56,7 @@ class TreeService(
     private val featureFlags: FeatureFlags,
     private val neighborBuilder: NeighborBuilder,
     private val treeClusterer: TreeClusterer,
+    private val structureWorkerClient: StructureWorkerClient,
     private val treeLabeler: TreeLabeler,
     private val labelerChain: LabelerChain,
     private val llmExplainGenerator: LlmExplainGenerator,
@@ -90,6 +92,8 @@ class TreeService(
     private val recommendRatioSummary = meterRegistry.summary("recommend_ratio")
     private val explainShownCounter = meterRegistry.counter("explain_shown_total")
     private val explainAcceptCounter = meterRegistry.counter("explain_accept_total")
+    private val workerFallbackCounter = meterRegistry.counter("worker_fallback_total")
+    private val workerFallbackRateSummary = meterRegistry.summary("worker_fallback_rate")
     private val unsortedReasonCodes = setOf("LOW_CONFIDENCE", "HUB", "CONFLICT", "TEMPLATE", "RECOMMEND")
 
     private data class AssignmentPolicy(
@@ -97,6 +101,7 @@ class TreeService(
         val recommendThreshold: Double,
         val quarantineEnabled: Boolean,
         val rerankerEnabled: Boolean,
+        val structureWorkerEnabled: Boolean,
         val source: String
     )
 
@@ -329,11 +334,40 @@ class TreeService(
                 )
 
                 val clusterStartedAt = System.nanoTime()
-                clusters = treeClusterer.cluster(
-                    documents = remaining,
-                    graph = graph,
-                    maxClusterSize = treeProperties.maxClusterSize
-                )
+                var clusterSource = "LOCAL_CLUSTERER"
+                var workerFallbackRate = 0.0
+                clusters = if (assignmentPolicy.structureWorkerEnabled) {
+                    runCatching {
+                        val imported = importWorkerClusters(workspaceId, remaining, graph)
+                        if (imported.isEmpty()) {
+                            throw IllegalStateException("structure worker returned empty clusters")
+                        }
+                        clusterSource = "STRUCTURE_WORKER"
+                        imported
+                    }.getOrElse { ex ->
+                        workerFallbackCounter.increment()
+                        workerFallbackRate = 1.0
+                        logger.warn(
+                            "structure_worker_fallback workspace_id={} reason={}",
+                            workspaceId,
+                            ex.message
+                        )
+                        treeClusterer.cluster(
+                            documents = remaining,
+                            graph = graph,
+                            maxClusterSize = treeProperties.maxClusterSize
+                        )
+                    }
+                } else {
+                    treeClusterer.cluster(
+                        documents = remaining,
+                        graph = graph,
+                        maxClusterSize = treeProperties.maxClusterSize
+                    )
+                }
+                if (assignmentPolicy.structureWorkerEnabled) {
+                    workerFallbackRateSummary.record(workerFallbackRate)
+                }
                 val labelingResult = labelerChain.labelClusters(
                     workspaceDocuments = documents,
                     clusters = clusters,
@@ -354,7 +388,9 @@ class TreeService(
                             "%.3f",
                             clusters.map { it.documentIds.size }.average().takeIf { !it.isNaN() } ?: 0.0
                         ),
-                        "label_source_breakdown" to labelSourceBreakdown
+                        "label_source_breakdown" to labelSourceBreakdown,
+                        "source" to clusterSource,
+                        "worker_fallback_rate" to String.format("%.3f", workerFallbackRate)
                     )
                 )
 
@@ -463,6 +499,7 @@ class TreeService(
                         "recommend" to assignmentPolicy.recommendThreshold,
                         "quarantine_enabled" to assignmentPolicy.quarantineEnabled,
                         "reranker_enabled" to assignmentPolicy.rerankerEnabled,
+                        "structure_worker_enabled" to assignmentPolicy.structureWorkerEnabled,
                         "source" to assignmentPolicy.source
                     ),
                     "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
@@ -691,6 +728,7 @@ class TreeService(
                     "recommend" to assignmentPolicy.recommendThreshold,
                     "quarantine_enabled" to assignmentPolicy.quarantineEnabled,
                     "reranker_enabled" to assignmentPolicy.rerankerEnabled,
+                    "structure_worker_enabled" to assignmentPolicy.structureWorkerEnabled,
                     "source" to assignmentPolicy.source
                 ),
                 "similarity_source_breakdown" to mapOf(
@@ -738,6 +776,7 @@ class TreeService(
                             "recommend" to assignmentPolicy.recommendThreshold,
                             "quarantine_enabled" to assignmentPolicy.quarantineEnabled,
                             "reranker_enabled" to assignmentPolicy.rerankerEnabled,
+                            "structure_worker_enabled" to assignmentPolicy.structureWorkerEnabled,
                             "source" to assignmentPolicy.source
                         ),
                         "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
@@ -1413,6 +1452,49 @@ class TreeService(
         }
     }
 
+    private fun importWorkerClusters(
+        workspaceId: String,
+        documents: List<DocumentRow>,
+        graph: NeighborGraph
+    ): List<TreeCluster> {
+        val expectedDocIds = documents.map { it.id }.toSet()
+        if (expectedDocIds.isEmpty()) {
+            return emptyList()
+        }
+        val imported = structureWorkerClient.inferClusters(workspaceId, documents, graph)
+        if (imported.isEmpty()) {
+            return emptyList()
+        }
+        val assigned = mutableSetOf<String>()
+        val validated = imported.mapNotNull { cluster ->
+            val members = cluster.documentIds
+                .filter { documentId -> expectedDocIds.contains(documentId) && assigned.add(documentId) }
+                .distinct()
+            if (members.isEmpty()) {
+                return@mapNotNull null
+            }
+            TreeCluster(
+                id = cluster.id,
+                documentIds = members,
+                qualityScore = cluster.qualityScore
+            )
+        }.toMutableList()
+        if (validated.isEmpty()) {
+            return emptyList()
+        }
+        val missingDocIds = expectedDocIds - assigned
+        var singletonIndex = 0
+        missingDocIds.sorted().forEach { documentId ->
+            singletonIndex += 1
+            validated += TreeCluster(
+                id = "worker-singleton-$singletonIndex",
+                documentIds = listOf(documentId),
+                qualityScore = 0.0
+            )
+        }
+        return validated
+    }
+
     private fun buildRerankerTextByDocument(
         workspaceId: String,
         documents: List<DocumentRow>
@@ -1688,6 +1770,7 @@ class TreeService(
             recommendThreshold = normalizedRecommend,
             quarantineEnabled = policyOverride?.quarantineEnabled ?: treeProperties.assignQuarantineEnabled,
             rerankerEnabled = policyOverride?.rerankerEnabled ?: treeProperties.assignRerankerEnabled,
+            structureWorkerEnabled = treeProperties.structureWorkerEnabled,
             source = source
         )
     }
@@ -1723,12 +1806,13 @@ class TreeService(
         }
 
         logger.info(
-            "assignment_policy_applied workspace_id={} source={} auto_threshold={} recommend_threshold={} quarantine_enabled={} correction_rate={}",
+            "assignment_policy_applied workspace_id={} source={} auto_threshold={} recommend_threshold={} quarantine_enabled={} structure_worker_enabled={} correction_rate={}",
             workspaceId,
             policy.source,
             String.format("%.3f", policy.autoThreshold),
             String.format("%.3f", policy.recommendThreshold),
             policy.quarantineEnabled,
+            policy.structureWorkerEnabled,
             String.format("%.3f", correctionRate)
         )
 
