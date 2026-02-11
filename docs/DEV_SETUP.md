@@ -24,6 +24,18 @@ Services:
 - MinIO API: `localhost:59000`
 - MinIO Console: `localhost:59001`
 
+Optional observability stack (Prometheus + Grafana):
+```bash
+docker compose --profile observability up -d prometheus grafana
+docker compose ps prometheus grafana
+```
+- Prometheus: `localhost:59090`
+- Grafana: `localhost:53000` (`admin` / `admin`)
+- Dashboards:
+  - `Tree Rebuild Overview`
+  - `Edge Graph Health`
+  - `Unsorted & Questions Queue`
+
 ## 1-1. Optional local LLM (Ollama, offline embedding + generate)
 Start only Ollama with compose profile:
 ```bash

@@ -272,6 +272,95 @@ Response:
 }
 ```
 
+## GET /admin/tree/debug/docs/{documentId}
+Query: `top_n` (optional, default `8`)
+
+Response (example):
+```json
+{
+  "document_id": "doc_1",
+  "title_mask": { "hash": "sha256:...", "length": 32 },
+  "assignment": {
+    "node_id": "node_3",
+    "node_label": "billing",
+    "snapshot_id": "ts_2"
+  },
+  "assignment_confidence": 0.41,
+  "neighbors": [
+    {
+      "neighbor_doc_id": "doc_2",
+      "title_mask": { "hash": "sha256:...", "length": 21 },
+      "channel_scores": {
+        "semantic": 0.91,
+        "lexical": 0.54,
+        "final": 0.84
+      },
+      "edge_decision": {
+        "lexical_gate_passed": true,
+        "reason": "EMBEDDING_LEXICAL_GATED",
+        "entity_overlap": 2,
+        "title_overlap": 1
+      }
+    }
+  ],
+  "trace_id": "..."
+}
+```
+
+## GET /admin/tree/debug/clusters/{clusterId}
+Response (example):
+```json
+{
+  "cluster_id": "node_3",
+  "snapshot_id": "ts_2",
+  "label": "billing",
+  "member_count": 4,
+  "members": [
+    {
+      "document_id": "doc_1",
+      "title_mask": { "hash": "sha256:...", "length": 32 },
+      "signals": ["CLUSTER_DEFAULT"]
+    }
+  ],
+  "exemplars": [
+    {
+      "document_id": "doc_2",
+      "title_mask": { "hash": "sha256:...", "length": 21 },
+      "avg_similarity": 0.83
+    }
+  ],
+  "label_candidates": ["invoice", "billing"],
+  "trace_id": "..."
+}
+```
+
+## GET /admin/tree/debug/rebuilds/{snapshotId}
+Response (example):
+```json
+{
+  "snapshot_id": "ts_2",
+  "status": "ACTIVE",
+  "parameters": {
+    "neighbor_top_k": 5,
+    "neighbor_min_similarity": 0.25
+  },
+  "models": {
+    "embedding_provider": "ollama",
+    "embedding_model": "bge-m3"
+  },
+  "decision_summary": {
+    "status": "ACTIVE",
+    "moved_ratio": 0.12,
+    "churn_count": 2,
+    "unsorted_ratio": 0.08
+  },
+  "stage_logs": [
+    { "stage": "graph", "duration_ms": 11.2, "details": { "edge_count": 42 } }
+  ],
+  "trace_id": "..."
+}
+```
+
 ## GET /admin/tree/debug/cluster-stats
 Response (example):
 ```json

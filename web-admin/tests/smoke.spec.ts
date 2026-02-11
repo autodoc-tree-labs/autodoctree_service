@@ -44,27 +44,83 @@ test("loads tree debug page and renders neighbors table", async ({ page }) => {
       })
     });
   });
-  await page.route("**/api/v1/admin/tree/debug/neighbors**", async (route) => {
+  await page.route("**/api/v1/admin/tree/debug/docs/**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         document_id: "doc-1",
-        title: "billing doc",
+        title_mask: { hash: "sha256:doc1", length: 11 },
+        assignment: { node_id: "node-1", node_label: "billing", snapshot_id: "snap-1" },
+        assignment_confidence: 0.42,
         neighbors: [
           {
             neighbor_doc_id: "doc-2",
-            title: "billing invoice guide",
-            sem_sim: 0.93,
-            lex_sim: 0.71,
-            entity_overlap: 2,
-            final_sim: 0.88,
-            gate_flags: {
+            title_mask: { hash: "sha256:doc2", length: 21 },
+            channel_scores: {
+              semantic: 0.93,
+              lexical: 0.71,
+              final: 0.88
+            },
+            edge_decision: {
               lexical_gate_passed: true,
-              reason: "EMBEDDING_LEXICAL_GATED"
+              reason: "EMBEDDING_LEXICAL_GATED",
+              entity_overlap: 2,
+              title_overlap: 1
             }
           }
-        ]
+        ],
+        trace_id: "trace-doc",
+        request_id: "req-doc"
+      })
+    });
+  });
+  await page.route("**/api/v1/admin/tree/debug/clusters/**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        cluster_id: "node-1",
+        snapshot_id: "snap-1",
+        label: "billing",
+        member_count: 2,
+        members: [
+          {
+            document_id: "doc-1",
+            title_mask: { hash: "sha256:doc1", length: 11 },
+            signals: ["CLUSTER_DEFAULT"]
+          }
+        ],
+        exemplars: [
+          {
+            document_id: "doc-2",
+            title_mask: { hash: "sha256:doc2", length: 21 },
+            avg_similarity: 0.88
+          }
+        ],
+        label_candidates: ["billing", "invoice"],
+        trace_id: "trace-cluster",
+        request_id: "req-cluster"
+      })
+    });
+  });
+  await page.route("**/api/v1/admin/tree/debug/rebuilds/**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        snapshot_id: "snap-1",
+        status: "ACTIVE",
+        created_at: "2026-02-11T00:00:00",
+        parameters: { neighbor_top_k: 5 },
+        models: { embedding_model: "bge-m3" },
+        decision_summary: { moved_ratio: 0.1 },
+        cluster_count: 2,
+        membership_count: 3,
+        unsorted_ratio: 0.0,
+        stage_logs: [{ stage: "graph", duration_ms: 12.1, details: { edge_count: 10 } }],
+        trace_id: "trace-rebuild",
+        request_id: "req-rebuild"
       })
     });
   });
@@ -80,7 +136,15 @@ test("loads tree debug page and renders neighbors table", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "트리 디버그" })).toBeVisible();
 
   await page.getByPlaceholder("문서 식별자(document_id)").fill("doc-1");
-  await page.getByRole("button", { name: "이웃 조회" }).click();
-  await expect(page.getByText("billing invoice guide")).toBeVisible();
+  await page.getByRole("button", { name: "문서 조회" }).click();
+  await expect(page.getByText("assignment: billing (node-1)")).toBeVisible();
   await expect(page.getByText("EMBEDDING_LEXICAL_GATED")).toBeVisible();
+
+  await page.getByPlaceholder("클러스터 식별자(cluster_id)").fill("node-1");
+  await page.getByRole("button", { name: "클러스터 조회" }).click();
+  await expect(page.getByText("label_candidates: billing, invoice")).toBeVisible();
+
+  await page.getByPlaceholder("스냅샷 식별자(snapshot_id)").fill("snap-1");
+  await page.getByRole("button", { name: "리빌드 조회" }).click();
+  await expect(page.getByText("\"neighbor_top_k\": 5")).toBeVisible();
 });

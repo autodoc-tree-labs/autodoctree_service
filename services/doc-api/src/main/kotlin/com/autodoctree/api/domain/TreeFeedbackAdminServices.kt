@@ -27,8 +27,10 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Statistic
 import org.slf4j.LoggerFactory
+import org.slf4j.MDC
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import java.security.MessageDigest
 import java.util.UUID
 import kotlin.math.sqrt
 
@@ -53,6 +55,7 @@ class TreeService(
     private val embeddingProvider: EmbeddingProvider,
     private val llmTextGenerator: LlmTextGenerator,
     private val rebuildDebounceQueue: RebuildDebounceQueue,
+    private val treeTelemetry: TreeTelemetry,
     meterRegistry: MeterRegistry
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -67,7 +70,10 @@ class TreeService(
     @Transactional
     fun rebuildWorkspace(workspaceId: String, actorUserId: String? = null, manual: Boolean = false): TreeSnapshotRow {
         val startedAt = System.nanoTime()
+        val traceState = ensureTraceContext()
+        val trace = treeTelemetry.begin(workspaceId)
         try {
+            val ingestStartedAt = System.nanoTime()
             val documents = documentRepository.listWorkspaceDocuments(workspaceId)
             val documentsById = documents.associateBy { it.id }
             val active = treeRepository.findActiveSnapshot(workspaceId)
@@ -92,10 +98,32 @@ class TreeService(
                 node.label to parentLabel
             }
 
+            treeTelemetry.recordStage(
+                trace = trace,
+                stage = "ingest",
+                startedAtNanos = ingestStartedAt,
+                details = mapOf(
+                    "document_count" to documents.size,
+                    "active_snapshot_id" to active?.id,
+                    "locked_node_count" to lockedNodes.size
+                )
+            )
+
+            val embedStartedAt = System.nanoTime()
             val embeddingByDocumentId = embeddingRepository
                 .listDocEmbeddings(workspaceId, embeddingProvider.modelVersion())
                 .associateBy { it.documentId }
+            treeTelemetry.recordStage(
+                trace = trace,
+                stage = "embed",
+                startedAtNanos = embedStartedAt,
+                details = mapOf(
+                    "embedding_count" to embeddingByDocumentId.size,
+                    "embedding_model" to embeddingProvider.modelVersion()
+                )
+            )
 
+            val pairwiseStartedAt = System.nanoTime()
             val feedbackEvents = feedbackRepository.listByWorkspace(workspaceId, 200)
             val personalizationModel = if (featureFlags.autoTree) {
                 treePersonalizationEngine.buildModel(
@@ -155,6 +183,16 @@ class TreeService(
             correctedRatioSummary.record(
                 if (documents.isEmpty()) 0.0 else personalizedDocIds.size.toDouble() / documents.size.toDouble()
             )
+            treeTelemetry.recordStage(
+                trace = trace,
+                stage = "pairwise",
+                startedAtNanos = pairwiseStartedAt,
+                details = mapOf(
+                    "feedback_event_count" to feedbackEvents.size,
+                    "personalized_doc_count" to personalizedDocIds.size,
+                    "ruled_doc_count" to ruledDocIds.size
+                )
+            )
 
             val remaining = documents.filterNot { assignment.containsKey(it.id) }
             var graphStats = NeighborBuildStats()
@@ -165,6 +203,11 @@ class TreeService(
             } else {
                 remaining.count { embeddingByDocumentId.containsKey(it.id) }.toDouble() / remaining.size.toDouble()
             }
+
+            val graphStartedAt = System.nanoTime()
+            var clusters: List<TreeCluster> = emptyList()
+            val rawLabelsByCluster = mutableMapOf<String, String>()
+            var mergedLabelMap = emptyMap<String, String>()
             if (remaining.isNotEmpty()) {
                 val graph = neighborBuilder.build(
                     workspaceId = workspaceId,
@@ -178,7 +221,21 @@ class TreeService(
                     lexicalGate = treeProperties.fusionLexicalGate
                 )
 
-                val clusters = treeClusterer.cluster(
+                graphStats = graph.stats
+                treeTelemetry.recordGraphDistribution(graph)
+                treeTelemetry.recordStage(
+                    trace = trace,
+                    stage = "graph",
+                    startedAtNanos = graphStartedAt,
+                    details = mapOf(
+                        "edge_count" to graphStats.edgeCount,
+                        "filtered_edge_count" to graphStats.filteredEdgeCount,
+                        "avg_similarity" to String.format("%.3f", graphStats.averageSimilarity)
+                    )
+                )
+
+                val clusterStartedAt = System.nanoTime()
+                clusters = treeClusterer.cluster(
                     documents = remaining,
                     graph = graph,
                     maxClusterSize = treeProperties.maxClusterSize
@@ -188,11 +245,24 @@ class TreeService(
                     clusters = clusters,
                     existingCache = previousLabelCache
                 )
-                val rawLabelsByCluster = labelingResult.labelsByCluster
-                val mergedLabelMap = treeLabeler.mergeSimilarLabels(rawLabelsByCluster.values)
-                graphStats = graph.stats
+                rawLabelsByCluster.putAll(labelingResult.labelsByCluster)
+                mergedLabelMap = treeLabeler.mergeSimilarLabels(rawLabelsByCluster.values)
                 labelSourceBreakdown = labelingResult.sourceBreakdown
                 labelCacheToPersist = labelingResult.labelCacheBySignature
+                treeTelemetry.recordClusterDistribution(clusters)
+                treeTelemetry.recordStage(
+                    trace = trace,
+                    stage = "cluster",
+                    startedAtNanos = clusterStartedAt,
+                    details = mapOf(
+                        "cluster_count" to clusters.size,
+                        "avg_cluster_size" to String.format(
+                            "%.3f",
+                            clusters.map { it.documentIds.size }.average().takeIf { !it.isNaN() } ?: 0.0
+                        ),
+                        "label_source_breakdown" to labelSourceBreakdown
+                    )
+                )
 
                 clusters.forEach { cluster ->
                     val rawLabel = rawLabelsByCluster[cluster.id] ?: "general"
@@ -201,26 +271,22 @@ class TreeService(
                         assignment[docId] = label
                     }
                 }
+            } else {
+                treeTelemetry.recordStage(
+                    trace = trace,
+                    stage = "graph",
+                    startedAtNanos = graphStartedAt,
+                    details = mapOf("skipped" to true, "reason" to "no_remaining_docs")
+                )
+                treeTelemetry.recordStage(
+                    trace = trace,
+                    stage = "cluster",
+                    startedAtNanos = System.nanoTime(),
+                    details = mapOf("skipped" to true, "reason" to "no_remaining_docs")
+                )
             }
-            logger.info(
-                "tree_rebuild_summary workspace_id={} document_count={} embedding_provider={} embedding_model={} llm_provider={} llm_model={} embedding_available_doc_ratio={} edge_count={} filtered_edge_count={} similarity_source_breakdown={} label_source_breakdown={}",
-                workspaceId,
-                documents.size,
-                embeddingProvider.providerId(),
-                embeddingProvider.modelVersion(),
-                llmTextGenerator.providerId(),
-                llmTextGenerator.modelVersion(),
-                String.format("%.3f", embeddingAvailableDocRatio),
-                graphStats.edgeCount,
-                graphStats.filteredEdgeCount,
-                mapOf(
-                    "embedding_only" to graphStats.similaritySourceBreakdown.embeddingOnly,
-                    "lexical_only" to graphStats.similaritySourceBreakdown.lexicalOnly,
-                    "fused" to graphStats.similaritySourceBreakdown.fused
-                ),
-                labelSourceBreakdown
-            )
 
+            val assignStartedAt = System.nanoTime()
             documents.forEach { doc ->
                 assignment.putIfAbsent(doc.id, "general")
             }
@@ -239,6 +305,21 @@ class TreeService(
             val churnCount = movedCount
             val churnRatio = if (assignment.isEmpty()) 0.0 else churnCount.toDouble() / assignment.size.toDouble()
             churnRatioSummary.record(churnRatio)
+            val unsortedCount = assignment.values.count { isUnsortedLabel(it) }
+            val unsortedRatio = if (assignment.isEmpty()) 0.0 else unsortedCount.toDouble() / assignment.size.toDouble()
+            treeTelemetry.recordUnsortedRatio(unsortedRatio)
+            treeTelemetry.recordStage(
+                trace = trace,
+                stage = "assign",
+                startedAtNanos = assignStartedAt,
+                details = mapOf(
+                    "assigned_count" to assignment.size,
+                    "moved_count" to movedCount,
+                    "moved_ratio" to String.format("%.3f", movedRatio),
+                    "unsorted_count" to unsortedCount,
+                    "unsorted_ratio" to String.format("%.3f", unsortedRatio)
+                )
+            )
 
             val labels = assignment.values.toMutableSet().apply {
                 addAll(lockedNodes.map { it.label })
@@ -311,6 +392,7 @@ class TreeService(
                 treeRepository.markAllSnapshotsRecommended(workspaceId)
             }
 
+            val treeExtractStartedAt = System.nanoTime()
             val snapshot = treeRepository.createSnapshot(
                 workspaceId = workspaceId,
                 status = nextStatus,
@@ -397,6 +479,16 @@ class TreeService(
                     rationaleJson = objectMapper.writeValueAsString(rationale)
                 )
             }
+            treeTelemetry.recordStage(
+                trace = trace,
+                stage = "tree_extract",
+                startedAtNanos = treeExtractStartedAt,
+                details = mapOf(
+                    "snapshot_id" to snapshot.id,
+                    "node_count" to (labelToNode.size + topNodes.size + 1),
+                    "membership_count" to assignment.size
+                )
+            )
 
             if (actorUserId != null) {
                 auditService.write(
@@ -413,9 +505,61 @@ class TreeService(
                 )
             }
 
+            val rebuildDurationMs = treeTelemetry.complete(trace)
+            val summaryPayload = treeTelemetry.buildSummaryPayload(
+                workspaceId = workspaceId,
+                snapshotId = snapshot.id,
+                documentCount = documents.size,
+                status = snapshot.status,
+                movedRatio = movedRatio,
+                churnRatio = churnRatio,
+                unsortedRatio = unsortedRatio,
+                graphStats = graphStats,
+                stageLogs = trace.stageLogs
+            ) + mapOf(
+                "embedding_provider" to embeddingProvider.providerId(),
+                "embedding_model" to embeddingProvider.modelVersion(),
+                "llm_provider" to llmTextGenerator.providerId(),
+                "llm_model" to llmTextGenerator.modelVersion(),
+                "embedding_available_doc_ratio" to String.format("%.3f", embeddingAvailableDocRatio),
+                "rebuild_duration_ms" to String.format("%.3f", rebuildDurationMs),
+                "similarity_source_breakdown" to mapOf(
+                    "embedding_only" to graphStats.similaritySourceBreakdown.embeddingOnly,
+                    "lexical_only" to graphStats.similaritySourceBreakdown.lexicalOnly,
+                    "fused" to graphStats.similaritySourceBreakdown.fused
+                ),
+                "label_source_breakdown" to labelSourceBreakdown
+            )
+            treeTelemetry.logSummary(summaryPayload)
+            treeTelemetry.storeDebugSnapshot(
+                TreeRebuildDebugSnapshot(
+                    workspaceId = workspaceId,
+                    snapshotId = snapshot.id,
+                    createdAt = snapshot.createdAt,
+                    stageLogs = trace.stageLogs.toList(),
+                    parameters = treeTelemetry.parameterSnapshot(treeProperties, featureFlags),
+                    models = mapOf(
+                        "embedding_provider" to embeddingProvider.providerId(),
+                        "embedding_model" to embeddingProvider.modelVersion(),
+                        "llm_provider" to llmTextGenerator.providerId(),
+                        "llm_model" to llmTextGenerator.modelVersion()
+                    ),
+                    decisions = mapOf(
+                        "status" to snapshot.status,
+                        "moved_ratio" to movedRatio,
+                        "churn_count" to churnCount,
+                        "node_rename_count" to nodeRenameCount,
+                        "lock_conflict" to lockConflict,
+                        "unsorted_ratio" to unsortedRatio,
+                        "embedding_available_doc_ratio" to embeddingAvailableDocRatio
+                    )
+                )
+            )
+
             return snapshot
         } finally {
             rebuildDurationSummary.record((System.nanoTime() - startedAt).toDouble() / 1_000_000.0)
+            clearTraceContext(traceState)
         }
     }
 
@@ -567,6 +711,182 @@ class TreeService(
         )
     }
 
+    fun debugDocument(workspaceId: String, documentId: String, topN: Int): Map<String, Any?> {
+        val documents = documentRepository.listWorkspaceDocuments(workspaceId)
+        val source = documents.firstOrNull { it.id == documentId } ?: throw NotFoundException()
+        val documentsById = documents.associateBy { it.id }
+        val embeddings = embeddingRepository
+            .listDocEmbeddings(workspaceId, embeddingProvider.modelVersion())
+            .associateBy { it.documentId }
+        val graph = neighborBuilder.build(
+            workspaceId = workspaceId,
+            documents = documents,
+            embeddings = embeddings,
+            topK = maxOf(treeProperties.neighborTopK, topN.coerceIn(1, 20)),
+            minSimilarity = 0.0,
+            normalize = treeProperties.neighborNormalize,
+            semanticWeight = treeProperties.fusionSemanticWeight,
+            lexicalWeight = treeProperties.fusionLexicalWeight,
+            lexicalGate = treeProperties.fusionLexicalGate
+        )
+        val selectedLinks = graph.adjacency[documentId].orEmpty().take(topN.coerceIn(1, 20))
+        val assignmentMembership = treeRepository.findMembershipByWorkspaceAndDocument(workspaceId, documentId)
+        val assignmentNode = assignmentMembership?.nodeId?.let { treeRepository.findNodeByWorkspace(workspaceId, it) }
+        val confidence = when {
+            selectedLinks.isEmpty() -> 0.0
+            selectedLinks.size == 1 -> selectedLinks.first().similarity.coerceIn(0.0, 1.0)
+            else -> (selectedLinks[0].similarity - selectedLinks[1].similarity).coerceIn(0.0, 1.0)
+        }
+        return mapOf(
+            "document_id" to source.id,
+            "title_mask" to maskedText(source.title),
+            "assignment" to mapOf(
+                "node_id" to assignmentMembership?.nodeId,
+                "node_label" to assignmentNode?.label,
+                "snapshot_id" to assignmentMembership?.snapshotId
+            ),
+            "assignment_confidence" to confidence,
+            "neighbors" to selectedLinks.map { link ->
+                mapOf(
+                    "neighbor_doc_id" to link.documentId,
+                    "title_mask" to maskedText(documentsById[link.documentId]?.title ?: link.documentId),
+                    "channel_scores" to mapOf(
+                        "semantic" to link.semanticSimilarity,
+                        "lexical" to link.lexicalSimilarity,
+                        "final" to link.similarity
+                    ),
+                    "edge_decision" to mapOf(
+                        "lexical_gate_passed" to link.lexicalGatePassed,
+                        "reason" to link.reason,
+                        "entity_overlap" to link.sharedEntityCount,
+                        "title_overlap" to link.titleOverlap
+                    )
+                )
+            },
+            "trace_id" to MDC.get("trace_id"),
+            "request_id" to MDC.get("request_id")
+        )
+    }
+
+    fun debugCluster(workspaceId: String, clusterId: String): Map<String, Any?> {
+        val active = treeRepository.findActiveSnapshot(workspaceId) ?: throw NotFoundException()
+        val clusterNode = treeRepository.findNodeByWorkspace(workspaceId, clusterId) ?: throw NotFoundException()
+        if (clusterNode.snapshotId != active.id) {
+            throw NotFoundException()
+        }
+        val memberships = treeRepository.listMemberships(workspaceId, active.id).filter { it.nodeId == clusterId }
+        val documentsById = documentRepository.listWorkspaceDocuments(workspaceId).associateBy { it.id }
+        val embeddings = embeddingRepository
+            .listDocEmbeddings(workspaceId, embeddingProvider.modelVersion())
+            .associateBy { it.documentId }
+        val memberIds = memberships.map { it.documentId }
+        val vectorsByDoc = memberIds.associateWith { memberId ->
+            embeddings[memberId]?.let { embedding ->
+                objectMapper.readValue(embedding.vectorJson, List::class.java).mapNotNull { value ->
+                    (value as? Number)?.toDouble()
+                }
+            }.orEmpty()
+        }
+        val exemplars = memberIds.map { memberId ->
+            val sourceVector = vectorsByDoc[memberId].orEmpty()
+            val avgSimilarity = if (sourceVector.isEmpty()) {
+                0.0
+            } else {
+                memberIds
+                    .asSequence()
+                    .filter { it != memberId }
+                    .mapNotNull { otherId ->
+                        val target = vectorsByDoc[otherId].orEmpty()
+                        if (target.isEmpty()) {
+                            null
+                        } else {
+                            cosine(sourceVector, target)
+                        }
+                    }
+                    .average()
+                    .takeIf { !it.isNaN() } ?: 0.0
+            }
+            mapOf(
+                "document_id" to memberId,
+                "title_mask" to maskedText(documentsById[memberId]?.title ?: memberId),
+                "avg_similarity" to avgSimilarity
+            )
+        }.sortedByDescending { it["avg_similarity"] as Double }
+            .take(3)
+
+        val memberDocs = memberIds.mapNotNull { documentsById[it] }
+        val labelCandidates = treeLabeler.keywords(
+            memberDocs.joinToString(" ") { "${it.title} ${it.bodyText ?: ""}" },
+            8
+        )
+        return mapOf(
+            "cluster_id" to clusterNode.id,
+            "snapshot_id" to active.id,
+            "label" to clusterNode.label,
+            "member_count" to memberships.size,
+            "members" to memberships.map { membership ->
+                mapOf(
+                    "document_id" to membership.documentId,
+                    "title_mask" to maskedText(documentsById[membership.documentId]?.title ?: membership.documentId),
+                    "signals" to parseRationale(membership.rationaleJson)["signals"].safeStringList()
+                )
+            },
+            "exemplars" to exemplars,
+            "label_candidates" to labelCandidates,
+            "trace_id" to MDC.get("trace_id"),
+            "request_id" to MDC.get("request_id")
+        )
+    }
+
+    fun debugRebuild(workspaceId: String, snapshotId: String): Map<String, Any?> {
+        val snapshot = treeRepository.findSnapshotByWorkspace(workspaceId, snapshotId) ?: throw NotFoundException()
+        val nodes = treeRepository.listNodes(workspaceId, snapshot.id)
+        val memberships = treeRepository.listMemberships(workspaceId, snapshot.id)
+        val nodeById = nodes.associateBy { it.id }
+        val unsortedCount = memberships.count { membership ->
+            isUnsortedLabel(nodeById[membership.nodeId]?.label ?: "")
+        }
+        val unsortedRatio = if (memberships.isEmpty()) 0.0 else unsortedCount.toDouble() / memberships.size.toDouble()
+        val clusterCount = nodes.count { it.depth >= 2 }.takeIf { it > 0 }
+            ?: nodes.count { it.depth == 1 && it.label != "AutoDoc" }
+
+        val telemetrySnapshot = treeTelemetry.getDebugSnapshot(workspaceId, snapshotId)
+        val params = telemetrySnapshot?.parameters ?: treeTelemetry.parameterSnapshot(treeProperties, featureFlags)
+        val models = telemetrySnapshot?.models ?: mapOf(
+            "embedding_provider" to embeddingProvider.providerId(),
+            "embedding_model" to embeddingProvider.modelVersion(),
+            "llm_provider" to llmTextGenerator.providerId(),
+            "llm_model" to llmTextGenerator.modelVersion()
+        )
+        val decisions = telemetrySnapshot?.decisions ?: mapOf(
+            "status" to snapshot.status,
+            "moved_ratio" to snapshot.movedRatio,
+            "churn_count" to snapshot.churnCount,
+            "node_rename_count" to snapshot.nodeRenameCount,
+            "unsorted_ratio" to unsortedRatio
+        )
+        return mapOf(
+            "snapshot_id" to snapshot.id,
+            "status" to snapshot.status,
+            "created_at" to snapshot.createdAt.toString(),
+            "parameters" to params,
+            "models" to models,
+            "decision_summary" to decisions,
+            "cluster_count" to clusterCount,
+            "membership_count" to memberships.size,
+            "unsorted_ratio" to unsortedRatio,
+            "stage_logs" to telemetrySnapshot?.stageLogs.orEmpty().map { stage ->
+                mapOf(
+                    "stage" to stage.stage,
+                    "duration_ms" to stage.durationMs,
+                    "details" to stage.details
+                )
+            },
+            "trace_id" to MDC.get("trace_id"),
+            "request_id" to MDC.get("request_id")
+        )
+    }
+
     private fun buildSignals(wasLocked: Boolean, personalized: Boolean, ruled: Boolean): List<String> {
         val signals = mutableListOf<String>()
         if (wasLocked) signals += "LOCKED_NODE"
@@ -680,6 +1000,58 @@ class TreeService(
         }.getOrElse { emptyMap() }
     }
 
+    private fun maskedText(value: String): Map<String, Any?> {
+        val normalized = value.trim()
+        val hashBytes = MessageDigest.getInstance("SHA-256").digest(normalized.toByteArray(Charsets.UTF_8))
+        val hash = hashBytes.joinToString(separator = "") { byte -> "%02x".format(byte) }
+        return mapOf(
+            "hash" to "sha256:$hash",
+            "length" to normalized.length
+        )
+    }
+
+    private fun isUnsortedLabel(label: String): Boolean {
+        return label.equals("general", ignoreCase = true) || label.equals("unsorted", ignoreCase = true)
+    }
+
+    private data class TraceContextState(
+        val generatedTraceId: Boolean,
+        val generatedRequestId: Boolean
+    )
+
+    private fun ensureTraceContext(): TraceContextState {
+        var generatedTraceId = false
+        var generatedRequestId = false
+        if (MDC.get("trace_id").isNullOrBlank()) {
+            MDC.put("trace_id", UUID.randomUUID().toString())
+            generatedTraceId = true
+        }
+        if (MDC.get("request_id").isNullOrBlank()) {
+            MDC.put("request_id", "rebuild-${UUID.randomUUID()}")
+            generatedRequestId = true
+        }
+        return TraceContextState(
+            generatedTraceId = generatedTraceId,
+            generatedRequestId = generatedRequestId
+        )
+    }
+
+    private fun clearTraceContext(state: TraceContextState) {
+        if (state.generatedTraceId) {
+            MDC.remove("trace_id")
+        }
+        if (state.generatedRequestId) {
+            MDC.remove("request_id")
+        }
+    }
+
+    private fun Any?.safeStringList(): List<String> {
+        val raw = this as? List<*> ?: return emptyList()
+        return raw.mapNotNull { item ->
+            item?.toString()
+        }
+    }
+
 }
 
 @Service
@@ -756,6 +1128,9 @@ class AdminService(
     private val meterRegistry: MeterRegistry
 ) {
     private val debugNeighborsCalledCounter = meterRegistry.counter("debug_neighbors_called_total")
+    private val debugDocumentCalledCounter = meterRegistry.counter("debug_document_called_total")
+    private val debugClusterCalledCounter = meterRegistry.counter("debug_cluster_called_total")
+    private val debugRebuildCalledCounter = meterRegistry.counter("debug_rebuild_called_total")
 
     fun listJobs(context: WorkspaceContext, documentId: String?): Map<String, Any?> {
         requireOwner(context)
@@ -825,6 +1200,33 @@ class AdminService(
         }
         debugNeighborsCalledCounter.increment()
         return treeService.debugNeighbors(context.workspaceId, documentId)
+    }
+
+    fun debugDocument(context: WorkspaceContext, documentId: String, topN: Int): Map<String, Any?> {
+        requireOwner(context)
+        if (!featureFlags.adminTreeDebug) {
+            throw ForbiddenException("tree debug feature is disabled")
+        }
+        debugDocumentCalledCounter.increment()
+        return treeService.debugDocument(context.workspaceId, documentId, topN)
+    }
+
+    fun debugCluster(context: WorkspaceContext, clusterId: String): Map<String, Any?> {
+        requireOwner(context)
+        if (!featureFlags.adminTreeDebug) {
+            throw ForbiddenException("tree debug feature is disabled")
+        }
+        debugClusterCalledCounter.increment()
+        return treeService.debugCluster(context.workspaceId, clusterId)
+    }
+
+    fun debugRebuild(context: WorkspaceContext, snapshotId: String): Map<String, Any?> {
+        requireOwner(context)
+        if (!featureFlags.adminTreeDebug) {
+            throw ForbiddenException("tree debug feature is disabled")
+        }
+        debugRebuildCalledCounter.increment()
+        return treeService.debugRebuild(context.workspaceId, snapshotId)
     }
 
     fun clusterStats(context: WorkspaceContext): Map<String, Any?> {

@@ -1,0 +1,64 @@
+{
+  "uid": "autodoc-tree-rebuild-overview",
+  "title": "Tree Rebuild Overview",
+  "tags": ["autodoc", "tree", "rebuild"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Tree Rebuild Duration (ms)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "autodoc-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "rate(tree_rebuild_duration_ms_sum[5m]) / clamp_min(rate(tree_rebuild_duration_ms_count[5m]), 0.000001)",
+          "legendFormat": "avg_duration_ms",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Moved / Churn Ratio",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "autodoc-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "rate(moved_ratio_sum[5m]) / clamp_min(rate(moved_ratio_count[5m]), 0.000001)",
+          "legendFormat": "moved_ratio",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(churn_ratio_sum[5m]) / clamp_min(rate(churn_ratio_count[5m]), 0.000001)",
+          "legendFormat": "churn_ratio",
+          "refId": "B"
+        }
+      ]
+    }
+  ]
+}

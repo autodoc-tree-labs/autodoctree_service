@@ -27,22 +27,74 @@ type AuditResponse = {
     payload: Record<string, unknown>;
   }>;
 };
-type DebugNeighborItem = {
+type MaskedText = {
+  hash: string;
+  length: number;
+};
+type DebugDocNeighborItem = {
   neighbor_doc_id: string;
-  title: string;
-  sem_sim: number | null;
-  lex_sim: number;
-  entity_overlap: number;
-  final_sim: number;
-  gate_flags: {
+  title_mask: MaskedText;
+  channel_scores: {
+    semantic: number | null;
+    lexical: number;
+    final: number;
+  };
+  edge_decision: {
     lexical_gate_passed: boolean;
     reason: string;
+    entity_overlap: number;
+    title_overlap: number;
   };
 };
-type DebugNeighborsResponse = {
+type DebugDocumentResponse = {
   document_id: string;
-  title: string;
-  neighbors: DebugNeighborItem[];
+  title_mask: MaskedText;
+  assignment: {
+    node_id: string | null;
+    node_label: string | null;
+    snapshot_id: string | null;
+  };
+  assignment_confidence: number;
+  neighbors: DebugDocNeighborItem[];
+  trace_id: string | null;
+  request_id: string | null;
+};
+type DebugClusterResponse = {
+  cluster_id: string;
+  snapshot_id: string;
+  label: string;
+  member_count: number;
+  members: Array<{
+    document_id: string;
+    title_mask: MaskedText;
+    signals: string[];
+  }>;
+  exemplars: Array<{
+    document_id: string;
+    title_mask: MaskedText;
+    avg_similarity: number;
+  }>;
+  label_candidates: string[];
+  trace_id: string | null;
+  request_id: string | null;
+};
+type DebugRebuildResponse = {
+  snapshot_id: string;
+  status: string;
+  created_at: string;
+  parameters: Record<string, unknown>;
+  models: Record<string, unknown>;
+  decision_summary: Record<string, unknown>;
+  cluster_count: number;
+  membership_count: number;
+  unsorted_ratio: number;
+  stage_logs: Array<{
+    stage: string;
+    duration_ms: number;
+    details: Record<string, unknown>;
+  }>;
+  trace_id: string | null;
+  request_id: string | null;
 };
 type ClusterStatsResponse = {
   snapshot_id: string | null;
@@ -447,8 +499,11 @@ export default function App() {
 
   function TreeDebugPage() {
     const [documentId, setDocumentId] = useState("");
-    const [sourceTitle, setSourceTitle] = useState("");
-    const [neighbors, setNeighbors] = useState<DebugNeighborItem[]>([]);
+    const [clusterId, setClusterId] = useState("");
+    const [snapshotId, setSnapshotId] = useState("");
+    const [documentDebug, setDocumentDebug] = useState<DebugDocumentResponse | null>(null);
+    const [clusterDebug, setClusterDebug] = useState<DebugClusterResponse | null>(null);
+    const [rebuildDebug, setRebuildDebug] = useState<DebugRebuildResponse | null>(null);
     const [stats, setStats] = useState<ClusterStatsResponse | null>(null);
     const [error, setError] = useState<string | null>(null);
 
@@ -464,13 +519,15 @@ export default function App() {
     useEffect(() => {
       if (!state.workspaceId) {
         setStats(null);
-        setNeighbors([]);
+        setDocumentDebug(null);
+        setClusterDebug(null);
+        setRebuildDebug(null);
         return;
       }
       void loadStats();
     }, [state.workspaceId]);
 
-    const loadNeighbors = async () => {
+    const loadDocumentDebug = async () => {
       if (!state.workspaceId) {
         setError("먼저 워크스페이스를 선택하세요.");
         return;
@@ -481,32 +538,66 @@ export default function App() {
       }
       setError(null);
       try {
-        const response = await api.request<DebugNeighborsResponse>(
-          `/admin/tree/debug/neighbors?document_id=${encodeURIComponent(documentId.trim())}`,
-          {},
-          true
-        );
-        setSourceTitle(response.title);
-        setNeighbors(response.neighbors);
+        const response = await api.request<DebugDocumentResponse>(`/admin/tree/debug/docs/${encodeURIComponent(documentId.trim())}?top_n=8`, {}, true);
+        setDocumentDebug(response);
+        if (response.assignment.node_id) {
+          setClusterId(response.assignment.node_id);
+        }
+        if (response.assignment.snapshot_id) {
+          setSnapshotId(response.assignment.snapshot_id);
+        }
       } catch (e) {
-        setNeighbors([]);
-        setSourceTitle("");
-        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "이웃 정보를 불러오지 못했습니다."));
+        setDocumentDebug(null);
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "문서 디버그 정보를 불러오지 못했습니다."));
+      }
+    };
+
+    const loadClusterDebug = async () => {
+      if (!state.workspaceId) {
+        setError("먼저 워크스페이스를 선택하세요.");
+        return;
+      }
+      if (!clusterId.trim()) {
+        setError("클러스터 식별자를 입력하세요.");
+        return;
+      }
+      setError(null);
+      try {
+        const response = await api.request<DebugClusterResponse>(`/admin/tree/debug/clusters/${encodeURIComponent(clusterId.trim())}`, {}, true);
+        setClusterDebug(response);
+        if (response.snapshot_id) {
+          setSnapshotId(response.snapshot_id);
+        }
+      } catch (e) {
+        setClusterDebug(null);
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "클러스터 디버그 정보를 불러오지 못했습니다."));
+      }
+    };
+
+    const loadRebuildDebug = async () => {
+      if (!state.workspaceId) {
+        setError("먼저 워크스페이스를 선택하세요.");
+        return;
+      }
+      if (!snapshotId.trim()) {
+        setError("스냅샷 식별자를 입력하세요.");
+        return;
+      }
+      setError(null);
+      try {
+        const response = await api.request<DebugRebuildResponse>(`/admin/tree/debug/rebuilds/${encodeURIComponent(snapshotId.trim())}`, {}, true);
+        setRebuildDebug(response);
+      } catch (e) {
+        setRebuildDebug(null);
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "리빌드 디버그 정보를 불러오지 못했습니다."));
       }
     };
 
     return (
       <Layout>
         <h2>트리 디버그</h2>
-        <p>문서 ID로 이웃 신호를 조회하고 현재 클러스터 지표를 확인합니다.</p>
+        <p>문서/클러스터/리빌드 단위로 분해된 원인 정보를 확인합니다.</p>
         <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-          <input
-            value={documentId}
-            onChange={(e) => setDocumentId(e.target.value)}
-            placeholder="문서 식별자(document_id)"
-            style={{ minWidth: 320 }}
-          />
-          <button onClick={() => void loadNeighbors()}>이웃 조회</button>
           <button onClick={() => void loadStats()}>통계 새로고침</button>
         </div>
         {error ? (
@@ -569,39 +660,62 @@ export default function App() {
           )}
         </section>
 
-        <section style={{ border: "1px solid #ccd", padding: 12 }}>
-          <h3 style={{ marginTop: 0 }}>Neighbors</h3>
-          <p>
-            문서: <strong>{sourceTitle || "-"}</strong>
-          </p>
+        <section style={{ border: "1px solid #ccd", padding: 12, marginBottom: 14 }}>
+          <h3 style={{ marginTop: 0 }}>문서 디버그</h3>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <input
+              value={documentId}
+              onChange={(e) => setDocumentId(e.target.value)}
+              placeholder="문서 식별자(document_id)"
+              style={{ minWidth: 320 }}
+            />
+            <button onClick={() => void loadDocumentDebug()}>문서 조회</button>
+          </div>
+          {documentDebug ? (
+            <>
+              <p>
+                title_mask: {documentDebug.title_mask.hash} (len={documentDebug.title_mask.length})
+              </p>
+              <p>
+                assignment: {documentDebug.assignment.node_label ?? "-"} ({documentDebug.assignment.node_id ?? "-"}) / confidence:
+                {" "}
+                {formatMetric(documentDebug.assignment_confidence, 3)}
+              </p>
+              <p>
+                trace_id: {documentDebug.trace_id ?? "-"} / request_id: {documentDebug.request_id ?? "-"}
+              </p>
+            </>
+          ) : (
+            <p>문서 디버그 데이터 없음</p>
+          )}
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr>
                 <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>문서</th>
                 <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>semantic</th>
                 <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>lexical</th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>entity_overlap</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>title_overlap</th>
                 <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>final</th>
                 <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>gate</th>
               </tr>
             </thead>
             <tbody>
-              {neighbors.map((neighbor) => (
+              {documentDebug?.neighbors.map((neighbor) => (
                 <tr key={neighbor.neighbor_doc_id}>
                   <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>
-                    <div>{neighbor.title}</div>
+                    <div>{neighbor.title_mask.hash}</div>
                     <small>{neighbor.neighbor_doc_id}</small>
                   </td>
-                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{formatMetric(neighbor.sem_sim)}</td>
-                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{formatMetric(neighbor.lex_sim)}</td>
-                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{neighbor.entity_overlap}</td>
-                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{formatMetric(neighbor.final_sim)}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{formatMetric(neighbor.channel_scores.semantic)}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{formatMetric(neighbor.channel_scores.lexical)}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{neighbor.edge_decision.title_overlap}</td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{formatMetric(neighbor.channel_scores.final)}</td>
                   <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>
-                    {neighbor.gate_flags.lexical_gate_passed ? "PASS" : "BLOCK"} / {neighbor.gate_flags.reason}
+                    {neighbor.edge_decision.lexical_gate_passed ? "PASS" : "BLOCK"} / {neighbor.edge_decision.reason}
                   </td>
                 </tr>
-              ))}
-              {neighbors.length === 0 ? (
+              )) ?? null}
+              {(documentDebug?.neighbors.length ?? 0) === 0 ? (
                 <tr>
                   <td colSpan={6} style={{ padding: "8px 4px" }}>
                     조회 결과가 없습니다.
@@ -610,6 +724,91 @@ export default function App() {
               ) : null}
             </tbody>
           </table>
+        </section>
+
+        <section style={{ border: "1px solid #ccd", padding: 12, marginBottom: 14 }}>
+          <h3 style={{ marginTop: 0 }}>클러스터 디버그</h3>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <input
+              value={clusterId}
+              onChange={(e) => setClusterId(e.target.value)}
+              placeholder="클러스터 식별자(cluster_id)"
+              style={{ minWidth: 320 }}
+            />
+            <button onClick={() => void loadClusterDebug()}>클러스터 조회</button>
+          </div>
+          {clusterDebug ? (
+            <>
+              <p>
+                label: {clusterDebug.label} / members: {clusterDebug.member_count}
+              </p>
+              <p>
+                trace_id: {clusterDebug.trace_id ?? "-"} / request_id: {clusterDebug.request_id ?? "-"}
+              </p>
+              <p>label_candidates: {clusterDebug.label_candidates.join(", ") || "-"}</p>
+              <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 8 }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>member_doc_id</th>
+                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>title_mask</th>
+                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>signals</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {clusterDebug.members.map((member) => (
+                    <tr key={member.document_id}>
+                      <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{member.document_id}</td>
+                      <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{member.title_mask.hash}</td>
+                      <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{member.signals.join(", ") || "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <h4 style={{ margin: "8px 0" }}>Exemplars</h4>
+              <ul>
+                {clusterDebug.exemplars.map((exemplar) => (
+                  <li key={exemplar.document_id}>
+                    {exemplar.document_id} / {exemplar.title_mask.hash} / avg={formatMetric(exemplar.avg_similarity, 3)}
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p>클러스터 디버그 데이터 없음</p>
+          )}
+        </section>
+
+        <section style={{ border: "1px solid #ccd", padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>리빌드 디버그</h3>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <input
+              value={snapshotId}
+              onChange={(e) => setSnapshotId(e.target.value)}
+              placeholder="스냅샷 식별자(snapshot_id)"
+              style={{ minWidth: 320 }}
+            />
+            <button onClick={() => void loadRebuildDebug()}>리빌드 조회</button>
+          </div>
+          {rebuildDebug ? (
+            <>
+              <p>
+                snapshot: {rebuildDebug.snapshot_id} / status: {rebuildDebug.status}
+              </p>
+              <p>
+                trace_id: {rebuildDebug.trace_id ?? "-"} / request_id: {rebuildDebug.request_id ?? "-"}
+              </p>
+              <h4 style={{ margin: "8px 0" }}>Parameters</h4>
+              <pre>{JSON.stringify(rebuildDebug.parameters, null, 2)}</pre>
+              <h4 style={{ margin: "8px 0" }}>Models</h4>
+              <pre>{JSON.stringify(rebuildDebug.models, null, 2)}</pre>
+              <h4 style={{ margin: "8px 0" }}>Decision Summary</h4>
+              <pre>{JSON.stringify(rebuildDebug.decision_summary, null, 2)}</pre>
+              <h4 style={{ margin: "8px 0" }}>Stage Logs</h4>
+              <pre>{JSON.stringify(rebuildDebug.stage_logs, null, 2)}</pre>
+            </>
+          ) : (
+            <p>리빌드 디버그 데이터 없음</p>
+          )}
         </section>
       </Layout>
     );

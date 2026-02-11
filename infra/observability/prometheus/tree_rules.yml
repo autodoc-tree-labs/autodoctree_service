@@ -1,0 +1,20 @@
+groups:
+  - name: autodoc-tree-local-alerts
+    rules:
+      - alert: AutoDocTreeMovedRatioSpike
+        expr: (rate(moved_ratio_sum[10m]) / clamp_min(rate(moved_ratio_count[10m]), 0.000001)) > 0.35
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tree moved_ratio spiked"
+          description: "Average moved_ratio in the last 10m is above 0.35."
+
+      - alert: AutoDocTreeRebuildEndpoint5xx
+        expr: increase(http_server_requests_seconds_count{uri="/api/v1/tree/rebuild",status=~"5.."}[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tree rebuild endpoint returned 5xx"
+          description: "Check doc-api logs and trace_id for rebuild failures."

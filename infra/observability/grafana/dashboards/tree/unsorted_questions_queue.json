@@ -1,0 +1,64 @@
+{
+  "uid": "autodoc-unsorted-queue",
+  "title": "Unsorted & Questions Queue",
+  "tags": ["autodoc", "tree", "unsorted"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Unsorted Ratio",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "autodoc-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "rate(tree_rebuild_unsorted_ratio_sum[5m]) / clamp_min(rate(tree_rebuild_unsorted_ratio_count[5m]), 0.000001)",
+          "legendFormat": "unsorted_ratio",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Debug/Question Traffic Proxy",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "autodoc-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "rate(debug_document_called_total[5m])",
+          "legendFormat": "debug_doc_calls",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(debug_cluster_called_total[5m])",
+          "legendFormat": "debug_cluster_calls",
+          "refId": "B"
+        }
+      ]
+    }
+  ]
+}

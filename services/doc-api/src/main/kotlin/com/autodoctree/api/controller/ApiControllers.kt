@@ -378,6 +378,34 @@ class AdminController(
         return adminService.debugNeighbors(context, documentId)
     }
 
+    @GetMapping("/tree/debug/docs/{documentId}")
+    fun debugDocument(
+        request: HttpServletRequest,
+        @PathVariable documentId: String,
+        @RequestParam(name = "top_n", defaultValue = "8") topN: Int
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.debugDocument(context, documentId, topN)
+    }
+
+    @GetMapping("/tree/debug/clusters/{clusterId}")
+    fun debugCluster(
+        request: HttpServletRequest,
+        @PathVariable clusterId: String
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.debugCluster(context, clusterId)
+    }
+
+    @GetMapping("/tree/debug/rebuilds/{snapshotId}")
+    fun debugRebuild(
+        request: HttpServletRequest,
+        @PathVariable snapshotId: String
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return adminService.debugRebuild(context, snapshotId)
+    }
+
     @GetMapping("/tree/debug/cluster-stats")
     fun clusterStats(request: HttpServletRequest): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)

@@ -104,10 +104,71 @@ class TreeAdminDebugIntegrationTest {
     }
 
     @Test
+    fun `admin debug doc endpoint returns masked evidence contract`() {
+        mockMvc.perform(
+            get("/api/v1/admin/tree/debug/docs/$debugDocId")
+                .param("top_n", "5")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.document_id").value(debugDocId))
+            .andExpect(jsonPath("$.title").doesNotExist())
+            .andExpect(jsonPath("$.title_mask.hash").exists())
+            .andExpect(jsonPath("$.title_mask.length").exists())
+            .andExpect(jsonPath("$.assignment.node_id").exists())
+            .andExpect(jsonPath("$.assignment_confidence").exists())
+            .andExpect(jsonPath("$.neighbors[0].neighbor_doc_id").exists())
+            .andExpect(jsonPath("$.neighbors[0].channel_scores.final").exists())
+            .andExpect(jsonPath("$.neighbors[0].edge_decision.reason").exists())
+    }
+
+    @Test
+    fun `admin debug cluster endpoint returns members and exemplars`() {
+        val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
+        val membership = treeRepository.findMembershipByDocInSnapshot(workspaceId, active.id, debugDocId)
+            ?: error("debug document membership missing")
+
+        mockMvc.perform(
+            get("/api/v1/admin/tree/debug/clusters/${membership.nodeId}")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.cluster_id").value(membership.nodeId))
+            .andExpect(jsonPath("$.member_count").isNumber)
+            .andExpect(jsonPath("$.members").isArray)
+            .andExpect(jsonPath("$.members[0].document_id").exists())
+            .andExpect(jsonPath("$.members[0].title_mask.hash").exists())
+            .andExpect(jsonPath("$.exemplars").isArray)
+            .andExpect(jsonPath("$.label_candidates").isArray)
+    }
+
+    @Test
+    fun `admin debug rebuild endpoint returns parameter snapshot`() {
+        val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
+
+        mockMvc.perform(
+            get("/api/v1/admin/tree/debug/rebuilds/${active.id}")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.snapshot_id").value(active.id))
+            .andExpect(jsonPath("$.parameters.neighbor_top_k").exists())
+            .andExpect(jsonPath("$.models.embedding_model").exists())
+            .andExpect(jsonPath("$.decision_summary.status").exists())
+            .andExpect(jsonPath("$.stage_logs").isArray)
+    }
+
+    @Test
     fun `member role cannot access admin debug endpoint`() {
         mockMvc.perform(
             get("/api/v1/admin/tree/debug/neighbors")
                 .param("document_id", debugDocId)
+                .header("Authorization", "Bearer $memberToken")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
+            get("/api/v1/admin/tree/debug/docs/$debugDocId")
                 .header("Authorization", "Bearer $memberToken")
                 .header("X-Workspace-Id", workspaceId)
         ).andExpect(status().isForbidden)

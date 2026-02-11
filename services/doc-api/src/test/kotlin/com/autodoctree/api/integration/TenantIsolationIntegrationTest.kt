@@ -196,6 +196,12 @@ class TenantIsolationIntegrationTest {
         ).andExpect(status().isForbidden)
 
         mockMvc.perform(
+            get("/api/v1/admin/tree/debug/docs/$wsADocId")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
             get("/api/v1/admin/tree/rules")
                 .header("Authorization", "Bearer $tokenB")
                 .header("X-Workspace-Id", wsAId)

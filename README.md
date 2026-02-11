@@ -43,6 +43,13 @@ Optional one-shot preload profile:
 docker compose --profile llm --profile llm-init up ollama-init
 ```
 
+Optional local observability stack:
+```bash
+docker compose --profile observability up -d prometheus grafana
+```
+- Prometheus: `http://localhost:59090`
+- Grafana: `http://localhost:53000` (`admin` / `admin`)
+
 2) backend (IntelliJ)
 - `services/doc-api` Run Config (`com.autodoctree.api.DocApiApplicationKt`)
 - 기본 포트 기준 추가 env 없이 실행 가능
