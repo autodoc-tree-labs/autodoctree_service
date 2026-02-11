@@ -200,6 +200,13 @@ class DocumentController(
         val context = workspaceContextResolver.resolve(request)
         return treeService.explain(context, documentId)
     }
+
+    @PostMapping("/{documentId}/explain/accept")
+    fun acceptExplainDocument(request: HttpServletRequest, @PathVariable documentId: String): ResponseEntity<Void> {
+        val context = workspaceContextResolver.resolve(request)
+        treeService.acceptExplain(context, documentId)
+        return ResponseEntity.noContent().build()
+    }
 }
 
 @RestController

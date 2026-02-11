@@ -214,10 +214,33 @@ Response:
       { "document_id": "doc_2", "title": "ShedLock notes", "similarity": 0.91 }
     ],
     "signals": ["HYBRID_SIM_HIGH"],
-    "llm_sentence": "동시성 키워드와 높은 유사도 신호로 이 노드에 배치되었습니다."
+    "evidence": {
+      "neighbors": [
+        {
+          "document_id": "doc_2",
+          "title": "ShedLock notes",
+          "channel_scores": { "semantic": 0.91, "lexical": 0.44, "final": 0.84 },
+          "edge_decision": {
+            "lexical_gate_passed": true,
+            "reason_code": "EMBEDDING_LEXICAL_GATED",
+            "entity_overlap": 2,
+            "title_overlap": 1
+          }
+        }
+      ],
+      "reason_codes": ["EMBEDDING_LEXICAL_GATED", "CLUSTER_DEFAULT"]
+    },
+    "llm_sentence": "핵심 키워드와 상위 이웃 근거를 바탕으로 자동 배치되었습니다."
   }
 }
 ```
+주의:
+- 본문 원문/추출 텍스트는 포함하지 않음(PII-safe)
+- `evidence.neighbors`는 최대 3개, UI 기본 노출은 2~3개
+
+## POST /documents/{documentId}/explain/accept
+- 현재 자동 배치를 사용자가 수용(accept)했다는 피드백 이벤트를 기록
+- Response: `204 No Content`
 
 ---
 

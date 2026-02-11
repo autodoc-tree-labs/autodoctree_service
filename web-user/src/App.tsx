@@ -39,6 +39,25 @@ type ExplainResponse = {
     keywords?: string[];
     similar_docs?: Array<{ document_id: string; title: string; similarity: number }>;
     signals?: string[];
+    evidence?: {
+      neighbors?: Array<{
+        document_id: string;
+        title: string;
+        channel_scores?: {
+          semantic?: number | null;
+          lexical?: number | null;
+          final?: number | null;
+        };
+        edge_decision?: {
+          lexical_gate_passed?: boolean;
+          reason_code?: string;
+          entity_overlap?: number | null;
+          title_overlap?: number | null;
+        };
+      }>;
+      reason_codes?: string[];
+    };
+    llm_sentence?: string | null;
   };
 };
 
@@ -630,7 +649,10 @@ export default function App() {
     const [uploadFile, setUploadFile] = useState<File | null>(null);
     const [explain, setExplain] = useState<ExplainResponse | null>(null);
     const [explainError, setExplainError] = useState<UiError | null>(null);
+    const [explainNotice, setExplainNotice] = useState<UiNotice | null>(null);
     const [explainLoading, setExplainLoading] = useState(false);
+    const [acceptingExplain, setAcceptingExplain] = useState(false);
+    const [explainDrawerOpen, setExplainDrawerOpen] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [uploading, setUploading] = useState(false);
     const [documentError, setDocumentError] = useState<UiError | null>(null);
@@ -736,10 +758,34 @@ export default function App() {
       try {
         const payload = await api.request<ExplainResponse>(`/documents/${params.documentId}/explain`, {}, true);
         setExplain(payload);
+        setExplainDrawerOpen(true);
+        setExplainNotice(null);
       } catch (e) {
         setExplainError(toUiError(e, "설명 정보를 불러오지 못했습니다"));
       } finally {
         setExplainLoading(false);
+      }
+    }, [api, params.documentId]);
+
+    const acceptExplain = useCallback(async () => {
+      if (!params.documentId) {
+        return;
+      }
+      setAcceptingExplain(true);
+      setExplainError(null);
+      try {
+        await api.request<void>(
+          `/documents/${params.documentId}/explain/accept`,
+          {
+            method: "POST"
+          },
+          true
+        );
+        setExplainNotice({ tone: "success", message: "현재 자동 배치를 수용했습니다." });
+      } catch (e) {
+        setExplainError(toUiError(e, "설명 수용 처리에 실패했습니다"));
+      } finally {
+        setAcceptingExplain(false);
       }
     }, [api, params.documentId]);
 
@@ -761,6 +807,16 @@ export default function App() {
       }, 2000);
       return () => clearInterval(timer);
     }, [doc, loadDocument]);
+
+    const explainNeighbors = explain?.rationale?.evidence?.neighbors ?? [];
+    const explainReasonCodes = explain?.rationale?.evidence?.reason_codes ?? [];
+    const scorePercent = (value?: number | null): string => {
+      if (typeof value !== "number" || Number.isNaN(value)) {
+        return "0%";
+      }
+      const clamped = Math.max(0, Math.min(1, value));
+      return `${Math.round(clamped * 100)}%`;
+    };
 
     return (
       <Layout>
@@ -876,17 +932,27 @@ export default function App() {
           <div className="section-header-inline">
             <div>
               <h2 className="section-title">배치 설명</h2>
-              <p className="section-subtitle">문서가 특정 노드에 배치된 이유를 확인하세요.</p>
+              <p className="section-subtitle">이웃 근거와 사유 코드를 확인하고 바로 수용하거나 이동할 수 있습니다.</p>
             </div>
             <button
               className="btn btn-secondary"
               disabled={explainLoading}
-              onClick={() => void loadExplain()}
+              onClick={() => {
+                if (explain) {
+                  setExplainDrawerOpen(true);
+                  return;
+                }
+                void loadExplain();
+              }}
               type="button"
             >
-              {explainLoading ? "불러오는 중..." : explain ? "설명 새로고침" : "설명 불러오기"}
+              {explainLoading ? "불러오는 중..." : explain ? "왜 여기?" : "설명 불러오기"}
             </button>
           </div>
+          <p className="muted explain-summary">
+            최소 근거(이웃 2~3개, 채널 점수, 사유 코드)만 보여주며 본문 원문은 표시하지 않습니다.
+          </p>
+          <NoticePanel notice={explainNotice} />
           <ErrorPanel
             error={explainError}
             onRetry={() => {
@@ -894,55 +960,124 @@ export default function App() {
             }}
           />
 
-          {explain ? (
-            <div className="explain-grid">
-              <div className="explain-block">
-                <h3>키워드</h3>
-                {(explain.rationale?.keywords ?? []).length ? (
-                  <ul className="simple-list">
-                    {(explain.rationale?.keywords ?? []).map((keyword) => (
-                      <li key={keyword}>{keyword}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="muted">키워드 정보가 없습니다.</p>
-                )}
-              </div>
+          {explainDrawerOpen ? (
+            <div
+              className="explain-drawer-backdrop"
+              onClick={() => setExplainDrawerOpen(false)}
+              role="presentation"
+            >
+              <aside
+                className="explain-drawer"
+                onClick={(event) => event.stopPropagation()}
+                role="dialog"
+                aria-modal="true"
+                aria-label="배치 설명 상세"
+              >
+                <div className="explain-drawer-header">
+                  <h3>왜 여기에 배치됐나요?</h3>
+                  <div className="action-row">
+                    <button
+                      className="btn btn-ghost btn-small"
+                      disabled={explainLoading}
+                      onClick={() => void loadExplain()}
+                      type="button"
+                    >
+                      {explainLoading ? "새로고침 중..." : "새로고침"}
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-small"
+                      onClick={() => setExplainDrawerOpen(false)}
+                      type="button"
+                    >
+                      닫기
+                    </button>
+                  </div>
+                </div>
 
-              <div className="explain-block">
-                <h3>유사 문서</h3>
-                {(explain.rationale?.similar_docs ?? []).length ? (
-                  <ul className="simple-list">
-                    {(explain.rationale?.similar_docs ?? []).map((related) => (
-                      <li key={related.document_id}>
-                        <Link className="doc-link" to={`/documents/${related.document_id}`}>
-                          {related.title || related.document_id}
-                        </Link>{" "}
-                        ({related.similarity.toFixed(2)})
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="muted">유사 문서가 없습니다.</p>
-                )}
-              </div>
+                {explainLoading ? (
+                  <p className="muted">설명 데이터를 불러오는 중입니다...</p>
+                ) : explain ? (
+                  <div className="explain-drawer-body">
+                    <div className="explain-block">
+                      <h4>요약 문장</h4>
+                      <p className="muted">{explain.rationale?.llm_sentence ?? "요약 문장이 없습니다."}</p>
+                    </div>
 
-              <div className="explain-block">
-                <h3>신호</h3>
-                {(explain.rationale?.signals ?? []).length ? (
-                  <ul className="simple-list">
-                    {(explain.rationale?.signals ?? []).map((signal) => (
-                      <li key={signal}>{signal}</li>
-                    ))}
-                  </ul>
+                    <div className="explain-block">
+                      <h4>사유 코드</h4>
+                      {explainReasonCodes.length ? (
+                        <div className="explain-chip-row">
+                          {explainReasonCodes.map((code) => (
+                            <span className="explain-chip" key={code}>
+                              {code}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="muted">사유 코드가 없습니다.</p>
+                      )}
+                    </div>
+
+                    <div className="explain-block">
+                      <h4>근거 이웃</h4>
+                      {explainNeighbors.length ? (
+                        <ul className="neighbor-evidence-list">
+                          {explainNeighbors.map((neighbor) => {
+                            const scoreRows = [
+                              { label: "semantic", value: neighbor.channel_scores?.semantic },
+                              { label: "lexical", value: neighbor.channel_scores?.lexical },
+                              { label: "final", value: neighbor.channel_scores?.final }
+                            ];
+                            return (
+                              <li className="neighbor-evidence-item" key={neighbor.document_id}>
+                                <div className="neighbor-evidence-head">
+                                  <Link className="doc-link" to={`/documents/${neighbor.document_id}`}>
+                                    {neighbor.title || neighbor.document_id}
+                                  </Link>
+                                  <span className="score-pill">{neighbor.edge_decision?.reason_code ?? "UNKNOWN"}</span>
+                                </div>
+                                <div className="evidence-score-grid">
+                                  {scoreRows.map((row) => (
+                                    <div className="evidence-score-row" key={`${neighbor.document_id}-${row.label}`}>
+                                      <span>{row.label}</span>
+                                      <div className="evidence-score-track">
+                                        <div className="evidence-score-fill" style={{ width: scorePercent(row.value) }} />
+                                      </div>
+                                      <span className="evidence-score-value">
+                                        {typeof row.value === "number" ? row.value.toFixed(2) : "-"}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (
+                        <p className="muted">근거 이웃이 없습니다.</p>
+                      )}
+                    </div>
+
+                    <div className="action-row explain-drawer-actions">
+                      <button
+                        className="btn btn-primary"
+                        disabled={acceptingExplain}
+                        onClick={() => void acceptExplain()}
+                        type="button"
+                      >
+                        {acceptingExplain ? "수용 처리 중..." : "수용"}
+                      </button>
+                      <Link className="btn btn-secondary" onClick={() => setExplainDrawerOpen(false)} to="/tree">
+                        다른 폴더로 이동
+                      </Link>
+                    </div>
+                  </div>
                 ) : (
-                  <p className="muted">신호 정보가 없습니다.</p>
+                  <p className="muted">설명 데이터가 아직 없습니다.</p>
                 )}
-              </div>
+              </aside>
             </div>
-          ) : (
-            <p className="muted">설명 데이터가 아직 없습니다.</p>
-          )}
+          ) : null}
         </section>
       </Layout>
     );

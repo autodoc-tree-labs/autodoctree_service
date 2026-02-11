@@ -158,6 +158,12 @@ class TenantIsolationIntegrationTest {
             .andExpect(jsonPath("$.node_id").isEmpty)
 
         mockMvc.perform(
+            post("/api/v1/documents/$wsADocId/explain/accept")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsBId)
+        ).andExpect(status().isNotFound)
+
+        mockMvc.perform(
             post("/api/v1/attachments/presign")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("Authorization", "Bearer $tokenB")

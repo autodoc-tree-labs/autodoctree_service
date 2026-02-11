@@ -76,6 +76,8 @@ class TreeService(
     private val unsortedHubCounter = meterRegistry.counter("unsorted_reason_total", "reason", "HUB")
     private val unsortedConflictCounter = meterRegistry.counter("unsorted_reason_total", "reason", "CONFLICT")
     private val unsortedTemplateCounter = meterRegistry.counter("unsorted_reason_total", "reason", "TEMPLATE")
+    private val explainShownCounter = meterRegistry.counter("explain_shown_total")
+    private val explainAcceptCounter = meterRegistry.counter("explain_accept_total")
 
     @Transactional
     fun rebuildWorkspace(workspaceId: String, actorUserId: String? = null, manual: Boolean = false): TreeSnapshotRow {
@@ -480,6 +482,11 @@ class TreeService(
                 val node = labelToNode[label] ?: return@forEach
                 val keywords = treeLabeler.keywords(doc.title + " " + (doc.bodyText ?: ""), 5)
                 val similarDocs = findSimilarDocs(doc.id, embeddingByDocumentId, documentsById, 3)
+                val evidence = buildExplainEvidence(
+                    graph.adjacency[doc.id].orEmpty(),
+                    documentsById,
+                    limit = 3
+                )
                 val signals = buildSignals(
                     wasLocked = lockedLabelByDocument.containsKey(doc.id),
                     personalized = personalizedDocIds.contains(doc.id),
@@ -490,11 +497,12 @@ class TreeService(
                     keywords = keywords,
                     similarDocs = similarDocs,
                     signals = signals
-                )
+                ) ?: fallbackExplainSentence(keywords, signals, evidence)
                 val rationale = mapOf(
                     "keywords" to keywords,
                     "similar_docs" to similarDocs,
                     "signals" to signals,
+                    "evidence" to evidence,
                     "llm_sentence" to llmSentence
                 )
                 treeRepository.insertMembership(
@@ -687,14 +695,43 @@ class TreeService(
             "keywords" to emptyList<String>(),
             "similar_docs" to emptyList<Map<String, Any?>>(),
             "signals" to emptyList<String>(),
+            "evidence" to mapOf(
+                "neighbors" to emptyList<Map<String, Any?>>(),
+                "reason_codes" to emptyList<String>()
+            ),
             "llm_sentence" to null
         )
-        val rationale = membership?.let { parseRationale(it.rationaleJson) } ?: fallback
+        val rationale = (membership?.let { parseRationale(it.rationaleJson) } ?: fallback)
+            .let { normalizeExplainRationale(it) }
+        explainShownCounter.increment()
         return mapOf(
             "document_id" to documentId,
             "node_id" to membership?.nodeId,
             "rationale" to rationale
         )
+    }
+
+    @Transactional
+    fun acceptExplain(context: WorkspaceContext, documentId: String) {
+        val document = documentRepository.findByWorkspaceAndId(context.workspaceId, documentId) ?: throw NotFoundException()
+        val membership = treeRepository.findMembershipByWorkspaceAndDocument(context.workspaceId, document.id)
+        val rationale = membership?.let { parseRationale(it.rationaleJson) }.orEmpty()
+        val reasonCodes = rationale["signals"].safeStringList()
+        val payload = mapOf(
+            "document_id" to document.id,
+            "snapshot_id" to membership?.snapshotId,
+            "node_id" to membership?.nodeId,
+            "reason_codes" to reasonCodes,
+            "accepted_at" to System.currentTimeMillis()
+        )
+        feedbackRepository.insert(
+            context.workspaceId,
+            context.userId,
+            "EXPLAIN_ACCEPT",
+            objectMapper.writeValueAsString(payload)
+        )
+        auditService.write(context.workspaceId, context.userId, "feedback.explain_accept", payload)
+        explainAcceptCounter.increment()
     }
 
     fun debugNeighbors(workspaceId: String, documentId: String): Map<String, Any?> {
@@ -944,6 +981,142 @@ class TreeService(
         return signals
     }
 
+    private fun buildExplainEvidence(
+        neighbors: List<NeighborLink>,
+        documentsById: Map<String, DocumentRow>,
+        limit: Int
+    ): Map<String, Any?> {
+        val trimmedNeighbors = neighbors
+            .sortedByDescending { it.similarity }
+            .take(limit.coerceIn(2, 3))
+            .map { link ->
+                mapOf(
+                    "document_id" to link.documentId,
+                    "title" to (documentsById[link.documentId]?.title ?: link.documentId),
+                    "channel_scores" to mapOf(
+                        "semantic" to link.semanticSimilarity,
+                        "lexical" to link.lexicalSimilarity,
+                        "final" to link.similarity
+                    ),
+                    "edge_decision" to mapOf(
+                        "lexical_gate_passed" to link.lexicalGatePassed,
+                        "reason_code" to link.reason,
+                        "entity_overlap" to link.sharedEntityCount,
+                        "title_overlap" to link.titleOverlap
+                    )
+                )
+            }
+        val reasonCodes = trimmedNeighbors
+            .mapNotNull { neighbor ->
+                val decision = neighbor["edge_decision"] as? Map<*, *> ?: return@mapNotNull null
+                decision["reason_code"]?.toString()
+            }
+            .distinct()
+        return mapOf(
+            "neighbors" to trimmedNeighbors,
+            "reason_codes" to reasonCodes
+        )
+    }
+
+    private fun fallbackExplainSentence(
+        keywords: List<String>,
+        signals: List<String>,
+        evidence: Map<String, Any?>
+    ): String {
+        val reasonCodes = (evidence["reason_codes"] as? List<*>).orEmpty().mapNotNull { it?.toString() }
+        val reason = reasonCodes.firstOrNull()
+            ?: signals.firstOrNull()
+            ?: "CLUSTER_DEFAULT"
+        val keyword = keywords.firstOrNull() ?: "문서 주제"
+        val neighborCount = (evidence["neighbors"] as? List<*>)?.size ?: 0
+        return "$keyword 관련 이웃 ${neighborCount}건과 신호($reason)를 근거로 자동 배치되었습니다."
+    }
+
+    private fun normalizeExplainRationale(raw: Map<String, Any?>): Map<String, Any?> {
+        val keywords = raw["keywords"].safeStringList().take(5)
+        val similarDocs = (raw["similar_docs"] as? List<*>).orEmpty().mapNotNull { item ->
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            val documentId = map["document_id"]?.toString() ?: return@mapNotNull null
+            mapOf(
+                "document_id" to documentId,
+                "title" to (map["title"]?.toString() ?: documentId),
+                "similarity" to (map["similarity"] as? Number)?.toDouble()
+            )
+        }.take(3)
+        val signals = raw["signals"].safeStringList().take(5)
+        val normalizedEvidence = normalizeExplainEvidence(raw["evidence"], similarDocs, signals)
+        val llmSentence = raw["llm_sentence"]?.toString()?.takeIf { it.isNotBlank() }
+            ?: fallbackExplainSentence(keywords, signals, normalizedEvidence)
+        return mapOf(
+            "keywords" to keywords,
+            "similar_docs" to similarDocs,
+            "signals" to signals,
+            "evidence" to normalizedEvidence,
+            "llm_sentence" to llmSentence
+        )
+    }
+
+    private fun normalizeExplainEvidence(
+        raw: Any?,
+        similarDocs: List<Map<String, Any?>>,
+        signals: List<String>
+    ): Map<String, Any?> {
+        val asMap = raw as? Map<*, *>
+        val neighbors = (asMap?.get("neighbors") as? List<*>).orEmpty().mapNotNull { item ->
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            val documentId = map["document_id"]?.toString() ?: return@mapNotNull null
+            val channelScores = map["channel_scores"] as? Map<*, *>
+            val decision = map["edge_decision"] as? Map<*, *>
+            mapOf(
+                "document_id" to documentId,
+                "title" to (map["title"]?.toString() ?: documentId),
+                "channel_scores" to mapOf(
+                    "semantic" to (channelScores?.get("semantic") as? Number)?.toDouble(),
+                    "lexical" to (channelScores?.get("lexical") as? Number)?.toDouble(),
+                    "final" to (channelScores?.get("final") as? Number)?.toDouble()
+                ),
+                "edge_decision" to mapOf(
+                    "lexical_gate_passed" to ((decision?.get("lexical_gate_passed") as? Boolean) ?: false),
+                    "reason_code" to (decision?.get("reason_code")?.toString() ?: "UNKNOWN"),
+                    "entity_overlap" to (decision?.get("entity_overlap") as? Number)?.toInt(),
+                    "title_overlap" to (decision?.get("title_overlap") as? Number)?.toInt()
+                )
+            )
+        }.take(3)
+        val fallbackNeighbors = similarDocs.take(2).map { similar ->
+            mapOf(
+                "document_id" to similar["document_id"],
+                "title" to similar["title"],
+                "channel_scores" to mapOf(
+                    "semantic" to similar["similarity"],
+                    "lexical" to null,
+                    "final" to similar["similarity"]
+                ),
+                "edge_decision" to mapOf(
+                    "lexical_gate_passed" to false,
+                    "reason_code" to "SIMILAR_DOC_FALLBACK",
+                    "entity_overlap" to null,
+                    "title_overlap" to null
+                )
+            )
+        }
+        val finalNeighbors = if (neighbors.isNotEmpty()) neighbors else fallbackNeighbors
+        val reasonCodes = ((asMap?.get("reason_codes") as? List<*>).orEmpty().mapNotNull { it?.toString() }
+            .ifEmpty {
+                finalNeighbors.mapNotNull { neighbor ->
+                    val decision = neighbor["edge_decision"] as? Map<*, *> ?: return@mapNotNull null
+                    decision["reason_code"]?.toString()
+                }
+            }
+            .ifEmpty { signals })
+            .distinct()
+            .take(5)
+        return mapOf(
+            "neighbors" to finalNeighbors,
+            "reason_codes" to reasonCodes
+        )
+    }
+
     private fun parseRationale(json: String): Map<String, Any?> {
         return runCatching {
             val raw = objectMapper.readValue(json, Map::class.java) as Map<*, *>
@@ -953,6 +1126,10 @@ class TreeService(
                 "keywords" to emptyList<String>(),
                 "similar_docs" to emptyList<Map<String, Any?>>(),
                 "signals" to emptyList<String>(),
+                "evidence" to mapOf(
+                    "neighbors" to emptyList<Map<String, Any?>>(),
+                    "reason_codes" to emptyList<String>()
+                ),
                 "llm_sentence" to null
             )
         }

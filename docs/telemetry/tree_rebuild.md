@@ -62,6 +62,8 @@ tree_rebuild_stage {event=tree_rebuild_stage, workspace_id=ws_1, stage=graph, du
 - `tree.neighbor_builder.lexical_token_count`
 - `tree.neighbor_builder.tfidf_compute`
 - `tree.neighbor_builder.lexical_gate_pass_rate`
+- `explain_shown_total`
+- `explain_accept_total`
 
 기존 호환 메트릭도 유지:
 - `tree_rebuild_duration_ms`

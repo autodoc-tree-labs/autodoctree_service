@@ -1,6 +1,7 @@
 package com.autodoctree.api.integration
 
 import com.autodoctree.api.db.DocumentRepository
+import com.autodoctree.api.db.FeedbackRepository
 import com.autodoctree.api.db.PipelineStatusRepository
 import com.autodoctree.api.db.TreeRepository
 import com.autodoctree.api.db.UserRepository
@@ -60,6 +61,9 @@ class TreeAdminDebugIntegrationTest {
     @Autowired
     private lateinit var treeService: TreeService
 
+    @Autowired
+    private lateinit var feedbackRepository: FeedbackRepository
+
     private lateinit var ownerId: String
     private lateinit var workspaceId: String
     private lateinit var token: String
@@ -118,6 +122,35 @@ class TreeAdminDebugIntegrationTest {
             .andExpect(jsonPath("$.neighbors[0].neighbor_doc_id").exists())
             .andExpect(jsonPath("$.neighbors[0].channel_scores.final").exists())
             .andExpect(jsonPath("$.neighbors[0].edge_decision.reason").exists())
+    }
+
+    @Test
+    fun `document explain endpoint returns minimal evidence contract`() {
+        mockMvc.perform(
+            get("/api/v1/documents/$debugDocId/explain")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.document_id").value(debugDocId))
+            .andExpect(jsonPath("$.rationale.evidence.neighbors").isArray)
+            .andExpect(jsonPath("$.rationale.evidence.reason_codes").isArray)
+            .andExpect(jsonPath("$.rationale.llm_sentence").exists())
+            .andExpect(jsonPath("$.rationale.body_text").doesNotExist())
+    }
+
+    @Test
+    fun `accept explain writes feedback event`() {
+        mockMvc.perform(
+            post("/api/v1/documents/$debugDocId/explain/accept")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isNoContent)
+
+        val accepted = feedbackRepository.listByWorkspace(workspaceId, 50).any { event ->
+            event.eventType == "EXPLAIN_ACCEPT" &&
+                objectMapper.readTree(event.payloadJson).path("document_id").asText() == debugDocId
+        }
+        assertTrue(accepted, "Expected EXPLAIN_ACCEPT feedback event for doc=$debugDocId")
     }
 
     @Test
