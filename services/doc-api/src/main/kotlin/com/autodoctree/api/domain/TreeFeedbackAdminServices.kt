@@ -5,6 +5,7 @@ import com.autodoctree.api.config.TreeProperties
 import com.autodoctree.api.db.AuditLogRepository
 import com.autodoctree.api.db.DocumentRow
 import com.autodoctree.api.db.DocumentRepository
+import com.autodoctree.api.db.DocumentSectionRepository
 import com.autodoctree.api.db.EmbeddingRow
 import com.autodoctree.api.db.EmbeddingRepository
 import com.autodoctree.api.db.FeedbackRepository
@@ -23,6 +24,7 @@ import com.autodoctree.api.infra.requireOwner
 import com.autodoctree.api.llm.LlmTextGenerator
 import com.autodoctree.api.tenant.WorkspaceContext
 import com.autodoctree.api.worker.EmbeddingProvider
+import com.autodoctree.api.worker.EmbeddingQualityScorer
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Statistic
@@ -37,6 +39,7 @@ import kotlin.math.sqrt
 @Service
 class TreeService(
     private val documentRepository: DocumentRepository,
+    private val documentSectionRepository: DocumentSectionRepository,
     private val embeddingRepository: EmbeddingRepository,
     private val treeRepository: TreeRepository,
     private val feedbackRepository: FeedbackRepository,
@@ -53,6 +56,8 @@ class TreeService(
     private val treePersonalizationEngine: TreePersonalizationEngine,
     private val userRuleMatcher: UserRuleMatcher,
     private val embeddingProvider: EmbeddingProvider,
+    private val embeddingAggregationService: EmbeddingAggregationService,
+    private val embeddingQualityScorer: EmbeddingQualityScorer,
     private val llmTextGenerator: LlmTextGenerator,
     private val rebuildDebounceQueue: RebuildDebounceQueue,
     private val treeTelemetry: TreeTelemetry,
@@ -110,9 +115,7 @@ class TreeService(
             )
 
             val embedStartedAt = System.nanoTime()
-            val embeddingByDocumentId = embeddingRepository
-                .listDocEmbeddings(workspaceId, embeddingProvider.modelVersion())
-                .associateBy { it.documentId }
+            val embeddingByDocumentId = loadTreeEmbeddings(workspaceId, documents)
             treeTelemetry.recordStage(
                 trace = trace,
                 stage = "embed",
@@ -669,9 +672,7 @@ class TreeService(
         val documents = documentRepository.listWorkspaceDocuments(workspaceId)
         val source = documents.firstOrNull { it.id == documentId } ?: throw NotFoundException()
         val documentsById = documents.associateBy { it.id }
-        val embeddings = embeddingRepository
-            .listDocEmbeddings(workspaceId, embeddingProvider.modelVersion())
-            .associateBy { it.documentId }
+        val embeddings = loadTreeEmbeddings(workspaceId, documents)
         if (documents.size <= 1) {
             return mapOf(
                 "document_id" to source.id,
@@ -715,9 +716,7 @@ class TreeService(
         val documents = documentRepository.listWorkspaceDocuments(workspaceId)
         val source = documents.firstOrNull { it.id == documentId } ?: throw NotFoundException()
         val documentsById = documents.associateBy { it.id }
-        val embeddings = embeddingRepository
-            .listDocEmbeddings(workspaceId, embeddingProvider.modelVersion())
-            .associateBy { it.documentId }
+        val embeddings = loadTreeEmbeddings(workspaceId, documentRepository.listWorkspaceDocuments(workspaceId))
         val graph = neighborBuilder.build(
             workspaceId = workspaceId,
             documents = documents,
@@ -775,10 +774,9 @@ class TreeService(
             throw NotFoundException()
         }
         val memberships = treeRepository.listMemberships(workspaceId, active.id).filter { it.nodeId == clusterId }
-        val documentsById = documentRepository.listWorkspaceDocuments(workspaceId).associateBy { it.id }
-        val embeddings = embeddingRepository
-            .listDocEmbeddings(workspaceId, embeddingProvider.modelVersion())
-            .associateBy { it.documentId }
+        val documents = documentRepository.listWorkspaceDocuments(workspaceId)
+        val documentsById = documents.associateBy { it.id }
+        val embeddings = loadTreeEmbeddings(workspaceId, documents)
         val memberIds = memberships.map { it.documentId }
         val vectorsByDoc = memberIds.associateWith { memberId ->
             embeddings[memberId]?.let { embedding ->
@@ -988,6 +986,33 @@ class TreeService(
                 )
             }
             .distinctBy { "${it.ruleType}::${it.ruleValue}::${it.targetLabel}" }
+    }
+
+    private fun loadTreeEmbeddings(workspaceId: String, documents: List<DocumentRow>): Map<String, EmbeddingRow> {
+        if (documents.isEmpty()) {
+            return emptyMap()
+        }
+        val modelVersion = embeddingProvider.modelVersion()
+        val rows = embeddingRepository.listByWorkspaceAndModel(workspaceId, modelVersion)
+        if (rows.isEmpty()) {
+            return emptyMap()
+        }
+        val qualityByDocument = documents.associate { document ->
+            val sections = documentSectionRepository.listByWorkspaceAndDocument(workspaceId, document.id)
+            val quality = embeddingQualityScorer.score(
+                bodyText = document.bodyText ?: document.bodyMarkdown ?: "",
+                sections = sections
+            )
+            document.id to EmbeddingQualityWeights(
+                body = quality.bodyWeight(),
+                section = quality.sectionWeight()
+            )
+        }
+        return embeddingAggregationService.aggregateForTree(
+            embeddings = rows,
+            treeProperties = treeProperties,
+            qualityByDocument = qualityByDocument
+        )
     }
 
     private fun parseLabelCache(labelCacheJson: String?): Map<String, String> {

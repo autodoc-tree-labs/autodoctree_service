@@ -84,6 +84,9 @@ data class TreeProperties(
     val fusionSemanticWeight: Double,
     val fusionLexicalWeight: Double,
     val fusionLexicalGate: Double,
+    val embeddingDocumentWeight: Double = 0.65,
+    val embeddingSummaryWeight: Double = 0.25,
+    val embeddingSectionWeight: Double = 0.10,
     val otherClusterScoreThreshold: Double
 )
 

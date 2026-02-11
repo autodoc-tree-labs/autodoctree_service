@@ -17,7 +17,7 @@ class EmbeddingInputPreprocessor(
 ) {
     fun buildPayloads(document: DocumentRow, sections: List<SectionRow>): List<EmbeddingPayload> {
         val payloads = mutableListOf<EmbeddingPayload>()
-        val canonicalBody = normalizeText(document.bodyText ?: document.bodyMarkdown ?: "")
+        val canonicalBody = denoiseBody(normalizeText(document.bodyText ?: document.bodyMarkdown ?: ""))
         val normalizedTitle = normalizeText(document.title)
         val headingPart = sections
             .asSequence()
@@ -28,7 +28,13 @@ class EmbeddingInputPreprocessor(
             .take(embeddingProperties.input.sectionHeadingLimit.coerceAtLeast(1))
             .joinToString(" ")
 
-        val documentInput = truncate(
+        payloads += EmbeddingPayload(
+            targetType = "TITLE",
+            targetId = document.id,
+            text = truncate("title: $normalizedTitle")
+        )
+
+        val bodySummaryInput = truncate(
             listOf(
                 "title: $normalizedTitle",
                 if (headingPart.isBlank()) null else "headings: $headingPart",
@@ -36,25 +42,13 @@ class EmbeddingInputPreprocessor(
             ).filterNotNull().joinToString("\n")
         )
         payloads += EmbeddingPayload(
-            targetType = "DOCUMENT",
+            targetType = "BODY_SUMMARY",
             targetId = document.id,
-            text = documentInput
-        )
-
-        val summaryInput = truncate(
-            listOf(
-                "title: $normalizedTitle",
-                if (headingPart.isBlank()) null else "headings: $headingPart",
-                summarizeBody(canonicalBody.take(1200))
-            ).filterNotNull().joinToString("\n")
-        )
-        payloads += EmbeddingPayload(
-            targetType = "SUMMARY",
-            targetId = document.id,
-            text = summaryInput
+            text = bodySummaryInput
         )
 
         sections
+            .filterNot { isNoisySection(it) }
             .take(embeddingProperties.input.sectionCountLimit.coerceAtLeast(1))
             .forEach { section ->
                 val sectionText = truncate(
@@ -99,5 +93,29 @@ class EmbeddingInputPreprocessor(
             .replace(Regex("\\s+"), " ")
             .trim()
     }
-}
 
+    private fun denoiseBody(body: String): String {
+        if (body.isBlank()) {
+            return body
+        }
+        val lines = body.lines().map { it.trim() }.filter { it.isNotBlank() }
+        if (lines.isEmpty()) {
+            return ""
+        }
+        val counts = lines.groupingBy { it }.eachCount()
+        val filtered = lines.filter { line ->
+            val repeated = (counts[line] ?: 0) >= 4 && line.length <= 80
+            !repeated
+        }
+        return filtered.joinToString(" ")
+    }
+
+    private fun isNoisySection(section: SectionRow): Boolean {
+        val flags = section.qualityFlags
+            ?.split(',')
+            ?.map { it.trim().uppercase() }
+            ?.toSet()
+            ?: emptySet()
+        return flags.contains("GIBBERISH") || flags.contains("ZERO_LENGTH")
+    }
+}

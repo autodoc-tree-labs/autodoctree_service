@@ -9,6 +9,7 @@ import com.autodoctree.api.db.OutboxEventRow
 import com.autodoctree.api.db.OutboxRepository
 import com.autodoctree.api.db.PipelineStatusRepository
 import com.autodoctree.api.db.StageExecutionRepository
+import com.autodoctree.api.domain.EmbeddingAggregationService
 import com.autodoctree.api.domain.RebuildDebounceQueue
 import com.autodoctree.api.domain.TreeService
 import com.autodoctree.api.infra.sha256
@@ -39,6 +40,8 @@ class OutboxWorker(
     private val embeddingRepository: EmbeddingRepository,
     private val embeddingProvider: EmbeddingProvider,
     private val embeddingInputPreprocessor: EmbeddingInputPreprocessor,
+    private val embeddingQualityScorer: EmbeddingQualityScorer,
+    private val embeddingAggregationService: EmbeddingAggregationService,
     private val tenantSearchClient: TenantSearchClient,
     private val treeService: TreeService,
     private val rebuildDebounceQueue: RebuildDebounceQueue,
@@ -241,7 +244,19 @@ class OutboxWorker(
             val latestDocument = documentRepository.findByWorkspaceAndId(workspaceId, documentId) ?: document
             val sections = documentSectionRepository.listByWorkspaceAndDocument(workspaceId, documentId)
             val modelVersion = embeddingProvider.modelVersion()
-            val payloads = embeddingInputPreprocessor.buildPayloads(latestDocument, sections)
+            val qualityScore = embeddingQualityScorer.score(
+                bodyText = latestDocument.bodyText ?: latestDocument.bodyMarkdown ?: "",
+                sections = sections
+            )
+            val payloads = embeddingInputPreprocessor
+                .buildPayloads(latestDocument, sections)
+                .filter { payload ->
+                    when (payload.targetType.uppercase()) {
+                        "BODY_SUMMARY" -> qualityScore.qBody >= 0.20
+                        "SECTION" -> qualityScore.qLayout >= 0.15
+                        else -> true
+                    }
+                }
             val payloadHashes = payloads.associate { payload ->
                 payload to sha256(payload.text + "|" + modelVersion)
             }
@@ -283,6 +298,47 @@ class OutboxWorker(
                         )
                     }
                 }
+
+                val latestEmbeddings = embeddingRepository
+                    .listByWorkspaceAndModel(workspaceId, modelVersion)
+                    .filter { row ->
+                        row.documentId == documentId && row.targetType.equals("SECTION", ignoreCase = true)
+                    }
+                if (latestEmbeddings.isNotEmpty()) {
+                    val vectors = latestEmbeddings.mapNotNull { row ->
+                        runCatching {
+                            objectMapper.readValue(row.vectorJson, List::class.java)
+                                .mapNotNull { value -> (value as? Number)?.toDouble() }
+                        }.getOrNull()
+                    }
+                    val centroid = embeddingAggregationService.centroidForSections(vectors)
+                    if (centroid.isNotEmpty()) {
+                        val centroidHash = sha256(
+                            latestEmbeddings
+                                .sortedBy { it.targetId }
+                                .joinToString("|") { "${it.targetId}:${it.inputHash}" } + "|SECTION_CENTROID"
+                        )
+                        embeddingRepository.upsert(
+                            workspaceId = workspaceId,
+                            documentId = documentId,
+                            targetType = "SECTION_CENTROID",
+                            targetId = documentId,
+                            inputHash = centroidHash,
+                            vectorJson = objectMapper.writeValueAsString(centroid),
+                            modelVersion = modelVersion
+                        )
+                    }
+                }
+
+                logger.info(
+                    "embedding_quality_summary workspace_id={} document_id={} q_body={} q_layout={} q_ocr={} payload_count={}",
+                    workspaceId,
+                    documentId,
+                    String.format("%.3f", qualityScore.qBody),
+                    String.format("%.3f", qualityScore.qLayout),
+                    String.format("%.3f", qualityScore.qOcr),
+                    payloads.size
+                )
             }
         }
 

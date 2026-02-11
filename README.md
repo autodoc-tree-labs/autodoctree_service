@@ -42,6 +42,7 @@ Optional one-shot preload profile:
 ```bash
 docker compose --profile llm --profile llm-init up ollama-init
 ```
+임베딩은 `TITLE`, `BODY_SUMMARY`, `SECTION`, `SECTION_CENTROID` 채널로 저장되고 트리 리빌드 시 가중 결합됩니다.
 
 Optional local observability stack:
 ```bash

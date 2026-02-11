@@ -111,6 +111,8 @@ Important flags:
 - `feature.admin-tree-debug`
 - `security.os-tenant-assert`
 - `TREE_NEIGHBOR_MIN_SIMILARITY` (기본 `0.8`, 값이 높을수록 트리 노드가 더 잘 분리됨)
+- `TREE_EMBEDDING_DOCUMENT_WEIGHT` / `TREE_EMBEDDING_SUMMARY_WEIGHT` / `TREE_EMBEDDING_SECTION_WEIGHT`
+  - 채널별 임베딩 결합 가중치(TITLE, BODY_SUMMARY, SECTION_CENTROID)
 
 관리자 트리 디버그/룰 기능을 로컬에서 켜려면:
 ```bash

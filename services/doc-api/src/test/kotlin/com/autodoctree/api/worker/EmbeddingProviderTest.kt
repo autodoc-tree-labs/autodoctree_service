@@ -68,7 +68,7 @@ class EmbeddingProviderTest {
         val second = preprocessor.buildPayloads(doc, sections)
 
         assertEquals(first, second)
-        assertEquals(listOf("DOCUMENT", "SUMMARY", "SECTION", "SECTION"), first.map { it.targetType })
+        assertEquals(listOf("TITLE", "BODY_SUMMARY", "SECTION", "SECTION"), first.map { it.targetType })
         assertTrue(first.all { it.text.length <= 180 })
         assertTrue(first.first().text.contains("title: 과학 연구 문서"))
     }
