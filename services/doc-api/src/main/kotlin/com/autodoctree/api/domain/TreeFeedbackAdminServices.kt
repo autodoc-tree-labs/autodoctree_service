@@ -86,6 +86,7 @@ class TreeService(
     private val recommendRatioSummary = meterRegistry.summary("recommend_ratio")
     private val explainShownCounter = meterRegistry.counter("explain_shown_total")
     private val explainAcceptCounter = meterRegistry.counter("explain_accept_total")
+    private val unsortedReasonCodes = setOf("LOW_CONFIDENCE", "HUB", "CONFLICT", "TEMPLATE", "RECOMMEND")
 
     private data class AssignmentPolicy(
         val autoThreshold: Double,
@@ -690,22 +691,36 @@ class TreeService(
         val nodes = treeRepository.listNodes(context.workspaceId, active.id)
         val memberships = treeRepository.listMemberships(context.workspaceId, active.id)
         val documentsById = documentRepository.listWorkspaceDocuments(context.workspaceId).associateBy { it.id }
-        val docsByNode = memberships.groupBy { it.nodeId }.mapValues { it.value.map(TreeMembershipRow::documentId) }
+        val membershipsByNode = memberships.groupBy { it.nodeId }
+        val membershipByDocumentId = memberships.associateBy { it.documentId }
+        val nodeById = nodes.associateBy { it.id }
+        val nodeDocumentCount = membershipsByNode.mapValues { it.value.size }
         return mapOf(
             "snapshot_id" to active.id,
             "status" to active.status,
             "nodes" to nodes.map {
-                val nodeDocumentIds = docsByNode[it.id] ?: emptyList<String>()
+                val nodeMemberships = membershipsByNode[it.id].orEmpty()
+                val nodeDocumentIds = nodeMemberships.map(TreeMembershipRow::documentId)
                 mapOf(
                     "id" to it.id,
                     "parent_id" to it.parentId,
                     "label" to it.label,
                     "locked" to it.locked,
                     "documents" to nodeDocumentIds,
-                    "document_summaries" to nodeDocumentIds.map { documentId ->
+                    "document_summaries" to nodeMemberships.map { membership ->
+                        val rationale = parseRationale(membership.rationaleJson)
                         mapOf(
-                            "id" to documentId,
-                            "title" to (documentsById[documentId]?.title ?: documentId)
+                            "id" to membership.documentId,
+                            "title" to (documentsById[membership.documentId]?.title ?: membership.documentId),
+                            "quarantine_reason" to resolveQuarantineReason(rationale),
+                            "placement_confidence" to resolvePlacementConfidence(rationale),
+                            "placement_candidates" to buildPlacementCandidates(
+                                rationale = rationale,
+                                membershipByDocumentId = membershipByDocumentId,
+                                nodeById = nodeById,
+                                nodeDocumentCount = nodeDocumentCount,
+                                currentNodeId = membership.nodeId
+                            )
                         )
                     }
                 )
@@ -1200,6 +1215,119 @@ class TreeService(
         )
     }
 
+    private fun resolveQuarantineReason(rationale: Map<String, Any?>): String? {
+        val ordered = linkedSetOf<String>()
+        rationale["signals"]
+            .safeStringList()
+            .map { it.trim().uppercase() }
+            .forEach { ordered += it }
+        val reasonCodes = ((rationale["evidence"] as? Map<*, *>)?.get("reason_codes") as? List<*>).orEmpty()
+            .mapNotNull { value -> value?.toString()?.trim()?.uppercase() }
+        reasonCodes.forEach { ordered += it }
+        return ordered.firstOrNull { it in unsortedReasonCodes }
+    }
+
+    private fun resolvePlacementConfidence(rationale: Map<String, Any?>): Double? {
+        val neighbors = ((rationale["evidence"] as? Map<*, *>)?.get("neighbors") as? List<*>).orEmpty()
+        val neighborScores = neighbors.mapNotNull { item ->
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            val channelScores = map["channel_scores"] as? Map<*, *> ?: return@mapNotNull null
+            ((channelScores["final"] as? Number)?.toDouble()
+                ?: (channelScores["semantic"] as? Number)?.toDouble()
+                ?: (channelScores["lexical"] as? Number)?.toDouble())
+                ?.coerceIn(0.0, 1.0)
+        }.sortedDescending()
+
+        if (neighborScores.isNotEmpty()) {
+            val top1 = neighborScores[0]
+            val top2 = neighborScores.getOrNull(1) ?: 0.0
+            val margin = (top1 - top2).coerceIn(0.0, 1.0)
+            return ((top1 * 0.7) + (margin * 0.3)).coerceIn(0.0, 1.0)
+        }
+
+        val similarScore = (rationale["similar_docs"] as? List<*>)
+            .orEmpty()
+            .firstNotNullOfOrNull { item ->
+                val map = item as? Map<*, *> ?: return@firstNotNullOfOrNull null
+                (map["similarity"] as? Number)?.toDouble()
+            }
+        return similarScore?.coerceIn(0.0, 1.0)
+    }
+
+    private fun buildPlacementCandidates(
+        rationale: Map<String, Any?>,
+        membershipByDocumentId: Map<String, TreeMembershipRow>,
+        nodeById: Map<String, TreeNodeRow>,
+        nodeDocumentCount: Map<String, Int>,
+        currentNodeId: String
+    ): List<Map<String, Any?>> {
+        val scoreByNode = mutableMapOf<String, Double>()
+        val labelByNode = mutableMapOf<String, String>()
+
+        fun addCandidate(nodeId: String, label: String, score: Double, weight: Double) {
+            if (nodeId == currentNodeId || !isPlacementCandidateLabel(label)) {
+                return
+            }
+            val bounded = (score.coerceIn(0.0, 1.0) * weight).coerceIn(0.0, 1.0)
+            if (bounded <= 0.0) {
+                return
+            }
+            scoreByNode[nodeId] = (scoreByNode[nodeId] ?: 0.0) + bounded
+            labelByNode.putIfAbsent(nodeId, label)
+        }
+
+        val evidenceNeighbors = ((rationale["evidence"] as? Map<*, *>)?.get("neighbors") as? List<*>).orEmpty()
+        evidenceNeighbors.forEach { item ->
+            val map = item as? Map<*, *> ?: return@forEach
+            val neighborDocumentId = map["document_id"]?.toString() ?: return@forEach
+            val neighborMembership = membershipByDocumentId[neighborDocumentId] ?: return@forEach
+            val neighborNode = nodeById[neighborMembership.nodeId] ?: return@forEach
+            val channelScores = map["channel_scores"] as? Map<*, *>
+            val score = (channelScores?.get("final") as? Number)?.toDouble()
+                ?: (channelScores?.get("semantic") as? Number)?.toDouble()
+                ?: (channelScores?.get("lexical") as? Number)?.toDouble()
+                ?: 0.0
+            addCandidate(neighborNode.id, neighborNode.label, score, 1.0)
+        }
+
+        val similarDocs = (rationale["similar_docs"] as? List<*>).orEmpty()
+        similarDocs.forEach { item ->
+            val map = item as? Map<*, *> ?: return@forEach
+            val neighborDocumentId = map["document_id"]?.toString() ?: return@forEach
+            val neighborMembership = membershipByDocumentId[neighborDocumentId] ?: return@forEach
+            val neighborNode = nodeById[neighborMembership.nodeId] ?: return@forEach
+            val score = (map["similarity"] as? Number)?.toDouble() ?: 0.0
+            addCandidate(neighborNode.id, neighborNode.label, score, 0.85)
+        }
+
+        if (scoreByNode.isEmpty()) {
+            val fallbackNodes = nodeById.values
+                .asSequence()
+                .filter { node -> node.id != currentNodeId && node.depth >= 1 && isPlacementCandidateLabel(node.label) }
+                .sortedWith(compareByDescending<TreeNodeRow> { nodeDocumentCount[it.id] ?: 0 }.thenBy { it.label })
+                .take(3)
+                .toList()
+            val maxCount = fallbackNodes.maxOfOrNull { nodeDocumentCount[it.id] ?: 0 }?.coerceAtLeast(1) ?: 1
+            fallbackNodes.forEach { node ->
+                val base = ((nodeDocumentCount[node.id] ?: 0).toDouble() / maxCount.toDouble()).coerceIn(0.0, 1.0)
+                val score = base.coerceIn(0.05, 0.60)
+                scoreByNode[node.id] = score
+                labelByNode[node.id] = node.label
+            }
+        }
+
+        return scoreByNode.entries
+            .sortedWith(compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { labelByNode[it.key] ?: it.key })
+            .take(3)
+            .map { (nodeId, score) ->
+                mapOf(
+                    "node_id" to nodeId,
+                    "label" to (labelByNode[nodeId] ?: nodeId),
+                    "score" to (kotlin.math.round(score.coerceIn(0.0, 1.0) * 1000.0) / 1000.0)
+                )
+            }
+    }
+
     private fun parseRationale(json: String): Map<String, Any?> {
         return runCatching {
             val raw = objectMapper.readValue(json, Map::class.java) as Map<*, *>
@@ -1527,6 +1655,14 @@ class TreeService(
         return label.equals("general", ignoreCase = true) || label.equals("unsorted", ignoreCase = true)
     }
 
+    private fun isPlacementCandidateLabel(label: String): Boolean {
+        val normalized = label.trim().lowercase()
+        if (normalized.isBlank()) {
+            return false
+        }
+        return normalized !in setOf("autodoc", "general", "unsorted")
+    }
+
     private data class TraceContextState(
         val generatedTraceId: Boolean,
         val generatedRequestId: Boolean
@@ -1574,11 +1710,15 @@ class FeedbackService(
     private val feedbackRepository: FeedbackRepository,
     private val outboxService: OutboxService,
     private val auditService: AuditService,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    private val meterRegistry: MeterRegistry
 ) {
+    private val moveCounter = meterRegistry.counter("feedback_move_total")
+
+    private val moveSourceAllowList = setOf("DRAG", "MANUAL", "QUICK_CONFIRM", "UNKNOWN")
 
     @Transactional
-    fun move(context: WorkspaceContext, documentId: String, fromNodeId: String?, toNodeId: String) {
+    fun move(context: WorkspaceContext, documentId: String, fromNodeId: String?, toNodeId: String, source: String?) {
         requireEditor(context)
         documentRepository.findByWorkspaceAndId(context.workspaceId, documentId) ?: throw NotFoundException()
         val toNode = treeRepository.findNodeByWorkspace(context.workspaceId, toNodeId) ?: throw NotFoundException()
@@ -1590,15 +1730,23 @@ class FeedbackService(
             }
         }
         treeRepository.moveDocumentInActiveSnapshot(context.workspaceId, documentId, toNode.id)
+        val sourceLabel = source
+            ?.trim()
+            ?.uppercase()
+            ?.takeIf { it in moveSourceAllowList }
+            ?: "UNKNOWN"
 
         val payload = mapOf(
             "event_id" to UUID.randomUUID().toString(),
             "document_id" to documentId,
             "from_node_id" to fromNodeId,
-            "to_node_id" to toNode.id
+            "to_node_id" to toNode.id,
+            "source" to sourceLabel
         )
         val payloadJson = objectMapper.writeValueAsString(payload)
         feedbackRepository.insert(context.workspaceId, context.userId, "MOVE", payloadJson)
+        moveCounter.increment()
+        meterRegistry.counter("feedback_move_source_total", "source", sourceLabel).increment()
         outboxService.enqueue(context.workspaceId, documentId, "FeedbackRecorded", payload)
         auditService.write(context.workspaceId, context.userId, "feedback.move", payload)
     }

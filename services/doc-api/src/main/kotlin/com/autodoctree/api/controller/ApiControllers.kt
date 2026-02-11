@@ -326,7 +326,7 @@ class FeedbackController(
         @Valid @RequestBody body: MoveRequest
     ): ResponseEntity<Void> {
         val context = workspaceContextResolver.resolve(request)
-        feedbackService.move(context, body.documentId, body.fromNodeId, body.toNodeId)
+        feedbackService.move(context, body.documentId, body.fromNodeId, body.toNodeId, body.source)
         return ResponseEntity.noContent().build()
     }
 
@@ -529,7 +529,8 @@ data class LockNodeRequest(
 data class MoveRequest(
     @field:NotBlank val documentId: String,
     val fromNodeId: String?,
-    @field:NotBlank val toNodeId: String
+    @field:NotBlank val toNodeId: String,
+    val source: String? = null
 )
 
 data class RenameRequest(

@@ -162,8 +162,25 @@ Response:
   "snapshot_id": "ts_1",
   "status": "ACTIVE",
   "nodes": [
-    { "id": "n_root", "parent_id": null, "label": "BSL", "locked": false },
-    { "id": "n_1", "parent_id": "n_root", "label": "OpenSearch", "locked": false }
+    {
+      "id": "n_1",
+      "parent_id": "n_root",
+      "label": "OpenSearch",
+      "locked": false,
+      "documents": ["doc_1"],
+      "document_summaries": [
+        {
+          "id": "doc_1",
+          "title": "Locking strategy",
+          "quarantine_reason": "LOW_CONFIDENCE",
+          "placement_confidence": 0.62,
+          "placement_candidates": [
+            { "node_id": "n_2", "label": "Distributed Lock", "score": 0.81 },
+            { "node_id": "n_5", "label": "Scheduler", "score": 0.74 }
+          ]
+        }
+      ]
+    }
   ]
 }
 ```
@@ -247,8 +264,15 @@ Response:
 # 8) Feedback
 ## POST /feedback/move
 ```json
-{ "document_id": "doc_1", "from_node_id": "n_1", "to_node_id": "n_2" }
+{
+  "document_id": "doc_1",
+  "from_node_id": "n_1",
+  "to_node_id": "n_2",
+  "source": "DRAG"
+}
 ```
+
+`source`는 선택 사항이며 `DRAG | MANUAL | QUICK_CONFIRM` 중 하나를 권장한다(미지정 시 서버가 `UNKNOWN` 처리).
 
 ## POST /feedback/rename
 ```json

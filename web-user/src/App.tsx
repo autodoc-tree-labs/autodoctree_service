@@ -16,6 +16,13 @@ type SearchResponse = { items: Array<{ document_id: string; title: string; score
 type TreeNodeDocumentSummary = {
   id: string;
   title: string;
+  quarantine_reason?: string | null;
+  placement_confidence?: number | null;
+  placement_candidates?: Array<{
+    node_id: string;
+    label: string;
+    score: number;
+  }>;
 };
 
 type TreeNode = {
@@ -30,6 +37,20 @@ type TreeActiveResponse = {
   snapshot_id: string | null;
   status: string;
   nodes: TreeNode[];
+};
+
+type TreeDocumentView = {
+  id: string;
+  title: string;
+  node_id: string;
+  node_label: string;
+  quarantine_reason: string | null;
+  placement_confidence: number | null;
+  placement_candidates: Array<{
+    node_id: string;
+    label: string;
+    score: number;
+  }>;
 };
 
 type ExplainResponse = {
@@ -89,6 +110,17 @@ const ROLE_TEXT: Record<string, string> = {
   OWNER: "소유자",
   MEMBER: "멤버",
   VIEWER: "조회자"
+};
+
+const TREE_INBOX_NODE_ID = "__virtual_inbox__";
+const TREE_TEMPLATES_NODE_ID = "__virtual_templates__";
+
+const REASON_TEXT: Record<string, string> = {
+  LOW_CONFIDENCE: "신뢰도 낮음",
+  HUB: "허브 문서",
+  CONFLICT: "혼합 신호",
+  TEMPLATE: "템플릿 의심",
+  RECOMMEND: "추천 검토"
 };
 
 const ERROR_MESSAGE_TEXT: Array<[string, string]> = [
@@ -159,6 +191,38 @@ const statusTone = (value: string): StatusTone => {
 const statusText = (value: string): string => STATUS_TEXT[value.trim().toUpperCase()] ?? value;
 
 const roleText = (value: string): string => ROLE_TEXT[value.trim().toUpperCase()] ?? value;
+
+const isUnsortedNodeLabel = (label: string): boolean => {
+  const normalized = label.trim().toLowerCase();
+  return normalized === "general" || normalized === "unsorted";
+};
+
+const reasonText = (value: string | null): string | null => {
+  if (!value) {
+    return null;
+  }
+  const normalized = value.trim().toUpperCase();
+  return REASON_TEXT[normalized] ?? normalized;
+};
+
+const toTreeDocumentView = (node: TreeNode, summary: TreeNodeDocumentSummary): TreeDocumentView => ({
+  id: summary.id,
+  title: summary.title || summary.id,
+  node_id: node.id,
+  node_label: node.label,
+  quarantine_reason: summary.quarantine_reason ?? null,
+  placement_confidence:
+    typeof summary.placement_confidence === "number" && !Number.isNaN(summary.placement_confidence)
+      ? Math.max(0, Math.min(1, summary.placement_confidence))
+      : null,
+  placement_candidates: (summary.placement_candidates ?? [])
+    .filter((candidate) => candidate.node_id && candidate.label)
+    .map((candidate) => ({
+      node_id: candidate.node_id,
+      label: candidate.label,
+      score: Number.isFinite(candidate.score) ? Math.max(0, Math.min(1, candidate.score)) : 0
+    }))
+});
 
 function StatusChip({ label, value }: { label: string; value: string }) {
   return <span className={`status-chip status-chip-${statusTone(value)}`}>{label}: {statusText(value)}</span>;
@@ -1167,7 +1231,18 @@ export default function App() {
       try {
         const payload = await api.request<TreeActiveResponse>("/tree/active", {}, true);
         setTree(payload);
-        setSelectedNode((prev) => prev ?? payload.nodes[0]?.id ?? null);
+        setSelectedNode((prev) => {
+          if (!prev) {
+            return TREE_INBOX_NODE_ID;
+          }
+          if (prev === TREE_INBOX_NODE_ID || prev === TREE_TEMPLATES_NODE_ID) {
+            return prev;
+          }
+          if (payload.nodes.some((node) => node.id === prev)) {
+            return prev;
+          }
+          return TREE_INBOX_NODE_ID;
+        });
         setTreeError(null);
       } catch (e) {
         setTreeNotice(null);
@@ -1176,7 +1251,7 @@ export default function App() {
     }, [api, state.workspaceId]);
 
     const moveDocument = useCallback(
-      async (documentId: string, fromNodeId: string | null, toNodeId: string) => {
+      async (documentId: string, fromNodeId: string | null, toNodeId: string, source: "DRAG" | "MANUAL" | "QUICK_CONFIRM" = "MANUAL") => {
         if (!tree) {
           return;
         }
@@ -1192,7 +1267,8 @@ export default function App() {
               body: JSON.stringify({
                 document_id: documentId,
                 from_node_id: fromNodeId,
-                to_node_id: toNodeId
+                to_node_id: toNodeId,
+                source
               })
             },
             true
@@ -1211,12 +1287,49 @@ export default function App() {
       void refreshTree();
     }, [refreshTree, state.workspaceId]);
 
-    const selected = tree?.nodes.find((n) => n.id === selectedNode);
-    const selectedDocuments: TreeNodeDocumentSummary[] = selected
-      ? selected.document_summaries && selected.document_summaries.length > 0
-        ? selected.document_summaries
-        : selected.documents.map((documentId) => ({ id: documentId, title: documentId }))
-      : [];
+    const allDocuments = useMemo<TreeDocumentView[]>(() => {
+      if (!tree) {
+        return [];
+      }
+      return tree.nodes.flatMap((node) => {
+        const summaries: TreeNodeDocumentSummary[] =
+          node.document_summaries && node.document_summaries.length > 0
+            ? node.document_summaries
+            : node.documents.map((documentId) => ({ id: documentId, title: documentId }));
+        return summaries.map((summary) => toTreeDocumentView(node, summary));
+      });
+    }, [tree]);
+
+    const templateDocuments = useMemo(
+      () => allDocuments.filter((document) => (document.quarantine_reason ?? "").toUpperCase() === "TEMPLATE"),
+      [allDocuments]
+    );
+
+    const inboxDocuments = useMemo(
+      () =>
+        allDocuments.filter((document) => {
+          const reason = (document.quarantine_reason ?? "").toUpperCase();
+          if (reason === "TEMPLATE") {
+            return false;
+          }
+          return Boolean(reason) || isUnsortedNodeLabel(document.node_label);
+        }),
+      [allDocuments]
+    );
+
+    const selected = tree?.nodes.find((n) => n.id === selectedNode) ?? null;
+    const selectedDocuments = useMemo<TreeDocumentView[]>(() => {
+      if (selectedNode === TREE_INBOX_NODE_ID) {
+        return inboxDocuments;
+      }
+      if (selectedNode === TREE_TEMPLATES_NODE_ID) {
+        return templateDocuments;
+      }
+      if (!selected) {
+        return [];
+      }
+      return allDocuments.filter((document) => document.node_id === selected.id);
+    }, [allDocuments, inboxDocuments, selected, selectedNode, templateDocuments]);
 
     return (
       <Layout>
@@ -1301,16 +1414,36 @@ export default function App() {
             <div className="panel panel-soft">
               <h2 className="section-title">노드</h2>
               <ul className="tree-node-list">
+                <li className="tree-node-item tree-node-item-virtual">
+                  <button
+                    className={`tree-node-button${selectedNode === TREE_INBOX_NODE_ID ? " is-selected" : ""}`}
+                    onClick={() => setSelectedNode(TREE_INBOX_NODE_ID)}
+                    type="button"
+                  >
+                    <span className="tree-node-label">Inbox (Unsorted)</span>
+                    <span className="tree-node-count">{inboxDocuments.length}</span>
+                  </button>
+                </li>
+                <li className="tree-node-item tree-node-item-virtual">
+                  <button
+                    className={`tree-node-button${selectedNode === TREE_TEMPLATES_NODE_ID ? " is-selected" : ""}`}
+                    onClick={() => setSelectedNode(TREE_TEMPLATES_NODE_ID)}
+                    type="button"
+                  >
+                    <span className="tree-node-label">Templates</span>
+                    <span className="tree-node-count">{templateDocuments.length}</span>
+                  </button>
+                </li>
                 {tree?.nodes.map((node) => (
                   <li
                     className="tree-node-item"
                     key={node.id}
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={async () => {
-                      if (!draggingDocId) {
+                      if (!draggingDocId || !dragSourceNodeId) {
                         return;
                       }
-                      await moveDocument(draggingDocId, dragSourceNodeId, node.id);
+                      await moveDocument(draggingDocId, dragSourceNodeId, node.id, "DRAG");
                       setDraggingDocId(null);
                       setDragSourceNodeId(null);
                     }}
@@ -1321,6 +1454,7 @@ export default function App() {
                       type="button"
                     >
                       <span className="tree-node-label">{node.parent_id ? `↳ ${node.label}` : node.label}</span>
+                      <span className="tree-node-count">{node.documents.length}</span>
                       {node.locked ? <span className="lock-badge">잠금</span> : null}
                     </button>
                     <button
@@ -1343,33 +1477,89 @@ export default function App() {
             </div>
 
             <div className="panel panel-soft">
-              <h2 className="section-title">선택 노드의 문서</h2>
+              <h2 className="section-title">
+                {selectedNode === TREE_INBOX_NODE_ID
+                  ? "Inbox (Unsorted)"
+                  : selectedNode === TREE_TEMPLATES_NODE_ID
+                    ? "Templates"
+                    : "선택 노드의 문서"}
+              </h2>
+              {selectedNode === TREE_INBOX_NODE_ID ? <p className="section-subtitle">유보 문서를 빠르게 확정하는 작업함입니다.</p> : null}
+              {selectedNode === TREE_TEMPLATES_NODE_ID ? <p className="section-subtitle">템플릿 의심 문서를 모아 검토합니다.</p> : null}
               {selected ? <p className="section-subtitle">노드: {selected.label}</p> : null}
-              <ul className="simple-list tree-doc-list">
-                {selectedDocuments.map((document) => (
-                  <li className="tree-doc-item" key={document.id}>
-                    <Link className="tree-doc-link" to={`/documents/${document.id}`}>
-                      <span className="drag-doc-title">{document.title}</span>
-                      {document.title !== document.id ? <span className="drag-doc-id">{document.id}</span> : null}
-                    </Link>
-                    <button
-                      className="btn btn-ghost btn-small"
-                      draggable
-                      onDragEnd={() => {
-                        setDraggingDocId(null);
-                        setDragSourceNodeId(null);
-                      }}
-                      onDragStart={() => {
-                        setDraggingDocId(document.id);
-                        setDragSourceNodeId(selectedNode);
-                      }}
-                      type="button"
-                    >
-                      드래그 이동
-                    </button>
-                  </li>
-                ))}
-              </ul>
+
+              {selectedDocuments.length === 0 ? (
+                <EmptyState
+                  title="문서가 없습니다"
+                  description={
+                    selectedNode === TREE_INBOX_NODE_ID
+                      ? "현재 유보된 문서가 없습니다."
+                      : selectedNode === TREE_TEMPLATES_NODE_ID
+                        ? "현재 템플릿 의심 문서가 없습니다."
+                        : "이 노드에 속한 문서가 없습니다."
+                  }
+                />
+              ) : (
+                <ul className="tree-doc-list">
+                  {selectedDocuments.map((document) => {
+                    const readableReason = reasonText(document.quarantine_reason);
+                    const quickCandidates = document.placement_candidates.filter((candidate) => candidate.node_id !== document.node_id);
+                    const shouldShowCandidates = quickCandidates.length > 0 && (isUnsortedNodeLabel(document.node_label) || Boolean(document.quarantine_reason));
+                    return (
+                      <li className="tree-doc-item" key={document.id}>
+                        <div className="tree-doc-card">
+                          <Link className="tree-doc-link" to={`/documents/${document.id}`}>
+                            <span className="drag-doc-title">{document.title}</span>
+                            {document.title !== document.id ? <span className="drag-doc-id">{document.id}</span> : null}
+                          </Link>
+                          <div className="tree-doc-meta-row">
+                            <span className="score-pill">현재: {document.node_label}</span>
+                            {readableReason ? <span className="tree-reason-badge">{readableReason}</span> : null}
+                            {typeof document.placement_confidence === "number" ? (
+                              <span className="score-pill">신뢰 {Math.round(document.placement_confidence * 100)}%</span>
+                            ) : null}
+                          </div>
+                          {shouldShowCandidates ? (
+                            <div className="tree-candidate-row">
+                              {quickCandidates.map((candidate) => (
+                                <button
+                                  className="btn btn-ghost btn-small"
+                                  key={`${document.id}-${candidate.node_id}`}
+                                  onClick={async () => {
+                                    await moveDocument(document.id, document.node_id, candidate.node_id, "QUICK_CONFIRM");
+                                    setTreeNotice({
+                                      tone: "success",
+                                      message: `${document.title} 문서를 '${candidate.label}'로 확정했습니다.`
+                                    });
+                                  }}
+                                  type="button"
+                                >
+                                  {candidate.label} ({Math.round(candidate.score * 100)}%)
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                        <button
+                          className="btn btn-ghost btn-small"
+                          draggable
+                          onDragEnd={() => {
+                            setDraggingDocId(null);
+                            setDragSourceNodeId(null);
+                          }}
+                          onDragStart={() => {
+                            setDraggingDocId(document.id);
+                            setDragSourceNodeId(document.node_id);
+                          }}
+                          type="button"
+                        >
+                          드래그 이동
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
           </div>
         </section>
@@ -1383,12 +1573,12 @@ export default function App() {
                 <input className="field-input field-grow" onChange={(e) => setDocIdForMove(e.target.value)} placeholder="문서 식별자" value={docIdForMove} />
                 <button
                   className="btn btn-secondary"
-                  disabled={!selectedNode || !docIdForMove}
+                  disabled={!selected || !docIdForMove}
                   onClick={async () => {
-                    if (!selectedNode || !docIdForMove) {
+                    if (!selected || !docIdForMove) {
                       return;
                     }
-                    await moveDocument(docIdForMove, null, selectedNode);
+                    await moveDocument(docIdForMove, null, selected.id, "MANUAL");
                   }}
                   type="button"
                 >

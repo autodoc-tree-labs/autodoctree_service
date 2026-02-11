@@ -67,6 +67,8 @@ tree_rebuild_stage {event=tree_rebuild_stage, workspace_id=ws_1, stage=graph, du
 - `recommend_ratio`
 - `explain_shown_total`
 - `explain_accept_total`
+- `feedback_move_total`
+- `feedback_move_source_total{source=DRAG|MANUAL|QUICK_CONFIRM|UNKNOWN}`
 
 기존 호환 메트릭도 유지:
 - `tree_rebuild_duration_ms`

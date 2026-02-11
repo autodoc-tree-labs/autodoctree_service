@@ -871,6 +871,14 @@ code {
   align-items: center;
 }
 
+.tree-node-item-virtual {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-soft);
+  padding-top: 2px;
+}
+
 .tree-node-button {
   border: 1px solid #d2ddee;
   border-radius: 11px;
@@ -896,6 +904,18 @@ code {
   color: #23426d;
 }
 
+.tree-node-count {
+  min-width: 28px;
+  text-align: center;
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: #305177;
+  border: 1px solid #d2def1;
+  background: #f2f7ff;
+  border-radius: 999px;
+  padding: 3px 7px;
+}
+
 .lock-badge {
   font-size: 0.72rem;
   color: #875a00;
@@ -907,7 +927,11 @@ code {
 }
 
 .tree-doc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   gap: 10px;
+  display: grid;
 }
 
 .tree-doc-item {
@@ -932,6 +956,34 @@ code {
 .tree-doc-link:hover {
   border-color: #a8c6f6;
   background: #edf4ff;
+}
+
+.tree-doc-card {
+  display: grid;
+  gap: 8px;
+}
+
+.tree-doc-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tree-reason-badge {
+  border-radius: 999px;
+  border: 1px solid #f2d6ab;
+  background: #fff7e8;
+  color: #8a5400;
+  font-size: 0.74rem;
+  font-weight: 800;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.tree-candidate-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .drag-doc-title {

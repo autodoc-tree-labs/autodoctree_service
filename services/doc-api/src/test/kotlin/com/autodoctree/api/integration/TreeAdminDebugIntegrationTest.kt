@@ -155,6 +155,58 @@ class TreeAdminDebugIntegrationTest {
     }
 
     @Test
+    fun `tree active returns placement metadata for unsorted workflow`() {
+        val activeTree = mockMvc.perform(
+            get("/api/v1/tree/active")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+        val root = objectMapper.readTree(activeTree)
+        val node = findNodeContainingDoc(root, debugDocId)
+        val summary = node?.path("document_summaries")?.firstOrNull { item ->
+            item.path("id").asText() == debugDocId
+        }
+        assertTrue(summary != null, "Expected document summary for doc=$debugDocId")
+        assertTrue(summary!!.has("quarantine_reason"))
+        assertTrue(summary.has("placement_confidence"))
+        assertTrue(summary.path("placement_candidates").isArray)
+    }
+
+    @Test
+    fun `feedback move accepts source and stores analytics payload`() {
+        val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
+        val membership = treeRepository.findMembershipByDocInSnapshot(workspaceId, active.id, debugDocId)
+            ?: error("debug document membership missing")
+
+        mockMvc.perform(
+            post("/api/v1/feedback/move")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "document_id" to debugDocId,
+                            "from_node_id" to membership.nodeId,
+                            "to_node_id" to membership.nodeId,
+                            "source" to "QUICK_CONFIRM"
+                        )
+                    )
+                )
+        ).andExpect(status().isNoContent)
+
+        val payloadStored = feedbackRepository.listByWorkspace(workspaceId, 50).any { event ->
+            event.eventType == "MOVE" &&
+                objectMapper.readTree(event.payloadJson).path("document_id").asText() == debugDocId &&
+                objectMapper.readTree(event.payloadJson).path("source").asText() == "QUICK_CONFIRM"
+        }
+        assertTrue(payloadStored, "Expected MOVE feedback payload to include source=QUICK_CONFIRM")
+    }
+
+    @Test
     fun `admin debug cluster endpoint returns members and exemplars`() {
         val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
         val membership = treeRepository.findMembershipByDocInSnapshot(workspaceId, active.id, debugDocId)
