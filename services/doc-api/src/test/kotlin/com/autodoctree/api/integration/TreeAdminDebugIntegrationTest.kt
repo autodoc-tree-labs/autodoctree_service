@@ -2,6 +2,7 @@ package com.autodoctree.api.integration
 
 import com.autodoctree.api.db.DocumentRepository
 import com.autodoctree.api.db.FeedbackRepository
+import com.autodoctree.api.db.ActiveLearningQuestionRepository
 import com.autodoctree.api.db.PipelineStatusRepository
 import com.autodoctree.api.db.TreeRepository
 import com.autodoctree.api.db.UserRepository
@@ -25,6 +26,7 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+import java.time.LocalDateTime
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -64,6 +66,9 @@ class TreeAdminDebugIntegrationTest {
 
     @Autowired
     private lateinit var feedbackRepository: FeedbackRepository
+
+    @Autowired
+    private lateinit var activeLearningQuestionRepository: ActiveLearningQuestionRepository
 
     private lateinit var ownerId: String
     private lateinit var workspaceId: String
@@ -445,6 +450,109 @@ class TreeAdminDebugIntegrationTest {
         assertTrue(updated != null, "Expected updated rule in list response")
         assertEquals("SOURCE_TYPE", updated?.path("rule_type")?.asText())
         assertEquals("HARD", updated?.path("rule_effect")?.asText())
+    }
+
+    @Test
+    fun `question inbox can answer cluster choice question`() {
+        val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
+        val membership = treeRepository.findMembershipByDocInSnapshot(workspaceId, active.id, debugDocId)
+            ?: error("debug document membership missing")
+        val node = treeRepository.findNodeByWorkspace(workspaceId, membership.nodeId) ?: error("node missing")
+        val created = activeLearningQuestionRepository.create(
+            workspaceId = workspaceId,
+            snapshotId = active.id,
+            questionType = "DOC_CLUSTER_CHOICE",
+            documentId = debugDocId,
+            payloadJson = objectMapper.writeValueAsString(
+                mapOf(
+                    "document_id" to debugDocId,
+                    "document_title" to "질문 테스트 문서",
+                    "option_a" to mapOf("node_id" to membership.nodeId, "label" to node.label, "score" to 0.8),
+                    "option_b" to mapOf("node_id" to membership.nodeId, "label" to node.label, "score" to 0.6)
+                )
+            ),
+            impactScore = 0.74,
+            expiresAt = LocalDateTime.now().plusHours(2)
+        )
+
+        val listResponse = mockMvc.perform(
+            get("/api/v1/questions")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+        val listed = objectMapper.readTree(listResponse).path("items")
+        val listedQuestion = listed.firstOrNull { item -> item.path("id").asText() == created.id }
+        assertTrue(listedQuestion != null, "Expected created question in /questions response")
+        assertEquals("DOC_CLUSTER_CHOICE", listedQuestion?.path("question_type")?.asText())
+
+        mockMvc.perform(
+            post("/api/v1/questions/${created.id}/answer")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(objectMapper.writeValueAsString(mapOf("answer" to "A")))
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("ANSWERED"))
+
+        val updated = activeLearningQuestionRepository.findByWorkspaceAndId(workspaceId, created.id)
+        assertEquals("ANSWERED", updated?.status)
+        assertEquals("A", updated?.answerValue)
+    }
+
+    @Test
+    fun `admin question analytics and controls endpoints work`() {
+        val active = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
+        activeLearningQuestionRepository.create(
+            workspaceId = workspaceId,
+            snapshotId = active.id,
+            questionType = "DOC_PAIR_RELATION",
+            documentId = debugDocId,
+            payloadJson = objectMapper.writeValueAsString(
+                mapOf(
+                    "doc_a_id" to debugDocId,
+                    "doc_a_title" to "A",
+                    "doc_b_id" to "doc-x",
+                    "doc_b_title" to "B"
+                )
+            ),
+            impactScore = 0.55,
+            expiresAt = LocalDateTime.now().plusHours(2)
+        )
+
+        mockMvc.perform(
+            get("/api/v1/admin/tree/questions/analytics")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.open_count").isNumber)
+            .andExpect(jsonPath("$.answer_rate").isNumber)
+            .andExpect(jsonPath("$.control.enabled").exists())
+
+        mockMvc.perform(
+            post("/api/v1/admin/tree/questions/generate")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.generated_count").isNumber)
+
+        mockMvc.perform(
+            patch("/api/v1/admin/tree/questions/control")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(objectMapper.writeValueAsString(mapOf("enabled" to false)))
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.enabled").value(false))
+
+        mockMvc.perform(
+            post("/api/v1/admin/tree/questions/expire")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.expired_count").isNumber)
     }
 
     @Test

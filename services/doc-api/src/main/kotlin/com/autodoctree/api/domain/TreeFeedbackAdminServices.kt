@@ -1826,7 +1826,7 @@ class FeedbackService(
 ) {
     private val moveCounter = meterRegistry.counter("feedback_move_total")
 
-    private val moveSourceAllowList = setOf("DRAG", "MANUAL", "QUICK_CONFIRM", "UNKNOWN")
+    private val moveSourceAllowList = setOf("DRAG", "MANUAL", "QUICK_CONFIRM", "QUESTION", "UNKNOWN")
 
     @Transactional
     fun move(context: WorkspaceContext, documentId: String, fromNodeId: String?, toNodeId: String, source: String?) {

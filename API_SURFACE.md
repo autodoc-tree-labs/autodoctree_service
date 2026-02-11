@@ -279,9 +279,45 @@ Response:
 { "node_id": "n_2", "old_label": "Misc", "new_label": "Reservations" }
 ```
 
+# 9) Questions
+## GET /questions
+Query:
+- `status`: `OPEN | ANSWERED | EXPIRED` (optional)
+- `limit`: default `20`
+
+Response:
+```json
+{
+  "items": [
+    {
+      "id": "q_1",
+      "question_type": "DOC_CLUSTER_CHOICE",
+      "status": "OPEN",
+      "document_id": "doc_1",
+      "impact_score": 0.74,
+      "payload": {
+        "document_title": "Locking strategy",
+        "option_a": { "node_id": "n_2", "label": "billing", "score": 0.81 },
+        "option_b": { "node_id": "n_5", "label": "ops", "score": 0.72 }
+      }
+    }
+  ],
+  "open_count": 4
+}
+```
+
+## POST /questions/{questionId}/answer
+```json
+{ "answer": "A" }
+```
+
+`question_type`에 따른 `answer`:
+- `DOC_CLUSTER_CHOICE`: `A` 또는 `B`
+- `DOC_PAIR_RELATION`: `SAME` 또는 `DIFF`
+
 ---
 
-# 9) Admin/Ops
+# 10) Admin/Ops
 > Owner role required.
 ## GET /admin/jobs
 Query: `document_id` optional
@@ -549,3 +585,32 @@ Response:
 ```
 
 ## DELETE /admin/tree/rules/{ruleId}
+
+## GET /admin/tree/questions/analytics
+Response:
+```json
+{
+  "control": {
+    "enabled": true,
+    "updated_by": "u_1",
+    "updated_at": "2026-02-11T10:00:00"
+  },
+  "open_count": 4,
+  "answered_count": 12,
+  "expired_count": 1,
+  "answer_rate": 0.92,
+  "avg_impact_open": 0.63,
+  "avg_impact_answered": 0.71,
+  "unsorted_ratio": 0.11,
+  "items": []
+}
+```
+
+## PATCH /admin/tree/questions/control
+```json
+{ "enabled": false }
+```
+
+## POST /admin/tree/questions/expire
+
+## POST /admin/tree/questions/generate

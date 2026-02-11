@@ -193,6 +193,30 @@ data class WorkspaceTreePolicyRow(
     val updatedAt: LocalDateTime
 )
 
+data class WorkspaceQuestionControlRow(
+    val workspaceId: String,
+    val enabled: Boolean,
+    val updatedBy: String,
+    val updatedAt: LocalDateTime
+)
+
+data class ActiveLearningQuestionRow(
+    val id: String,
+    val workspaceId: String,
+    val snapshotId: String?,
+    val questionType: String,
+    val status: String,
+    val documentId: String,
+    val payloadJson: String,
+    val impactScore: Double,
+    val answerValue: String?,
+    val answeredBy: String?,
+    val answeredAt: LocalDateTime?,
+    val expiresAt: LocalDateTime?,
+    val createdAt: LocalDateTime,
+    val updatedAt: LocalDateTime
+)
+
 data class AuditLogRow(
     val id: String,
     val workspaceId: String,
@@ -1527,6 +1551,207 @@ class WorkspaceTreePolicyRepository(private val jdbcTemplate: JdbcTemplate) {
             rerankerEnabled = rerankerEnabled,
             updatedBy = updatedBy,
             updatedAt = now
+        )
+    }
+}
+
+@Repository
+class WorkspaceQuestionControlRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<WorkspaceQuestionControlRow> { rs: ResultSet, _: Int ->
+        WorkspaceQuestionControlRow(
+            workspaceId = rs.getString("workspace_id"),
+            enabled = rs.getBoolean("enabled"),
+            updatedBy = rs.getString("updated_by"),
+            updatedAt = rs.getTimestamp("updated_at").toLocalDateTime()
+        )
+    }
+
+    fun findByWorkspace(workspaceId: String): WorkspaceQuestionControlRow? = jdbcTemplate.queryOneOrNull(
+        "SELECT * FROM workspace_question_control WHERE workspace_id = ?",
+        mapper,
+        workspaceId
+    )
+
+    fun upsert(workspaceId: String, enabled: Boolean, updatedBy: String): WorkspaceQuestionControlRow {
+        val now = LocalDateTime.now()
+        val existing = findByWorkspace(workspaceId)
+        if (existing == null) {
+            jdbcTemplate.update(
+                """
+                INSERT INTO workspace_question_control(workspace_id, enabled, updated_by, updated_at)
+                VALUES (?, ?, ?, ?)
+                """.trimIndent(),
+                workspaceId,
+                enabled,
+                updatedBy,
+                now
+            )
+        } else {
+            jdbcTemplate.update(
+                """
+                UPDATE workspace_question_control
+                SET enabled = ?, updated_by = ?, updated_at = ?
+                WHERE workspace_id = ?
+                """.trimIndent(),
+                enabled,
+                updatedBy,
+                now,
+                workspaceId
+            )
+        }
+        return findByWorkspace(workspaceId) ?: WorkspaceQuestionControlRow(
+            workspaceId = workspaceId,
+            enabled = enabled,
+            updatedBy = updatedBy,
+            updatedAt = now
+        )
+    }
+}
+
+@Repository
+class ActiveLearningQuestionRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<ActiveLearningQuestionRow> { rs: ResultSet, _: Int ->
+        ActiveLearningQuestionRow(
+            id = rs.getString("id"),
+            workspaceId = rs.getString("workspace_id"),
+            snapshotId = rs.getString("snapshot_id"),
+            questionType = rs.getString("question_type"),
+            status = rs.getString("status"),
+            documentId = rs.getString("document_id"),
+            payloadJson = rs.getString("payload_json"),
+            impactScore = rs.getDouble("impact_score"),
+            answerValue = rs.getString("answer_value"),
+            answeredBy = rs.getString("answered_by"),
+            answeredAt = rs.getTimestamp("answered_at")?.toLocalDateTime(),
+            expiresAt = rs.getTimestamp("expires_at")?.toLocalDateTime(),
+            createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
+            updatedAt = rs.getTimestamp("updated_at").toLocalDateTime()
+        )
+    }
+
+    fun create(
+        workspaceId: String,
+        snapshotId: String?,
+        questionType: String,
+        documentId: String,
+        payloadJson: String,
+        impactScore: Double,
+        expiresAt: LocalDateTime?
+    ): ActiveLearningQuestionRow {
+        val id = UUID.randomUUID().toString()
+        val now = LocalDateTime.now()
+        jdbcTemplate.update(
+            """
+            INSERT INTO active_learning_question(
+                id, workspace_id, snapshot_id, question_type, status, document_id, payload_json,
+                impact_score, answer_value, answered_by, answered_at, expires_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
+            """.trimIndent(),
+            id,
+            workspaceId,
+            snapshotId,
+            questionType,
+            "OPEN",
+            documentId,
+            payloadJson,
+            impactScore,
+            expiresAt,
+            now,
+            now
+        )
+        return findByWorkspaceAndId(workspaceId, id)
+            ?: error("failed to create active learning question")
+    }
+
+    fun findByWorkspaceAndId(workspaceId: String, questionId: String): ActiveLearningQuestionRow? = jdbcTemplate.queryOneOrNull(
+        "SELECT * FROM active_learning_question WHERE workspace_id = ? AND id = ?",
+        mapper,
+        workspaceId,
+        questionId
+    )
+
+    fun listByWorkspace(workspaceId: String, status: String?, limit: Int): List<ActiveLearningQuestionRow> {
+        val args = mutableListOf<Any>(workspaceId)
+        val sql = StringBuilder("SELECT * FROM active_learning_question WHERE workspace_id = ?")
+        if (!status.isNullOrBlank()) {
+            sql.append(" AND status = ?")
+            args += status
+        }
+        sql.append(" ORDER BY impact_score DESC, created_at DESC LIMIT ?")
+        args += limit.coerceIn(1, 200)
+        return jdbcTemplate.query(sql.toString(), mapper, *args.toTypedArray())
+    }
+
+    fun listOpenByWorkspace(workspaceId: String, limit: Int): List<ActiveLearningQuestionRow> = jdbcTemplate.query(
+        """
+        SELECT * FROM active_learning_question
+        WHERE workspace_id = ? AND status = 'OPEN'
+        ORDER BY impact_score DESC, created_at DESC
+        LIMIT ?
+        """.trimIndent(),
+        mapper,
+        workspaceId,
+        limit.coerceIn(1, 400)
+    )
+
+    fun countByWorkspaceAndStatus(workspaceId: String, status: String): Long {
+        return jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM active_learning_question WHERE workspace_id = ? AND status = ?",
+            Long::class.java,
+            workspaceId,
+            status
+        ) ?: 0L
+    }
+
+    fun averageImpactByWorkspaceAndStatus(workspaceId: String, status: String): Double {
+        return jdbcTemplate.queryForObject(
+            "SELECT COALESCE(AVG(impact_score), 0) FROM active_learning_question WHERE workspace_id = ? AND status = ?",
+            Double::class.java,
+            workspaceId,
+            status
+        ) ?: 0.0
+    }
+
+    fun markAnswered(workspaceId: String, questionId: String, answerValue: String, answeredBy: String): Int {
+        val now = LocalDateTime.now()
+        return jdbcTemplate.update(
+            """
+            UPDATE active_learning_question
+            SET status = 'ANSWERED', answer_value = ?, answered_by = ?, answered_at = ?, updated_at = ?
+            WHERE workspace_id = ? AND id = ? AND status = 'OPEN'
+            """.trimIndent(),
+            answerValue,
+            answeredBy,
+            now,
+            now,
+            workspaceId,
+            questionId
+        )
+    }
+
+    fun expireStale(workspaceId: String, now: LocalDateTime): Int {
+        return jdbcTemplate.update(
+            """
+            UPDATE active_learning_question
+            SET status = 'EXPIRED', updated_at = ?
+            WHERE workspace_id = ? AND status = 'OPEN' AND expires_at IS NOT NULL AND expires_at < ?
+            """.trimIndent(),
+            now,
+            workspaceId,
+            now
+        )
+    }
+
+    fun expireAllOpen(workspaceId: String): Int {
+        val now = LocalDateTime.now()
+        return jdbcTemplate.update(
+            """
+            UPDATE active_learning_question
+            SET status = 'EXPIRED', updated_at = ?
+            WHERE workspace_id = ? AND status = 'OPEN'
+            """.trimIndent(),
+            now,
+            workspaceId
         )
     }
 }

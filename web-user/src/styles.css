@@ -849,6 +849,18 @@ code {
   white-space: nowrap;
 }
 
+.question-grid {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.question-card {
+  display: grid;
+  gap: 8px;
+}
+
 .tree-layout {
   display: grid;
   grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);

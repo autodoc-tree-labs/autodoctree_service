@@ -288,6 +288,46 @@ class TenantIsolationIntegrationTest {
         ).andExpect(status().isForbidden)
 
         mockMvc.perform(
+            get("/api/v1/questions")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
+            post("/api/v1/questions/question-a/answer")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+                .content(objectMapper.writeValueAsString(mapOf("answer" to "A")))
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
+            get("/api/v1/admin/tree/questions/analytics")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
+            patch("/api/v1/admin/tree/questions/control")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+                .content(objectMapper.writeValueAsString(mapOf("enabled" to false)))
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
+            post("/api/v1/admin/tree/questions/expire")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
+            post("/api/v1/admin/tree/questions/generate")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
             patch("/api/v1/workspaces/$wsAId/members/$wsAOwnerUserId")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("Authorization", "Bearer $tokenB")

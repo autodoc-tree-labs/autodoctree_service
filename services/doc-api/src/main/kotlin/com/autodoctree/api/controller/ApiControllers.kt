@@ -5,6 +5,7 @@ import com.autodoctree.api.domain.AttachmentService
 import com.autodoctree.api.domain.AuthService
 import com.autodoctree.api.domain.DocumentService
 import com.autodoctree.api.domain.FeedbackService
+import com.autodoctree.api.domain.QuestionService
 import com.autodoctree.api.domain.SearchService
 import com.autodoctree.api.domain.TreeService
 import com.autodoctree.api.domain.WorkspaceService
@@ -342,9 +343,38 @@ class FeedbackController(
 }
 
 @RestController
+@RequestMapping("/api/v1/questions")
+class QuestionController(
+    private val questionService: QuestionService,
+    private val workspaceContextResolver: WorkspaceContextResolver
+) {
+
+    @GetMapping
+    fun listQuestions(
+        request: HttpServletRequest,
+        @RequestParam(required = false) status: String?,
+        @RequestParam(defaultValue = "20") limit: Int
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return questionService.listQuestions(context, status, limit)
+    }
+
+    @PostMapping("/{questionId}/answer")
+    fun answerQuestion(
+        request: HttpServletRequest,
+        @PathVariable questionId: String,
+        @Valid @RequestBody body: AnswerQuestionRequest
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return questionService.answerQuestion(context, questionId, body.answer)
+    }
+}
+
+@RestController
 @RequestMapping("/api/v1/admin")
 class AdminController(
     private val adminService: AdminService,
+    private val questionService: QuestionService,
     private val workspaceContextResolver: WorkspaceContextResolver
 ) {
 
@@ -503,6 +533,33 @@ class AdminController(
         adminService.deleteUserRule(context, ruleId)
         return ResponseEntity.noContent().build()
     }
+
+    @GetMapping("/tree/questions/analytics")
+    fun questionAnalytics(request: HttpServletRequest): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return questionService.analytics(context)
+    }
+
+    @PatchMapping("/tree/questions/control")
+    fun updateQuestionControl(
+        request: HttpServletRequest,
+        @Valid @RequestBody body: UpdateQuestionControlRequest
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return questionService.updateControl(context, body.enabled)
+    }
+
+    @PostMapping("/tree/questions/expire")
+    fun expireQuestions(request: HttpServletRequest): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return questionService.expireOpen(context)
+    }
+
+    @PostMapping("/tree/questions/generate")
+    fun generateQuestions(request: HttpServletRequest): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return questionService.generateNow(context)
+    }
 }
 
 data class LoginRequest(
@@ -573,6 +630,10 @@ data class RenameRequest(
     @field:NotBlank val newLabel: String
 )
 
+data class AnswerQuestionRequest(
+    @field:NotBlank val answer: String
+)
+
 data class RetryRequest(
     @field:NotBlank val documentId: String,
     @field:NotBlank val stage: String
@@ -605,4 +666,8 @@ data class PreviewUserRuleRequest(
     @field:NotBlank val ruleValue: String,
     @field:NotBlank val nodeId: String,
     val ruleEffect: String? = null
+)
+
+data class UpdateQuestionControlRequest(
+    @field:NotNull val enabled: Boolean
 )

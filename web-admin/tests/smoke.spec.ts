@@ -271,6 +271,79 @@ test("loads tree debug page and renders neighbors table", async ({ page }) => {
     }
     await route.fulfill({ status: 404, body: "" });
   });
+  let questionControlEnabled = true;
+  let questionOpenCount = 2;
+  let questionAnsweredCount = 5;
+  let questionExpiredCount = 1;
+  const questionItems = [
+    {
+      id: "q-1",
+      question_type: "DOC_CLUSTER_CHOICE",
+      status: "OPEN",
+      document_id: "doc-1",
+      impact_score: 0.78,
+      payload: {
+        option_a: { node_id: "node-1", label: "billing", score: 0.81 },
+        option_b: { node_id: "node-2", label: "infra", score: 0.72 }
+      },
+      created_at: "2026-02-11T00:00:00"
+    }
+  ];
+  await page.route("**/api/v1/admin/tree/questions/analytics", async (route) => {
+    const denominator = questionAnsweredCount + questionExpiredCount;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        control: {
+          enabled: questionControlEnabled,
+          updated_by: "user-1",
+          updated_at: "2026-02-11T00:00:00"
+        },
+        open_count: questionOpenCount,
+        answered_count: questionAnsweredCount,
+        expired_count: questionExpiredCount,
+        answer_rate: denominator > 0 ? questionAnsweredCount / denominator : 0,
+        avg_impact_open: 0.62,
+        avg_impact_answered: 0.71,
+        unsorted_ratio: 0.18,
+        items: questionItems
+      })
+    });
+  });
+  await page.route("**/api/v1/admin/tree/questions/control", async (route) => {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    questionControlEnabled = Boolean(body.enabled);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        workspace_id: "ws-1",
+        enabled: questionControlEnabled,
+        updated_by: "user-1",
+        updated_at: "2026-02-11T00:00:00"
+      })
+    });
+  });
+  await page.route("**/api/v1/admin/tree/questions/expire", async (route) => {
+    const expired = questionOpenCount;
+    questionOpenCount = 0;
+    questionExpiredCount += expired;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ expired_count: expired })
+    });
+  });
+  await page.route("**/api/v1/admin/tree/questions/generate", async (route) => {
+    const generated = questionControlEnabled ? 2 : 0;
+    questionOpenCount += generated;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ generated_count: generated })
+    });
+  });
 
   await page.goto("/login");
   await page.getByPlaceholder("이메일 주소").fill("owner@autodoc.local");
@@ -311,4 +384,18 @@ test("loads tree debug page and renders neighbors table", async ({ page }) => {
   await expect(page.getByText("\"matched\": true")).toBeVisible();
   await page.getByRole("button", { name: "규칙 생성" }).click();
   await expect(page.getByText("규칙을 생성했습니다.")).toBeVisible();
+
+  await page.getByRole("link", { name: "질문 트리아지" }).click();
+  await expect(page.getByRole("heading", { name: "질문 트리아지" })).toBeVisible();
+  await expect(page.getByText("q-1")).toBeVisible();
+
+  await page.getByRole("button", { name: "질문 생성" }).click();
+  await expect(page.getByText("질문 2건을 생성했습니다.")).toBeVisible();
+
+  await page.getByLabel("질문 생성 활성화").uncheck();
+  await page.getByRole("button", { name: "제어 저장" }).click();
+  await expect(page.getByText("질문 생성 제어값을 저장했습니다.")).toBeVisible();
+
+  await page.getByRole("button", { name: "열린 질문 만료" }).click();
+  await expect(page.getByText("열린 질문 4건을 만료 처리했습니다.")).toBeVisible();
 });

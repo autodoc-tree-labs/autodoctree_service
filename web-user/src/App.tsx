@@ -53,6 +53,22 @@ type TreeDocumentView = {
   }>;
 };
 
+type QuestionItem = {
+  id: string;
+  question_type: string;
+  status: string;
+  document_id: string;
+  impact_score: number;
+  payload: Record<string, unknown>;
+  created_at?: string;
+  expires_at?: string | null;
+};
+
+type QuestionListResponse = {
+  items: QuestionItem[];
+  open_count: number;
+};
+
 type ExplainResponse = {
   document_id: string;
   node_id: string | null;
@@ -365,6 +381,9 @@ function Layout({ children }: { children: React.ReactNode }) {
           </NavLink>
           <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/search">
             검색
+          </NavLink>
+          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/questions">
+            질문함
           </NavLink>
           <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/tree">
             트리
@@ -1209,6 +1228,166 @@ export default function App() {
     );
   }
 
+  function QuestionsPage() {
+    const [questions, setQuestions] = useState<QuestionItem[]>([]);
+    const [openCount, setOpenCount] = useState(0);
+    const [loading, setLoading] = useState(false);
+    const [answeringQuestionId, setAnsweringQuestionId] = useState<string | null>(null);
+    const [error, setError] = useState<UiError | null>(null);
+    const [notice, setNotice] = useState<UiNotice | null>(null);
+
+    const loadQuestions = useCallback(async () => {
+      if (!state.workspaceId) {
+        setQuestions([]);
+        setOpenCount(0);
+        return;
+      }
+      setLoading(true);
+      setError(null);
+      try {
+        const response = await api.request<QuestionListResponse>("/questions?status=OPEN&limit=20", {}, true);
+        setQuestions(response.items);
+        setOpenCount(response.open_count);
+      } catch (e) {
+        setError(toUiError(e, "질문 목록을 불러오지 못했습니다"));
+      } finally {
+        setLoading(false);
+      }
+    }, [api, state.workspaceId]);
+
+    useEffect(() => {
+      void loadQuestions();
+    }, [loadQuestions, state.workspaceId]);
+
+    const answerQuestion = useCallback(
+      async (questionId: string, answer: string) => {
+        const previous = questions;
+        setAnsweringQuestionId(questionId);
+        setError(null);
+        setQuestions((prev) => prev.filter((item) => item.id !== questionId));
+        setOpenCount((prev) => Math.max(0, prev - 1));
+        try {
+          await api.request(
+            `/questions/${questionId}/answer`,
+            {
+              method: "POST",
+              body: JSON.stringify({ answer })
+            },
+            true
+          );
+          setNotice({ tone: "success", message: "질문 답변이 반영되었습니다." });
+        } catch (e) {
+          setQuestions(previous);
+          setOpenCount(previous.length);
+          setError(toUiError(e, "질문 답변 처리에 실패했습니다"));
+        } finally {
+          setAnsweringQuestionId(null);
+        }
+      },
+      [api, questions]
+    );
+
+    return (
+      <Layout>
+        <section className="panel">
+          <PageHeader
+            title="질문 인박스"
+            subtitle="낮은 확신 배치를 빠르게 해소하기 위한 2지선다 질문입니다."
+            action={
+              <button className="btn btn-secondary" disabled={!state.workspaceId || loading} onClick={() => void loadQuestions()} type="button">
+                {loading ? "새로고침 중..." : "새로고침"}
+              </button>
+            }
+          />
+          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
+          <NoticePanel notice={notice} />
+          <ErrorPanel
+            error={error}
+            onRetry={() => {
+              void loadQuestions();
+            }}
+          />
+
+          {state.workspaceId ? <p className="muted">열린 질문 {openCount}건</p> : null}
+
+          {state.workspaceId && questions.length === 0 ? (
+            <EmptyState title="열린 질문이 없습니다" description="현재 답변이 필요한 질문이 없습니다." />
+          ) : null}
+
+          <div className="question-grid">
+            {questions.map((question) => {
+              const payload = question.payload as Record<string, unknown>;
+              const disabled = answeringQuestionId === question.id;
+              if (question.question_type === "DOC_CLUSTER_CHOICE") {
+                const optionA = (payload.option_a as Record<string, unknown> | undefined) ?? {};
+                const optionB = (payload.option_b as Record<string, unknown> | undefined) ?? {};
+                return (
+                  <article className="panel panel-soft question-card" key={question.id}>
+                    <h3 className="section-title">문서 폴더 선택</h3>
+                    <p className="section-subtitle">{(payload.document_title as string | undefined) ?? question.document_id}</p>
+                    <p className="muted">
+                      영향도 {Math.round(Math.max(0, Math.min(1, question.impact_score)) * 100)}%
+                    </p>
+                    <div className="action-row">
+                      <button
+                        className="btn btn-primary"
+                        disabled={disabled}
+                        onClick={() => void answerQuestion(question.id, "A")}
+                        type="button"
+                      >
+                        A: {(optionA.label as string | undefined) ?? "후보 A"}
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        disabled={disabled}
+                        onClick={() => void answerQuestion(question.id, "B")}
+                        type="button"
+                      >
+                        B: {(optionB.label as string | undefined) ?? "후보 B"}
+                      </button>
+                    </div>
+                  </article>
+                );
+              }
+
+              const leftTitle = (payload.doc_a_title as string | undefined) ?? (payload.doc_a_id as string | undefined) ?? question.document_id;
+              const rightTitle = (payload.doc_b_title as string | undefined) ?? (payload.doc_b_id as string | undefined) ?? "-";
+              return (
+                <article className="panel panel-soft question-card" key={question.id}>
+                  <h3 className="section-title">문서 관계 확인</h3>
+                  <p className="section-subtitle">
+                    {leftTitle} vs {rightTitle}
+                  </p>
+                  <p className="muted">
+                    영향도 {Math.round(Math.max(0, Math.min(1, question.impact_score)) * 100)}%
+                  </p>
+                  <div className="action-row">
+                    <button
+                      className="btn btn-primary"
+                      disabled={disabled}
+                      onClick={() => void answerQuestion(question.id, "SAME")}
+                      type="button"
+                    >
+                      같은 그룹
+                    </button>
+                    <button
+                      className="btn btn-secondary"
+                      disabled={disabled}
+                      onClick={() => void answerQuestion(question.id, "DIFF")}
+                      type="button"
+                    >
+                      다른 그룹
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      </Layout>
+    );
+  }
+
   function TreePage() {
     const [tree, setTree] = useState<TreeActiveResponse | null>(null);
     const [selectedNode, setSelectedNode] = useState<string | null>(null);
@@ -1677,6 +1856,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <SearchPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/questions"
+        element={
+          <ProtectedRoute>
+            <QuestionsPage />
           </ProtectedRoute>
         }
       />

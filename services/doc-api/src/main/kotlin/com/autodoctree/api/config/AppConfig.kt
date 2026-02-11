@@ -94,6 +94,9 @@ data class TreeProperties(
     val embeddingDocumentWeight: Double = 0.65,
     val embeddingSummaryWeight: Double = 0.25,
     val embeddingSectionWeight: Double = 0.10,
+    val questionMaxOpen: Int = 20,
+    val questionTtlHours: Long = 48,
+    val questionGenerateBatchSize: Int = 5,
     val otherClusterScoreThreshold: Double
 )
 

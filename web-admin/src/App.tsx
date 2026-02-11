@@ -160,6 +160,29 @@ type UserRulePreviewResponse = {
   target_node_id: string | null;
   target_node_label: string | null;
 };
+type QuestionAnalyticsResponse = {
+  control: {
+    enabled: boolean;
+    updated_by: string | null;
+    updated_at: string | null;
+  };
+  open_count: number;
+  answered_count: number;
+  expired_count: number;
+  answer_rate: number;
+  avg_impact_open: number;
+  avg_impact_answered: number;
+  unsorted_ratio: number;
+  items: Array<{
+    id: string;
+    question_type: string;
+    status: string;
+    document_id: string;
+    impact_score: number;
+    payload: Record<string, unknown>;
+    created_at: string;
+  }>;
+};
 
 type Member = { user_id: string; email: string; role: string };
 
@@ -250,6 +273,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           <Link to="/tree-debug">트리 디버그</Link>
           <Link to="/tree-policy">정책 설정</Link>
           <Link to="/tree-rules">규칙 관리</Link>
+          <Link to="/question-triage">질문 트리아지</Link>
         </nav>
         <button
           onClick={() => {
@@ -1275,6 +1299,185 @@ export default function App() {
     );
   }
 
+  function QuestionTriagePage() {
+    const [analytics, setAnalytics] = useState<QuestionAnalyticsResponse | null>(null);
+    const [enabled, setEnabled] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [message, setMessage] = useState<string | null>(null);
+
+    const loadAnalytics = async () => {
+      if (!state.workspaceId) {
+        setAnalytics(null);
+        return;
+      }
+      setError(null);
+      try {
+        const response = await api.request<QuestionAnalyticsResponse>("/admin/tree/questions/analytics", {}, true);
+        setAnalytics(response);
+        setEnabled(response.control.enabled);
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "질문 분석 정보를 불러오지 못했습니다."));
+      }
+    };
+
+    useEffect(() => {
+      void loadAnalytics();
+    }, [state.workspaceId]);
+
+    const saveControl = async () => {
+      if (!state.workspaceId) {
+        setError("먼저 워크스페이스를 선택하세요.");
+        return;
+      }
+      setError(null);
+      setMessage(null);
+      try {
+        const response = await api.request<{ enabled: boolean }>(
+          "/admin/tree/questions/control",
+          {
+            method: "PATCH",
+            body: JSON.stringify({ enabled })
+          },
+          true
+        );
+        setEnabled(response.enabled);
+        setMessage("질문 생성 제어값을 저장했습니다.");
+        await loadAnalytics();
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "질문 제어 저장에 실패했습니다."));
+      }
+    };
+
+    const expireOpen = async () => {
+      if (!state.workspaceId) {
+        setError("먼저 워크스페이스를 선택하세요.");
+        return;
+      }
+      setError(null);
+      setMessage(null);
+      try {
+        const response = await api.request<{ expired_count: number }>("/admin/tree/questions/expire", { method: "POST" }, true);
+        setMessage(`열린 질문 ${response.expired_count}건을 만료 처리했습니다.`);
+        await loadAnalytics();
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "질문 만료 처리에 실패했습니다."));
+      }
+    };
+
+    const generateNow = async () => {
+      if (!state.workspaceId) {
+        setError("먼저 워크스페이스를 선택하세요.");
+        return;
+      }
+      setError(null);
+      setMessage(null);
+      try {
+        const response = await api.request<{ generated_count: number }>("/admin/tree/questions/generate", { method: "POST" }, true);
+        setMessage(`질문 ${response.generated_count}건을 생성했습니다.`);
+        await loadAnalytics();
+      } catch (e) {
+        setError(localizeErrorMessage(e instanceof Error ? e.message : "", "질문 생성에 실패했습니다."));
+      }
+    };
+
+    return (
+      <Layout>
+        <h2>질문 트리아지</h2>
+        <p>질문량, 답변률, 영향도를 확인하고 질문 생성/만료를 제어합니다.</p>
+        {error ? (
+          <div style={{ border: "1px solid #d33", padding: 10, marginBottom: 12, background: "#fff3f3" }}>{error}</div>
+        ) : null}
+        {message ? (
+          <div style={{ border: "1px solid #3a7", padding: 10, marginBottom: 12, background: "#effbf4" }}>{message}</div>
+        ) : null}
+
+        <section style={{ border: "1px solid #ccd", padding: 12, marginBottom: 14, maxWidth: 760 }}>
+          <h3 style={{ marginTop: 0 }}>Controls</h3>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input checked={enabled} onChange={(e) => setEnabled(e.target.checked)} type="checkbox" />
+              질문 생성 활성화
+            </label>
+            <button onClick={() => void saveControl()}>제어 저장</button>
+            <button onClick={() => void generateNow()}>질문 생성</button>
+            <button onClick={() => void expireOpen()}>열린 질문 만료</button>
+            <button onClick={() => void loadAnalytics()}>새로고침</button>
+          </div>
+        </section>
+
+        <section style={{ border: "1px solid #ccd", padding: 12, marginBottom: 14 }}>
+          <h3 style={{ marginTop: 0 }}>Metrics</h3>
+          {analytics ? (
+            <table>
+              <tbody>
+                <tr>
+                  <td>open_count</td>
+                  <td>{analytics.open_count}</td>
+                </tr>
+                <tr>
+                  <td>answered_count</td>
+                  <td>{analytics.answered_count}</td>
+                </tr>
+                <tr>
+                  <td>expired_count</td>
+                  <td>{analytics.expired_count}</td>
+                </tr>
+                <tr>
+                  <td>answer_rate</td>
+                  <td>{formatMetric(analytics.answer_rate, 3)}</td>
+                </tr>
+                <tr>
+                  <td>avg_impact_open</td>
+                  <td>{formatMetric(analytics.avg_impact_open, 3)}</td>
+                </tr>
+                <tr>
+                  <td>avg_impact_answered</td>
+                  <td>{formatMetric(analytics.avg_impact_answered, 3)}</td>
+                </tr>
+                <tr>
+                  <td>unsorted_ratio</td>
+                  <td>{formatMetric(analytics.unsorted_ratio, 3)}</td>
+                </tr>
+              </tbody>
+            </table>
+          ) : (
+            <p>질문 분석 데이터 없음</p>
+          )}
+        </section>
+
+        <section style={{ border: "1px solid #ccd", padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>최근 질문</h3>
+          {analytics?.items.length ? (
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>id</th>
+                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>type</th>
+                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>status</th>
+                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>impact</th>
+                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>document</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analytics.items.map((item) => (
+                  <tr key={item.id}>
+                    <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{item.id}</td>
+                    <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{item.question_type}</td>
+                    <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{item.status}</td>
+                    <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{formatMetric(item.impact_score, 3)}</td>
+                    <td style={{ borderBottom: "1px solid #eee", padding: "6px 4px" }}>{item.document_id}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p>질문 데이터 없음</p>
+          )}
+        </section>
+      </Layout>
+    );
+  }
+
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
@@ -1331,6 +1534,14 @@ export default function App() {
         element={
           <Protected>
             <TreeRulesPage />
+          </Protected>
+        }
+      />
+      <Route
+        path="/question-triage"
+        element={
+          <Protected>
+            <QuestionTriagePage />
           </Protected>
         }
       />

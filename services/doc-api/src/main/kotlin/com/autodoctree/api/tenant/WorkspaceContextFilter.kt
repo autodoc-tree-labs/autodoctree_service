@@ -28,6 +28,7 @@ class WorkspaceContextFilter(
             path.startsWith("/api/v1/attachments") ||
             path.startsWith("/api/v1/search") ||
             path.startsWith("/api/v1/tree") ||
+            path.startsWith("/api/v1/questions") ||
             path.startsWith("/api/v1/feedback") ||
             path.startsWith("/api/v1/admin") ||
             path.contains("/members"))

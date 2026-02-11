@@ -71,6 +71,11 @@ tree_rebuild_stage {event=tree_rebuild_stage, workspace_id=ws_1, stage=graph, du
 - `feedback_move_source_total{source=DRAG|MANUAL|QUICK_CONFIRM|UNKNOWN}`
 - `rule_hit_total`
 - `rule_conflict_total`
+- `question_generated_total`
+- `question_answered_total`
+- `question_expired_total`
+- `question_impact_score`
+- `questions_open`
 
 기존 호환 메트릭도 유지:
 - `tree_rebuild_duration_ms`
