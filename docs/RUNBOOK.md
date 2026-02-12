@@ -1,6 +1,6 @@
 # RUNBOOK
 
-## OpenSearch Reindex (B-0303)
+## OpenSearch Reindex (I-0301)
 
 ### Current strategy
 - Index template: `search.template-name` (default `docs-template`)
@@ -15,6 +15,12 @@ curl -s http://localhost:59200/_alias/docs-active | jq
 ```
 
 ### Reindex to a new versioned index
+자동화 스크립트(권장):
+```bash
+./scripts/opensearch_reindex_alias_swap.sh docs-active docs-v1-000002
+```
+
+수동 절차:
 1. Create destination index (example `docs-v1-000002`)
 ```bash
 curl -s -X PUT http://localhost:59200/docs-v1-000002 -H 'Content-Type: application/json' -d '{}'
@@ -42,6 +48,13 @@ curl -s -X POST http://localhost:59200/_aliases -H 'Content-Type: application/js
 ```bash
 curl -s \"http://localhost:59200/docs-active/_search?q=workspace_id:YOUR_WORKSPACE_ID\" | jq '.hits.total'
 ```
+
+### Script options
+- `OPENSEARCH_URL` (default `http://localhost:59200`)
+- `OPENSEARCH_USERNAME` / `OPENSEARCH_PASSWORD` (optional basic auth)
+- CLI args:
+  - first arg: alias name (default `OPENSEARCH_INDEX_ALIAS` or `docs-active`)
+  - second arg: destination index (required)
 
 ### Rollback
 - Re-run alias switch and set previous index to `is_write_index: true`.

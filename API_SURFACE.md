@@ -167,6 +167,7 @@ Response:
       "id": "n_1",
       "parent_id": "n_root",
       "label": "OpenSearch",
+      "node_type": "topic",
       "locked": false,
       "documents": ["doc_1"],
       "document_summaries": [
@@ -175,6 +176,10 @@ Response:
           "title": "Locking strategy",
           "quarantine_reason": "LOW_CONFIDENCE",
           "placement_confidence": 0.62,
+          "template_score": 0.71,
+          "template_boilerplate_ratio": 0.66,
+          "template_ngram_repeat_ratio": 0.28,
+          "template_reasons": ["BOILERPLATE_RATIO", "SCORE_THRESHOLD"],
           "placement_candidates": [
             { "node_id": "n_2", "label": "Distributed Lock", "score": 0.81 },
             { "node_id": "n_5", "label": "Scheduler", "score": 0.74 }

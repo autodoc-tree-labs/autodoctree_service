@@ -149,6 +149,11 @@ Important flags:
 - `TREE_ASSIGN_AUTO_THRESHOLD`
 - `TREE_ASSIGN_RECOMMEND_THRESHOLD`
 - `TREE_ASSIGN_QUARANTINE_ENABLED`
+- `TREE_TEMPLATE_ISOLATION_ENABLED`
+- `TREE_TEMPLATE_SCORE_THRESHOLD`
+- `TREE_TEMPLATE_BOILERPLATE_RATIO_THRESHOLD`
+- `TREE_TEMPLATE_NGRAM_REPEAT_THRESHOLD`
+- `TREE_TEMPLATE_FINGERPRINT_MIN_DOCS`
 - `TREE_ASSIGN_RERANKER_ENABLED`
 - `TREE_STRUCTURE_WORKER_ENABLED`
 - `TREE_MULTIVIEW_ENABLED`
@@ -195,11 +200,15 @@ curl -s -X POST http://localhost:59200/_analyze \
   -d '{"analyzer":"ko_nori","text":"사랑하는 문서를 자동 분류합니다"}'
 ```
 
-템플릿 변경 후 재인덱싱이 필요하면:
+매핑/템플릿 변경 후 reindex + alias swap:
 ```bash
-curl -s -X DELETE http://localhost:59200/docs-active
+./scripts/opensearch_reindex_alias_swap.sh docs-active docs-v1-000002
 ```
-그 뒤 `doc-api` 재시작 시 템플릿/인덱스/alias가 다시 bootstrap 됩니다.
+
+기본 연결값:
+- `OPENSEARCH_URL=http://localhost:59200`
+- `OPENSEARCH_INDEX_ALIAS=docs-active`
+- `OPENSEARCH_USERNAME` / `OPENSEARCH_PASSWORD` (필요 시)
 
 ## 6. Security notes
 - Do not log document body, extracted text, chunk text, or presigned URLs.

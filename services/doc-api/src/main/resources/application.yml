@@ -85,6 +85,11 @@ tree:
   assign-auto-threshold: ${TREE_ASSIGN_AUTO_THRESHOLD:0.80}
   assign-recommend-threshold: ${TREE_ASSIGN_RECOMMEND_THRESHOLD:0.60}
   assign-quarantine-enabled: ${TREE_ASSIGN_QUARANTINE_ENABLED:true}
+  template-isolation-enabled: ${TREE_TEMPLATE_ISOLATION_ENABLED:false}
+  template-score-threshold: ${TREE_TEMPLATE_SCORE_THRESHOLD:0.64}
+  template-boilerplate-ratio-threshold: ${TREE_TEMPLATE_BOILERPLATE_RATIO_THRESHOLD:0.50}
+  template-ngram-repeat-threshold: ${TREE_TEMPLATE_NGRAM_REPEAT_THRESHOLD:0.18}
+  template-fingerprint-min-docs: ${TREE_TEMPLATE_FINGERPRINT_MIN_DOCS:3}
   assign-reranker-enabled: ${TREE_ASSIGN_RERANKER_ENABLED:false}
   structure-worker-enabled: ${TREE_STRUCTURE_WORKER_ENABLED:false}
   multiview-enabled: ${TREE_MULTIVIEW_ENABLED:false}

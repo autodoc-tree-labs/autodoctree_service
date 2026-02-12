@@ -69,6 +69,7 @@ class TreeService(
     private val embeddingProvider: EmbeddingProvider,
     private val embeddingAggregationService: EmbeddingAggregationService,
     private val embeddingQualityScorer: EmbeddingQualityScorer,
+    private val templateScorer: TemplateScorer,
     private val llmTextGenerator: LlmTextGenerator,
     private val rebuildDebounceQueue: RebuildDebounceQueue,
     private val treeTelemetry: TreeTelemetry,
@@ -90,6 +91,8 @@ class TreeService(
     private val unsortedHubCounter = meterRegistry.counter("unsorted_reason_total", "reason", "HUB")
     private val unsortedConflictCounter = meterRegistry.counter("unsorted_reason_total", "reason", "CONFLICT")
     private val unsortedTemplateCounter = meterRegistry.counter("unsorted_reason_total", "reason", "TEMPLATE")
+    private val templateDocRatioSummary = meterRegistry.summary("template_doc_ratio")
+    private val templateBinSizeSummary = meterRegistry.summary("template_bin_size")
     private val policyDecisionAutoCounter = meterRegistry.counter("tree.assign_policy_total", "decision", "AUTO")
     private val policyDecisionRecommendCounter = meterRegistry.counter("tree.assign_policy_total", "decision", "RECOMMEND")
     private val policyDecisionUnsortedCounter = meterRegistry.counter("tree.assign_policy_total", "decision", "UNSORTED")
@@ -121,6 +124,11 @@ class TreeService(
         val confidenceByDocument: Map<String, Double>,
         val decisionByDocument: Map<String, String>,
         val reasonByDocument: Map<String, String>
+    )
+
+    private data class QuarantinePolicyOutcome(
+        val reasonByDocument: Map<String, String>,
+        val templateSignalsByDocument: Map<String, TemplateScorer.TemplateSignal>
     )
 
     private data class ConceptCandidate(
@@ -400,6 +408,7 @@ class TreeService(
             val rawLabelsByCluster = mutableMapOf<String, String>()
             var mergedLabelMap = emptyMap<String, String>()
             val quarantineReasonByDocument = mutableMapOf<String, String>()
+            var templateSignalsByDocument = emptyMap<String, TemplateScorer.TemplateSignal>()
             if (remaining.isNotEmpty()) {
                 val rerankerTextByDocument = if (assignmentPolicy.rerankerEnabled) {
                     buildRerankerTextByDocument(workspaceId, remaining)
@@ -523,14 +532,35 @@ class TreeService(
                     rulesAppliedCounter.increment(softRuledDocIds.size.toDouble())
                 }
                 if (assignmentPolicy.quarantineEnabled) {
-                    quarantineReasonByDocument.putAll(
-                        applyQuarantinePolicies(
-                            workspaceId = workspaceId,
-                            documents = remaining,
-                            adjacency = graph.adjacency,
-                            assignment = assignment
-                        )
+                    val quarantineCandidates = documents.filterNot { doc ->
+                        lockedLabelByDocument.containsKey(doc.id)
+                    }
+                    val quarantineOutcome = applyQuarantinePolicies(
+                        workspaceId = workspaceId,
+                        documents = quarantineCandidates,
+                        adjacency = graph.adjacency,
+                        assignment = assignment
                     )
+                    quarantineReasonByDocument.putAll(quarantineOutcome.reasonByDocument)
+                    templateSignalsByDocument = quarantineOutcome.templateSignalsByDocument
+                    val templateBinSize = quarantineOutcome.reasonByDocument.count { (_, reason) -> reason == "TEMPLATE" }
+                    val templateDocRatio = if (quarantineCandidates.isEmpty()) {
+                        0.0
+                    } else {
+                        templateBinSize.toDouble() / quarantineCandidates.size.toDouble()
+                    }
+                    templateDocRatioSummary.record(templateDocRatio)
+                    templateBinSizeSummary.record(templateBinSize.toDouble())
+                    logger.info(
+                        "template_isolation_summary workspace_id={} enabled={} template_doc_ratio={} template_bin_size={}",
+                        workspaceId,
+                        treeProperties.templateIsolationEnabled,
+                        String.format("%.3f", templateDocRatio),
+                        templateBinSize
+                    )
+                } else {
+                    templateDocRatioSummary.record(0.0)
+                    templateBinSizeSummary.record(0.0)
                 }
                 policyOutcome = applyAssignmentPolicy(
                     workspaceId = workspaceId,
@@ -555,6 +585,30 @@ class TreeService(
                     startedAtNanos = System.nanoTime(),
                     details = mapOf("skipped" to true, "reason" to "no_remaining_docs")
                 )
+                if (assignmentPolicy.quarantineEnabled) {
+                    val quarantineCandidates = documents.filterNot { doc ->
+                        lockedLabelByDocument.containsKey(doc.id)
+                    }
+                    val quarantineOutcome = applyQuarantinePolicies(
+                        workspaceId = workspaceId,
+                        documents = quarantineCandidates,
+                        adjacency = graph.adjacency,
+                        assignment = assignment
+                    )
+                    quarantineReasonByDocument.putAll(quarantineOutcome.reasonByDocument)
+                    templateSignalsByDocument = quarantineOutcome.templateSignalsByDocument
+                    val templateBinSize = quarantineOutcome.reasonByDocument.count { (_, reason) -> reason == "TEMPLATE" }
+                    val templateDocRatio = if (quarantineCandidates.isEmpty()) {
+                        0.0
+                    } else {
+                        templateBinSize.toDouble() / quarantineCandidates.size.toDouble()
+                    }
+                    templateDocRatioSummary.record(templateDocRatio)
+                    templateBinSizeSummary.record(templateBinSize.toDouble())
+                } else {
+                    templateDocRatioSummary.record(0.0)
+                    templateBinSizeSummary.record(0.0)
+                }
             }
 
             val assignStartedAt = System.nanoTime()
@@ -840,7 +894,8 @@ class TreeService(
                     "similar_docs" to similarDocs,
                     "signals" to signals,
                     "evidence" to evidence,
-                    "llm_sentence" to llmSentence
+                    "llm_sentence" to llmSentence,
+                    "template_signal" to templateSignalsByDocument[doc.id]?.toExplainMap()
                 )
                 treeRepository.insertMembership(
                     workspaceId = workspaceId,
@@ -1057,6 +1112,7 @@ class TreeService(
                     "id" to it.id,
                     "parent_id" to it.parentId,
                     "label" to it.label,
+                    "node_type" to resolveNodeType(it.label, normalizedView),
                     "locked" to it.locked,
                     "documents" to nodeDocumentIds,
                     "document_summaries" to nodeMemberships.map { membership ->
@@ -1066,6 +1122,10 @@ class TreeService(
                             "title" to (documentsById[membership.documentId]?.title ?: membership.documentId),
                             "quarantine_reason" to resolveQuarantineReason(rationale),
                             "placement_confidence" to resolvePlacementConfidence(rationale),
+                            "template_score" to resolveTemplateSignalDouble(rationale, "score"),
+                            "template_boilerplate_ratio" to resolveTemplateSignalDouble(rationale, "boilerplate_ratio"),
+                            "template_ngram_repeat_ratio" to resolveTemplateSignalDouble(rationale, "repeated_ngram_ratio"),
+                            "template_reasons" to resolveTemplateSignalReasons(rationale),
                             "placement_candidates" to buildPlacementCandidates(
                                 rationale = rationale,
                                 membershipByDocumentId = membershipByDocumentId,
@@ -1281,9 +1341,8 @@ class TreeService(
         val selectedLinks = graph.adjacency[documentId].orEmpty().take(topN.coerceIn(1, 20))
         val assignmentMembership = treeRepository.findMembershipByWorkspaceAndDocument(workspaceId, documentId)
         val assignmentNode = assignmentMembership?.nodeId?.let { treeRepository.findNodeByWorkspace(workspaceId, it) }
-        val assignmentSignals = assignmentMembership
-            ?.let { parseRationale(it.rationaleJson)["signals"].safeStringList() }
-            .orEmpty()
+        val assignmentRationale = assignmentMembership?.let { parseRationale(it.rationaleJson) }.orEmpty()
+        val assignmentSignals = assignmentRationale["signals"].safeStringList()
         val quarantineReason = assignmentSignals.firstOrNull { signal ->
             signal in setOf("LOW_CONFIDENCE", "HUB", "TEMPLATE", "CONFLICT")
         }
@@ -1299,7 +1358,8 @@ class TreeService(
                 "node_id" to assignmentMembership?.nodeId,
                 "node_label" to assignmentNode?.label,
                 "snapshot_id" to assignmentMembership?.snapshotId,
-                "quarantine_reason" to quarantineReason
+                "quarantine_reason" to quarantineReason,
+                "template_signal" to (assignmentRationale["template_signal"] as? Map<*, *>)
             ),
             "assignment_confidence" to confidence,
             "neighbors" to selectedLinks.map { link ->
@@ -1647,6 +1707,33 @@ class TreeService(
                 (map["similarity"] as? Number)?.toDouble()
             }
         return similarScore?.coerceIn(0.0, 1.0)
+    }
+
+    private fun resolveTemplateSignalDouble(rationale: Map<String, Any?>, key: String): Double? {
+        val templateSignal = rationale["template_signal"] as? Map<*, *> ?: return null
+        return (templateSignal[key] as? Number)?.toDouble()?.coerceIn(0.0, 1.0)
+    }
+
+    private fun resolveTemplateSignalReasons(rationale: Map<String, Any?>): List<String> {
+        val templateSignal = rationale["template_signal"] as? Map<*, *> ?: return emptyList()
+        return (templateSignal["reasons"] as? List<*>).orEmpty()
+            .mapNotNull { value -> value?.toString()?.trim()?.uppercase() }
+            .distinct()
+            .take(4)
+    }
+
+    private fun resolveNodeType(label: String, viewType: TreeViewType): String {
+        return when (viewType) {
+            TreeViewType.TOPIC -> when {
+                isUnsortedLabel(label) -> "unsorted"
+                label.startsWith("template-", ignoreCase = true) -> "template"
+                else -> "topic"
+            }
+            TreeViewType.PROJECT -> "project"
+            TreeViewType.TIMELINE -> "timeline"
+            TreeViewType.VERSION -> "version"
+            TreeViewType.TEMPLATE -> "template"
+        }
     }
 
     private fun buildPlacementCandidates(
@@ -2527,10 +2614,29 @@ class TreeService(
         documents: List<DocumentRow>,
         adjacency: Map<String, List<NeighborLink>>,
         assignment: MutableMap<String, String>
-    ): Map<String, String> {
+    ): QuarantinePolicyOutcome {
         if (documents.isEmpty()) {
-            return emptyMap()
+            return QuarantinePolicyOutcome(
+                reasonByDocument = emptyMap(),
+                templateSignalsByDocument = emptyMap()
+            )
         }
+        val sectionsByDocument = documents.associate { doc ->
+            doc.id to documentSectionRepository.listByWorkspaceAndDocument(workspaceId, doc.id)
+        }
+        val templateSignalsByDocument = templateScorer.scoreDocuments(documents, sectionsByDocument)
+        val detectedAt = LocalDateTime.now()
+        templateSignalsByDocument.forEach { (documentId, signal) ->
+            documentRepository.updateTemplateSignals(
+                workspaceId = workspaceId,
+                documentId = documentId,
+                templateScore = signal.score,
+                templateBoilerplateRatio = signal.boilerplateRatio,
+                templateNgramRepeatRatio = signal.repeatedNgramRatio,
+                templateDetectedAt = if (signal.candidate) detectedAt else null
+            )
+        }
+
         val reasons = mutableMapOf<String, String>()
         val degreeByDoc = documents.associate { doc ->
             doc.id to adjacency[doc.id].orEmpty().size
@@ -2540,9 +2646,6 @@ class TreeService(
 
         documents.forEach { doc ->
             val links = adjacency[doc.id].orEmpty()
-            if (links.isEmpty()) {
-                return@forEach
-            }
             val top1 = links.getOrNull(0)?.similarity ?: 0.0
             val top2 = links.getOrNull(1)?.similarity ?: 0.0
             val confidenceMargin = (top1 - top2).coerceIn(0.0, 1.0)
@@ -2550,22 +2653,14 @@ class TreeService(
                 .mapNotNull { neighbor -> assignment[neighbor.documentId] }
                 .toSet()
             val diversity = if (links.isEmpty()) 0.0 else neighborLabels.size.toDouble() / links.size.toDouble()
-
-            val sections = documentSectionRepository.listByWorkspaceAndDocument(workspaceId, doc.id)
-            val noisySections = sections.count { section ->
-                section.qualityFlags
-                    ?.split(',')
-                    ?.map { it.trim().uppercase() }
-                    ?.any { flag -> flag in setOf("GIBBERISH", "TOO_SHORT", "ZERO_LENGTH") } == true
-            }
-            val templateLikely = sections.isNotEmpty() && noisySections.toDouble() / sections.size.toDouble() >= 0.6
+            val templateSignal = templateSignalsByDocument[doc.id]
             val degree = degreeByDoc[doc.id] ?: 0
 
             val reason = when {
-                templateLikely -> "TEMPLATE"
-                degree.toDouble() >= hubThreshold -> "HUB"
-                confidenceMargin < 0.06 -> "LOW_CONFIDENCE"
-                diversity >= 0.45 && confidenceMargin < 0.14 -> "CONFLICT"
+                templateSignal?.shouldQuarantine == true -> "TEMPLATE"
+                links.isNotEmpty() && degree.toDouble() >= hubThreshold -> "HUB"
+                links.isNotEmpty() && confidenceMargin < 0.06 -> "LOW_CONFIDENCE"
+                links.isNotEmpty() && diversity >= 0.45 && confidenceMargin < 0.14 -> "CONFLICT"
                 else -> null
             } ?: return@forEach
 
@@ -2581,7 +2676,10 @@ class TreeService(
                 "TEMPLATE" -> unsortedTemplateCounter.increment()
             }
         }
-        return reasons
+        return QuarantinePolicyOutcome(
+            reasonByDocument = reasons,
+            templateSignalsByDocument = templateSignalsByDocument
+        )
     }
 
     private fun resolveAssignmentPolicy(workspaceId: String): AssignmentPolicy {

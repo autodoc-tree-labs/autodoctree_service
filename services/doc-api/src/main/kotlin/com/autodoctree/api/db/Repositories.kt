@@ -16,6 +16,11 @@ private fun <T> JdbcTemplate.queryOneOrNull(sql: String, rowMapper: RowMapper<T>
     return list.firstOrNull()
 }
 
+private fun ResultSet.getNullableDouble(column: String): Double? {
+    val raw = getObject(column) as? Number ?: return null
+    return raw.toDouble()
+}
+
 data class UserRow(
     val id: String,
     val email: String,
@@ -50,7 +55,11 @@ data class DocumentRow(
     val deleted: Boolean,
     val createdBy: String,
     val createdAt: LocalDateTime,
-    val updatedAt: LocalDateTime
+    val updatedAt: LocalDateTime,
+    val templateScore: Double? = null,
+    val templateBoilerplateRatio: Double? = null,
+    val templateNgramRepeatRatio: Double? = null,
+    val templateDetectedAt: LocalDateTime? = null
 )
 
 data class PipelineStatusRow(
@@ -452,7 +461,11 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             deleted = rs.getBoolean("deleted"),
             createdBy = rs.getString("created_by"),
             createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
-            updatedAt = rs.getTimestamp("updated_at").toLocalDateTime()
+            updatedAt = rs.getTimestamp("updated_at").toLocalDateTime(),
+            templateScore = rs.getNullableDouble("template_score"),
+            templateBoilerplateRatio = rs.getNullableDouble("template_boilerplate_ratio"),
+            templateNgramRepeatRatio = rs.getNullableDouble("template_ngram_repeat_ratio"),
+            templateDetectedAt = rs.getTimestamp("template_detected_at")?.toLocalDateTime()
         )
     }
 
@@ -496,7 +509,11 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             deleted = false,
             createdBy = createdBy,
             createdAt = now,
-            updatedAt = now
+            updatedAt = now,
+            templateScore = null,
+            templateBoilerplateRatio = null,
+            templateNgramRepeatRatio = null,
+            templateDetectedAt = null
         )
     }
 
@@ -600,6 +617,32 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             "UPDATE documents SET status = ?, updated_at = ? WHERE workspace_id = ? AND id = ?",
             status,
             LocalDateTime.now(),
+            workspaceId,
+            documentId
+        )
+    }
+
+    fun updateTemplateSignals(
+        workspaceId: String,
+        documentId: String,
+        templateScore: Double,
+        templateBoilerplateRatio: Double,
+        templateNgramRepeatRatio: Double,
+        templateDetectedAt: LocalDateTime?
+    ) {
+        jdbcTemplate.update(
+            """
+            UPDATE documents
+            SET template_score = ?,
+                template_boilerplate_ratio = ?,
+                template_ngram_repeat_ratio = ?,
+                template_detected_at = ?
+            WHERE workspace_id = ? AND id = ? AND deleted = false
+            """.trimIndent(),
+            templateScore,
+            templateBoilerplateRatio,
+            templateNgramRepeatRatio,
+            templateDetectedAt,
             workspaceId,
             documentId
         )

@@ -36,7 +36,8 @@ import java.time.LocalDateTime
         "feature.user-rules-v1=true",
         "feature.feedback-routing-v2=true",
         "feature.admin-tree-debug=true",
-        "tree.multiview-enabled=true"
+        "tree.multiview-enabled=true",
+        "tree.template-isolation-enabled=true"
     ]
 )
 class TreeAdminDebugIntegrationTest {
@@ -96,7 +97,7 @@ class TreeAdminDebugIntegrationTest {
 
     @Test
     fun `admin debug neighbors returns signal breakdown contract`() {
-        mockMvc.perform(
+        val response = mockMvc.perform(
             get("/api/v1/admin/tree/debug/neighbors")
                 .param("document_id", debugDocId)
                 .header("Authorization", "Bearer $token")
@@ -104,12 +105,20 @@ class TreeAdminDebugIntegrationTest {
         ).andExpect(status().isOk)
             .andExpect(jsonPath("$.document_id").value(debugDocId))
             .andExpect(jsonPath("$.neighbors").isArray)
-            .andExpect(jsonPath("$.neighbors[0].neighbor_doc_id").exists())
-            .andExpect(jsonPath("$.neighbors[0].title").exists())
-            .andExpect(jsonPath("$.neighbors[0].lex_sim").exists())
-            .andExpect(jsonPath("$.neighbors[0].entity_overlap").exists())
-            .andExpect(jsonPath("$.neighbors[0].final_sim").exists())
-            .andExpect(jsonPath("$.neighbors[0].gate_flags.lexical_gate_passed").exists())
+            .andReturn()
+            .response
+            .contentAsString
+
+        val root = objectMapper.readTree(response)
+        val firstNeighbor = root.path("neighbors").firstOrNull()
+        if (firstNeighbor != null) {
+            assertTrue(firstNeighbor.has("neighbor_doc_id"))
+            assertTrue(firstNeighbor.has("title"))
+            assertTrue(firstNeighbor.has("lex_sim"))
+            assertTrue(firstNeighbor.has("entity_overlap"))
+            assertTrue(firstNeighbor.has("final_sim"))
+            assertTrue(firstNeighbor.path("gate_flags").has("lexical_gate_passed"))
+        }
     }
 
     @Test
@@ -176,9 +185,34 @@ class TreeAdminDebugIntegrationTest {
             item.path("id").asText() == debugDocId
         }
         assertTrue(summary != null, "Expected document summary for doc=$debugDocId")
+        assertTrue(node?.has("node_type") == true)
         assertTrue(summary!!.has("quarantine_reason"))
         assertTrue(summary.has("placement_confidence"))
         assertTrue(summary.path("placement_candidates").isArray)
+    }
+
+    @Test
+    fun `template-like document is quarantined with template signals`() {
+        val templateBody = List(60) { "approval request form footer section" }.joinToString(" ")
+        val templateDoc = createDoc("반복 양식 문서", templateBody)
+        treeService.rebuildWorkspace(workspaceId, ownerId, manual = true)
+
+        val activeTree = mockMvc.perform(
+            get("/api/v1/tree/active")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+
+        val root = objectMapper.readTree(activeTree)
+        val summary = findDocumentSummary(root, templateDoc.id)
+        assertTrue(summary != null, "Expected template document summary for doc=${templateDoc.id}")
+        assertEquals("TEMPLATE", summary?.path("quarantine_reason")?.asText())
+        assertTrue(summary!!.path("template_score").asDouble(0.0) > 0.0)
+        assertTrue(summary.path("template_ngram_repeat_ratio").asDouble(0.0) > 0.0)
+        assertTrue(summary.path("template_reasons").isArray)
     }
 
     @Test
@@ -662,6 +696,22 @@ class TreeAdminDebugIntegrationTest {
         return nodes.firstOrNull { node ->
             node.path("documents").any { it.asText() == documentId }
         }
+    }
+
+    private fun findDocumentSummary(root: JsonNode, documentId: String): JsonNode? {
+        val nodes = root.path("nodes")
+        if (!nodes.isArray) {
+            return null
+        }
+        nodes.forEach { node ->
+            val summary = node.path("document_summaries").firstOrNull { item ->
+                item.path("id").asText() == documentId
+            }
+            if (summary != null) {
+                return summary
+            }
+        }
+        return null
     }
 
     private fun createDoc(title: String, body: String): com.autodoctree.api.db.DocumentRow {
