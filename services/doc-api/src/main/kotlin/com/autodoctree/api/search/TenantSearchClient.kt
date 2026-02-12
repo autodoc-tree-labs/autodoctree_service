@@ -1,5 +1,6 @@
 package com.autodoctree.api.search
 
+import com.autodoctree.api.config.FeatureFlags
 import com.autodoctree.api.config.SearchProperties
 import com.autodoctree.api.config.SecurityFlags
 import com.autodoctree.api.db.DocumentRepository
@@ -7,6 +8,7 @@ import com.autodoctree.api.infra.BadRequestException
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import jakarta.annotation.PostConstruct
+import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.core.io.ClassPathResource
 import org.springframework.stereotype.Component
@@ -67,6 +69,7 @@ internal fun buildNoriTemplatePayload(
             ),
             "ko_synonym_filter" to mapOf(
                 "type" to "synonym",
+                "lenient" to true,
                 "synonyms" to synonymRules
             )
         ),
@@ -100,6 +103,28 @@ internal fun buildNoriTemplatePayload(
                         "analyzer" to "ko_nori",
                         "search_analyzer" to "ko_nori"
                     ),
+                    "created_at" to mapOf("type" to "date"),
+                    "updated_at" to mapOf("type" to "date")
+                )
+            )
+        )
+    )
+}
+
+internal fun buildBasicTemplatePayload(indexPattern: String): Map<String, Any?> {
+    return mapOf(
+        "index_patterns" to listOf(indexPattern),
+        "template" to mapOf(
+            "settings" to mapOf(
+                "number_of_shards" to 1,
+                "number_of_replicas" to 0
+            ),
+            "mappings" to mapOf(
+                "properties" to mapOf(
+                    "workspace_id" to mapOf("type" to "keyword"),
+                    "document_id" to mapOf("type" to "keyword"),
+                    "title" to mapOf("type" to "text"),
+                    "body" to mapOf("type" to "text"),
                     "created_at" to mapOf("type" to "date"),
                     "updated_at" to mapOf("type" to "date")
                 )
@@ -166,6 +191,7 @@ class DatabaseTenantSearchClient(
 class OpenSearchTenantSearchClient(
     private val documentRepository: DocumentRepository,
     private val searchProperties: SearchProperties,
+    private val featureFlags: FeatureFlags,
     private val securityFlags: SecurityFlags,
     private val objectMapper: ObjectMapper,
     meterRegistry: MeterRegistry
@@ -174,8 +200,10 @@ class OpenSearchTenantSearchClient(
         .connectTimeout(Duration.ofSeconds(5))
         .build()
 
+    private val logger = LoggerFactory.getLogger(javaClass)
     private val missingFilterCounter = meterRegistry.counter("security.os_missing_tenant_filter_total")
     private val requestFailureCounter = meterRegistry.counter("search.opensearch.request_failure_total")
+    private val templateFallbackCounter = meterRegistry.counter("search.opensearch.template_fallback_total")
     private val baseUrl = searchProperties.opensearchUrl.trimEnd('/')
     private val noriUserDictionaryRules = readResourceRules("opensearch/nori_userdict.txt")
     private val synonymRules = readResourceRules("opensearch/ko_synonyms.txt")
@@ -298,15 +326,54 @@ class OpenSearchTenantSearchClient(
     }
 
     private fun ensureTemplate() {
-        val templatePayload = buildNoriTemplatePayload(
+        val templatePath = "/_index_template/${encode(searchProperties.templateName)}"
+        val indexPattern = "${searchAliasPrefix()}-v1-*"
+        if (!featureFlags.noriTokenizer) {
+            ensureTemplateWithPayload(
+                templatePath = templatePath,
+                templatePayload = buildBasicTemplatePayload(indexPattern)
+            )
+            return
+        }
+
+        val noriTemplatePayload = buildNoriTemplatePayload(
             indexPattern = "${searchAliasPrefix()}-v1-*",
             noriUserDictionaryRules = noriUserDictionaryRules,
             synonymRules = synonymRules
         )
+        val noriResponse = executeRaw(
+            method = "PUT",
+            path = templatePath,
+            body = objectMapper.writeValueAsString(noriTemplatePayload)
+        )
+        if (noriResponse.statusCode() in setOf(200, 201)) {
+            return
+        }
+        if (noriResponse.statusCode() != 400) {
+            requestFailureCounter.increment()
+            throw IllegalStateException("OpenSearch request failed: ${noriResponse.statusCode()}")
+        }
 
+        templateFallbackCounter.increment()
+        logger.warn(
+            "opensearch_template_fallback status={} reason={}",
+            noriResponse.statusCode(),
+            trimForLog(noriResponse.body())
+        )
+
+        ensureTemplateWithPayload(
+            templatePath = templatePath,
+            templatePayload = buildBasicTemplatePayload(indexPattern)
+        )
+    }
+
+    private fun ensureTemplateWithPayload(
+        templatePath: String,
+        templatePayload: Map<String, Any?>
+    ) {
         execute(
             method = "PUT",
-            path = "/_index_template/${encode(searchProperties.templateName)}",
+            path = templatePath,
             body = objectMapper.writeValueAsString(templatePayload),
             acceptedStatusCodes = setOf(200, 201)
         )
@@ -412,7 +479,7 @@ class OpenSearchTenantSearchClient(
         val response = executeRaw(method, path, body)
         if (response.statusCode() !in acceptedStatusCodes) {
             requestFailureCounter.increment()
-            throw IllegalStateException("OpenSearch request failed: ${response.statusCode()}")
+            throw IllegalStateException("OpenSearch request failed: ${response.statusCode()} body=${trimForLog(response.body())}")
         }
         return response
     }
@@ -440,6 +507,16 @@ class OpenSearchTenantSearchClient(
         }
 
         return httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString())
+    }
+
+    private fun trimForLog(payload: String?): String {
+        if (payload.isNullOrBlank()) {
+            return "<empty>"
+        }
+        return payload
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(securityFlags.logMaxStringLength)
     }
 
     private fun readResourceRules(path: String): List<String> {

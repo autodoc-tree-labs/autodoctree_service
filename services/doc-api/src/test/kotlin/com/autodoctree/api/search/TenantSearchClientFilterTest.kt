@@ -47,6 +47,8 @@ class TenantSearchClientFilterTest {
         val template = payload["template"] as Map<*, *>
         val settings = template["settings"] as Map<*, *>
         val analysis = settings["analysis"] as Map<*, *>
+        val filters = analysis["filter"] as Map<*, *>
+        val synonymFilter = filters["ko_synonym_filter"] as Map<*, *>
         val analyzers = analysis["analyzer"] as Map<*, *>
         val koNori = analyzers["ko_nori"] as Map<*, *>
         val mappings = template["mappings"] as Map<*, *>
@@ -56,9 +58,27 @@ class TenantSearchClientFilterTest {
 
         assertTrue(payload["index_patterns"] == listOf("docs-v1-*"))
         assertTrue(koNori["tokenizer"] == "ko_nori_tokenizer")
+        assertTrue(synonymFilter["lenient"] == true)
         assertTrue(title["analyzer"] == "ko_nori")
         assertTrue(title["search_analyzer"] == "ko_nori")
         assertTrue(body["analyzer"] == "ko_nori")
         assertTrue(body["search_analyzer"] == "ko_nori")
+    }
+
+    @Test
+    fun `basic template payload uses plain text mapping for title and body`() {
+        val payload = buildBasicTemplatePayload(indexPattern = "docs-v1-*")
+
+        val template = payload["template"] as Map<*, *>
+        val mappings = template["mappings"] as Map<*, *>
+        val properties = mappings["properties"] as Map<*, *>
+        val title = properties["title"] as Map<*, *>
+        val body = properties["body"] as Map<*, *>
+
+        assertTrue(payload["index_patterns"] == listOf("docs-v1-*"))
+        assertTrue(title["type"] == "text")
+        assertTrue(body["type"] == "text")
+        assertFalse(title.containsKey("analyzer"))
+        assertFalse(body.containsKey("analyzer"))
     }
 }

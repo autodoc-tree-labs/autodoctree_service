@@ -56,7 +56,6 @@ Status legend:
 | B-0505 | DONE | workspace-level debounce/coalesce queue integrated into worker with coalescing test |
 | B-0510 | DONE | multi-tenant negative integration suite for doc/list/search/tree/explain/presign/complete/admin |
 | B-0511 | DONE | Korean-aware tree tokenization + neighbor similarity cutoff (`tree.neighbor-min-similarity`) |
-| B-0702 | DONE | Tree similarity now aggregates DOCUMENT/SUMMARY/SECTION embeddings with configurable weights and tests |
 
 ## Web User (U)
 | Ticket | Status | Notes |
@@ -89,4 +88,4 @@ Status legend:
 | A-0115 | DONE | admin Playwright smoke in CI |
 
 ## Next implementation targets
-1. Backlog audit maintenance (keep B-0702 follow-up quality checks)
+1. Backlog audit maintenance only (current tracked tickets: all DONE)
