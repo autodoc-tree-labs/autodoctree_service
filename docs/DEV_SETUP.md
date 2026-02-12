@@ -210,6 +210,31 @@ curl -s -X POST http://localhost:59200/_analyze \
 - `OPENSEARCH_INDEX_ALIAS=docs-active`
 - `OPENSEARCH_USERNAME` / `OPENSEARCH_PASSWORD` (필요 시)
 
+## 5-2. Offline model packaging bootstrap (I-1001)
+모델 파일은 `models/manifest.json`에 고정 경로/버전/체크섬으로 관리합니다.
+
+1) 모델 파일 반입(예시 경로):
+- `models/ollama/bge-m3.tar`
+- `models/ollama/llama3.1-8b-instruct.tar`
+- `models/reranker/model.onnx`
+- (옵션) `models/clip/model.safetensors`
+
+2) 체크섬 lock:
+```bash
+python3 scripts/model_manifest_lock.py --manifest models/manifest.json
+```
+
+3) 무결성 검증:
+```bash
+python3 scripts/model_manifest_verify.py --manifest models/manifest.json
+```
+
+4) reranker compose 실행(사전검증 포함):
+```bash
+docker compose --profile ml up -d reranker-api
+```
+`reranker-api`는 `model-preflight`가 성공해야 시작됩니다.
+
 ## 6. Security notes
 - Do not log document body, extracted text, chunk text, or presigned URLs.
 - Tenant-scoped endpoints require `X-Workspace-Id`.

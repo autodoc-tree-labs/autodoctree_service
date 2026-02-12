@@ -49,6 +49,7 @@ docker compose --profile llm --profile llm-init up ollama-init
 
 Optional local reranker runtime (Stage-B edge validation):
 ```bash
+python3 scripts/model_manifest_verify.py --manifest models/manifest.json
 docker compose --profile ml up -d reranker-api
 ./scripts/reranker_smoke.sh
 ```
@@ -69,6 +70,12 @@ docker compose --profile observability up -d prometheus grafana
 OpenSearch reindex + alias swap helper:
 ```bash
 ./scripts/opensearch_reindex_alias_swap.sh docs-active docs-v1-000002
+```
+
+Offline model manifest workflow:
+```bash
+python3 scripts/model_manifest_lock.py --manifest models/manifest.json
+python3 scripts/model_manifest_verify.py --manifest models/manifest.json
 ```
 
 2) backend (IntelliJ)

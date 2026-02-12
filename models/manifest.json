@@ -1,0 +1,42 @@
+{
+  "manifest_version": 1,
+  "generated_at": "",
+  "models": [
+    {
+      "id": "embedding-bge-m3",
+      "runtime": "ollama",
+      "path": "models/ollama/bge-m3.tar",
+      "version": "bge-m3",
+      "sha256": "",
+      "size_bytes": 0,
+      "required": true
+    },
+    {
+      "id": "llm-llama3.1-8b-instruct",
+      "runtime": "ollama",
+      "path": "models/ollama/llama3.1-8b-instruct.tar",
+      "version": "llama3.1:8b-instruct",
+      "sha256": "",
+      "size_bytes": 0,
+      "required": true
+    },
+    {
+      "id": "reranker-cross-encoder",
+      "runtime": "reranker-api",
+      "path": "models/reranker/model.onnx",
+      "version": "cross-encoder-v1",
+      "sha256": "",
+      "size_bytes": 0,
+      "required": true
+    },
+    {
+      "id": "vision-clip",
+      "runtime": "optional",
+      "path": "models/clip/model.safetensors",
+      "version": "clip-vit-base-patch32",
+      "sha256": "",
+      "size_bytes": 0,
+      "required": false
+    }
+  ]
+}

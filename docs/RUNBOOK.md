@@ -60,6 +60,22 @@ curl -s \"http://localhost:59200/docs-active/_search?q=workspace_id:YOUR_WORKSPA
 - Re-run alias switch and set previous index to `is_write_index: true`.
 - Do not delete the previous index until read/search behavior is confirmed.
 
+## Offline Model Manifest (I-1001)
+
+### Lock manifest after model import
+```bash
+python3 scripts/model_manifest_lock.py --manifest models/manifest.json
+```
+
+### Verify manifest before runtime
+```bash
+python3 scripts/model_manifest_verify.py --manifest models/manifest.json
+```
+
+### Compose preflight behavior
+- `docker compose --profile ml up -d reranker-api` runs `model-preflight` first.
+- If any required model file/checksum is missing, `model-preflight` fails closed and `reranker-api` does not start.
+
 ## Tree Quality Metrics (I-0614)
 
 ### Key metrics

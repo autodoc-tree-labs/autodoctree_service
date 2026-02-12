@@ -119,6 +119,9 @@ services:
       context: ./services/reranker-api
       dockerfile: Dockerfile
     profiles: ["ml"]
+    depends_on:
+      model-preflight:
+        condition: service_completed_successfully
     ports:
       - "${RERANKER_PORT:-18080}:18080"
     environment:
@@ -130,7 +133,18 @@ services:
       timeout: 5s
       retries: 20
     volumes:
-      - reranker-data:/models
+      - ./models:/models:ro
+
+  model-preflight:
+    image: python:3.12-alpine
+    profiles: ["ml"]
+    working_dir: /workspace
+    entrypoint: >
+      /bin/sh -c '
+      set -e;
+      python3 scripts/model_manifest_verify.py --manifest models/manifest.json --workspace /workspace;'
+    volumes:
+      - ./:/workspace:ro
 
   structure-worker:
     build:
@@ -184,5 +198,4 @@ volumes:
   opensearch-data:
   minio-data:
   ollama-data:
-  reranker-data:
   grafana-data:
