@@ -140,10 +140,17 @@ Important flags:
 - `security.os-tenant-assert`
 - `security.log-sanitizer-enabled`
 - `security.log-max-string-length`
-- `TREE_NEIGHBOR_MIN_SIMILARITY` (기본 `0.8`, 값이 높을수록 트리 노드가 더 잘 분리됨)
-- `TREE_NEIGHBOR_MUTUAL_KNN_REQUIRED`
-- `TREE_NEIGHBOR_SNN_THRESHOLD`
+- `TREE_NEIGHBOR_TOP_K` (권장 `5`)
+- `TREE_NEIGHBOR_NORMALIZE` (권장 `true`)
+- `TREE_NEIGHBOR_MIN_SIMILARITY` (권장 `0.65`)
+- `TREE_NEIGHBOR_MIN_SIMILARITY_AUTO` / `TREE_NEIGHBOR_MIN_SIMILARITY_AUTO_MARGIN`
+- `TREE_NEIGHBOR_MUTUAL_KNN`
+- `TREE_NEIGHBOR_SHARED_NEIGHBOR_JACCARD_MIN` (권장 `0.10`)
 - `TREE_NEIGHBOR_EDGE_BUDGET`
+- `TREE_NEIGHBOR_DEGREE_CAP` / `TREE_NEIGHBOR_BRIDGE_PRUNE_POLICY`
+- `TREE_CLUSTER_MERGE_MIN_AFFINITY` (권장 `0.55`)
+- `TREE_CLUSTER_SPLIT_RETRY_WITH_HIGHER_RESOLUTION`
+- `TREE_CLUSTER_SPLIT_RETRY_RESOLUTION_MULTIPLIER`
 - `TREE_CONSENSUS_ENABLED`
 - `TREE_CONSENSUS_THRESHOLD`
 - `TREE_ASSIGN_AUTO_THRESHOLD`
@@ -186,6 +193,23 @@ Important flags:
 - `STRUCTURE_WORKER_MAX_DEPTH`
 - `TREE_EMBEDDING_DOCUMENT_WEIGHT` / `TREE_EMBEDDING_SUMMARY_WEIGHT` / `TREE_EMBEDDING_SECTION_WEIGHT`
   - 채널별 임베딩 결합 가중치(TITLE, BODY_SUMMARY, SECTION_CENTROID)
+
+### Tree Rebuild 품질 기본값 (운영 권장)
+- normalize된 cosine(`TREE_NEIGHBOR_NORMALIZE=true`) 환경에서는 무관 문서 baseline이 `0.5` 근처가 될 수 있습니다.
+- 이때 `TREE_NEIGHBOR_MIN_SIMILARITY=0.25`는 사실상 대부분 edge를 통과시켜 과연결/혼합을 유발합니다.
+- 운영에서는 normalize=true일 때 `minSimilarity`를 보통 `0.6~0.8` 범위에서 시작해 조정합니다.
+- 권장 기본값:
+  - `TREE_NEIGHBOR_NORMALIZE=true`
+  - `TREE_NEIGHBOR_MIN_SIMILARITY=0.65`
+  - `TREE_NEIGHBOR_TOP_K=5`
+  - `TREE_NEIGHBOR_MUTUAL_KNN=true`
+  - `TREE_NEIGHBOR_SHARED_NEIGHBOR_JACCARD_MIN=0.10`
+  - `TREE_CLUSTER_MERGE_MIN_AFFINITY=0.55`
+
+`tree_rebuild_summary`에서 운영자가 먼저 볼 값:
+- `similarity_distributions.fused_sim.p95/p99` (임계값 대비 분포 위치)
+- `edge_statistics.edges_after_top_k` / `edges_filtered_by_*` (필터 단계별 제거량)
+- `graph_statistics.undirected_degree.p99/max` (과연결 탐지 핵심; p99가 튀면 브릿지 과다 가능성 높음)
 
 관리자 트리 디버그/룰 기능을 로컬에서 켜려면:
 ```bash

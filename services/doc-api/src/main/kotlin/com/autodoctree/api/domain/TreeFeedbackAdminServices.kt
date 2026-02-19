@@ -178,6 +178,109 @@ class TreeService(
         val trace = treeTelemetry.begin(workspaceId)
         try {
             val normalizedView = resolveViewType(viewType)
+            fun format3(value: Double): String = String.format("%.3f", value)
+            fun distributionStatsMap(stats: DistributionStats): Map<String, Any?> {
+                return mapOf(
+                    "count" to stats.count,
+                    "sampled_count" to stats.sampledCount,
+                    "mean" to format3(stats.mean),
+                    "min" to format3(stats.min),
+                    "max" to format3(stats.max),
+                    "p50" to format3(stats.p50),
+                    "p90" to format3(stats.p90),
+                    "p95" to format3(stats.p95),
+                    "p99" to format3(stats.p99)
+                )
+            }
+            fun similarityDistributionMap(distributions: SimilarityDistributions): Map<String, Any?> {
+                return mapOf(
+                    "semantic_scale" to distributions.semanticScale,
+                    "semantic_sim" to distributionStatsMap(distributions.semantic),
+                    "lexical_sim" to distributionStatsMap(distributions.lexical),
+                    "fused_sim" to distributionStatsMap(distributions.fused)
+                )
+            }
+            fun edgeFilterStatsMap(stats: EdgeFilterStats): Map<String, Any?> {
+                return mapOf(
+                    "candidate_pairs" to stats.evaluatedPairs,
+                    "evaluated_pairs" to stats.evaluatedPairs,
+                    "edges_before_filter" to stats.edgesBeforeFilter,
+                    "edges_filtered_by_min_similarity" to stats.edgesFilteredByMinSimilarity,
+                    "edges_after_top_k" to stats.edgesAfterTopK,
+                    "edges_filtered_by_mutual_knn" to stats.edgesFilteredByMutualKnn,
+                    "edges_filtered_by_snn" to stats.edgesFilteredBySnn,
+                    "edges_filtered_by_degree_cap" to stats.edgesFilteredByDegreeCap,
+                    "edges_after_all_filters" to stats.edgesAfterAllFilters
+                )
+            }
+            fun degreeStatsMap(stats: DegreeStats): Map<String, Any?> {
+                return mapOf(
+                    "mean" to format3(stats.mean),
+                    "p95" to format3(stats.p95),
+                    "p99" to format3(stats.p99),
+                    "max" to stats.max,
+                    "threshold" to stats.threshold,
+                    "nodes_at_or_above_threshold" to stats.nodesAtOrAboveThreshold
+                )
+            }
+            fun minSimilarityDecisionMap(decision: MinSimilarityDecision): Map<String, Any?> {
+                return mapOf(
+                    "configured_threshold" to format3(decision.configuredThreshold),
+                    "auto_enabled" to decision.autoEnabled,
+                    "auto_baseline_p95" to decision.autoBaselineP95?.let(::format3),
+                    "auto_threshold" to decision.autoThreshold?.let(::format3),
+                    "effective_threshold" to format3(decision.effectiveThreshold)
+                )
+            }
+            fun clusterInstrumentationMap(stats: ClusterBuildStats): Map<String, Any?> {
+                return mapOf(
+                    "cluster_count" to stats.clusterCount,
+                    "merge_attempted" to stats.mergeAttempted,
+                    "merged" to stats.merged,
+                    "kept_singleton" to stats.keptSingleton,
+                    "split_oversized_attempted" to stats.splitOversizedAttempted,
+                    "split_retry_attempted" to stats.splitRetryAttempted,
+                    "split_retry_succeeded" to stats.splitRetrySucceeded,
+                    "split_fallback_used" to stats.splitFallbackUsed
+                )
+            }
+            fun graphInstrumentationMap(graphStats: NeighborBuildStats): Map<String, Any?> {
+                return mapOf(
+                    "similarity_distributions" to similarityDistributionMap(graphStats.similarityDistributions),
+                    "edge_statistics" to edgeFilterStatsMap(graphStats.edgeFilterStats),
+                    "graph_statistics" to mapOf(
+                        "undirected_degree" to degreeStatsMap(graphStats.degreeStats)
+                    ),
+                    "min_similarity_decision" to minSimilarityDecisionMap(graphStats.minSimilarityDecision),
+                    "reason_breakdown" to graphStats.reasonBreakdown
+                )
+            }
+            fun treeConfigEcho(): Map<String, Any?> {
+                return mapOf(
+                    "neighbor_normalize" to treeProperties.neighborNormalize,
+                    "neighbor_min_similarity" to treeProperties.neighborMinSimilarity,
+                    "neighbor_min_similarity_auto" to treeProperties.neighborMinSimilarityAuto,
+                    "neighbor_min_similarity_auto_margin" to treeProperties.neighborMinSimilarityAutoMargin,
+                    "neighbor_top_k" to treeProperties.neighborTopK,
+                    "fusion_weights" to mapOf(
+                        "semantic" to treeProperties.fusionSemanticWeight,
+                        "lexical" to treeProperties.fusionLexicalWeight
+                    ),
+                    "fusion_lexical_gate" to treeProperties.fusionLexicalGate,
+                    "neighbor_mutual_knn" to treeProperties.neighborMutualKnn,
+                    "neighbor_shared_neighbor_jaccard_min" to treeProperties.neighborSharedNeighborJaccardMin,
+                    "neighbor_edge_budget" to treeProperties.neighborEdgeBudget,
+                    "neighbor_degree_cap" to treeProperties.neighborDegreeCap,
+                    "neighbor_bridge_prune_policy" to treeProperties.neighborBridgePrunePolicy,
+                    "cluster_merge_min_affinity" to treeProperties.clusterMergeMinAffinity,
+                    "max_cluster_size" to treeProperties.maxClusterSize,
+                    "min_cluster_size" to treeProperties.minClusterSize,
+                    "cluster_split_retry_with_higher_resolution" to treeProperties.clusterSplitRetryWithHigherResolution,
+                    "cluster_split_retry_resolution_multiplier" to treeProperties.clusterSplitRetryResolutionMultiplier,
+                    "community_resolution" to treeProperties.communityResolution,
+                    "community_clustering_enabled" to featureFlags.communityClustering
+                )
+            }
             val ingestStartedAt = System.nanoTime()
             val documents = documentRepository.listWorkspaceDocuments(workspaceId)
             val documentsById = documents.associateBy { it.id }
@@ -331,6 +434,7 @@ class TreeService(
 
             var remaining = documents.filterNot { assignment.containsKey(it.id) }
             var graphStats = NeighborBuildStats()
+            var clusterStats = ClusterBuildStats()
             var labelSourceBreakdown = emptyMap<String, Int>()
             var labelCacheToPersist = previousLabelCache
             val assignmentPolicy = resolveAssignmentPolicy(workspaceId)
@@ -425,9 +529,13 @@ class TreeService(
                     semanticWeight = treeProperties.fusionSemanticWeight,
                     lexicalWeight = treeProperties.fusionLexicalWeight,
                     lexicalGate = treeProperties.fusionLexicalGate,
-                    mutualKnnRequired = treeProperties.neighborMutualKnnRequired,
-                    snnThreshold = treeProperties.neighborSnnThreshold,
+                    minSimilarityAuto = treeProperties.neighborMinSimilarityAuto,
+                    minSimilarityAutoMargin = treeProperties.neighborMinSimilarityAutoMargin,
+                    mutualKnnRequired = treeProperties.neighborMutualKnn,
+                    sharedNeighborJaccardMin = treeProperties.neighborSharedNeighborJaccardMin,
                     edgeBudget = treeProperties.neighborEdgeBudget,
+                    degreeCap = treeProperties.neighborDegreeCap,
+                    bridgePrunePolicy = treeProperties.neighborBridgePrunePolicy,
                     rerankerEnabled = assignmentPolicy.rerankerEnabled,
                     rerankerPerDocBudget = treeProperties.rerankerPerDocBudget,
                     rerankerPassThreshold = treeProperties.rerankerPassThreshold,
@@ -443,19 +551,26 @@ class TreeService(
                     details = mapOf(
                         "edge_count" to graphStats.edgeCount,
                         "filtered_edge_count" to graphStats.filteredEdgeCount,
-                        "avg_similarity" to String.format("%.3f", graphStats.averageSimilarity),
-                        "mutual_pass_rate" to String.format("%.3f", graphStats.mutualPassRate),
-                        "snn_pass_rate" to String.format("%.3f", graphStats.snnPassRate),
+                        "avg_similarity" to format3(graphStats.averageSimilarity),
+                        "mutual_pass_rate" to format3(graphStats.mutualPassRate),
+                        "snn_pass_rate" to format3(graphStats.snnPassRate),
                         "hub_doc_count" to graphStats.hubDocCount,
                         "reranker_validated_pairs" to graphStats.rerankerValidatedPairs,
-                        "reranker_pass_rate" to String.format("%.3f", graphStats.rerankerPassRate),
-                        "reranker_fallback_rate" to String.format("%.3f", graphStats.rerankerFallbackRate)
-                    )
+                        "reranker_pass_rate" to format3(graphStats.rerankerPassRate),
+                        "reranker_fallback_rate" to format3(graphStats.rerankerFallbackRate)
+                    ) + graphInstrumentationMap(graphStats)
                 )
 
                 val clusterStartedAt = System.nanoTime()
                 var clusterSource = "LOCAL_CLUSTERER"
                 var workerFallbackRate = 0.0
+                val localClusterBuild: () -> ClusterBuildResult = {
+                    treeClusterer.clusterWithStats(
+                        documents = remaining,
+                        graph = graph,
+                        maxClusterSize = treeProperties.maxClusterSize
+                    )
+                }
                 clusters = if (assignmentPolicy.structureWorkerEnabled) {
                     runCatching {
                         val imported = importWorkerClusters(workspaceId, remaining, graph)
@@ -463,6 +578,7 @@ class TreeService(
                             throw IllegalStateException("structure worker returned empty clusters")
                         }
                         clusterSource = "STRUCTURE_WORKER"
+                        clusterStats = ClusterBuildStats(clusterCount = imported.size)
                         imported
                     }.getOrElse { ex ->
                         workerFallbackCounter.increment()
@@ -472,18 +588,14 @@ class TreeService(
                             workspaceId,
                             ex.message
                         )
-                        treeClusterer.cluster(
-                            documents = remaining,
-                            graph = graph,
-                            maxClusterSize = treeProperties.maxClusterSize
-                        )
+                        val fallback = localClusterBuild()
+                        clusterStats = fallback.stats
+                        fallback.clusters
                     }
                 } else {
-                    treeClusterer.cluster(
-                        documents = remaining,
-                        graph = graph,
-                        maxClusterSize = treeProperties.maxClusterSize
-                    )
+                    val local = localClusterBuild()
+                    clusterStats = local.stats
+                    local.clusters
                 }
                 if (assignmentPolicy.structureWorkerEnabled) {
                     workerFallbackRateSummary.record(workerFallbackRate)
@@ -510,8 +622,8 @@ class TreeService(
                         ),
                         "label_source_breakdown" to labelSourceBreakdown,
                         "source" to clusterSource,
-                        "worker_fallback_rate" to String.format("%.3f", workerFallbackRate)
-                    )
+                        "worker_fallback_rate" to format3(workerFallbackRate)
+                    ) + clusterInstrumentationMap(clusterStats)
                 )
 
                 clusters.forEach { cluster ->
@@ -984,24 +1096,24 @@ class TreeService(
                 "embedding_model" to embeddingProvider.modelVersion(),
                 "llm_provider" to llmTextGenerator.providerId(),
                 "llm_model" to llmTextGenerator.modelVersion(),
-                "embedding_available_doc_ratio" to String.format("%.3f", embeddingAvailableDocRatio),
-                "rebuild_duration_ms" to String.format("%.3f", rebuildDurationMs),
-                "mutual_pass_rate" to String.format("%.3f", graphStats.mutualPassRate),
-                "snn_pass_rate" to String.format("%.3f", graphStats.snnPassRate),
+                "embedding_available_doc_ratio" to format3(embeddingAvailableDocRatio),
+                "rebuild_duration_ms" to format3(rebuildDurationMs),
+                "mutual_pass_rate" to format3(graphStats.mutualPassRate),
+                "snn_pass_rate" to format3(graphStats.snnPassRate),
                 "hub_doc_count" to graphStats.hubDocCount,
                 "reranker_validated_pairs" to graphStats.rerankerValidatedPairs,
-                "reranker_pass_rate" to String.format("%.3f", graphStats.rerankerPassRate),
-                "reranker_fallback_rate" to String.format("%.3f", graphStats.rerankerFallbackRate),
-                "auto_ratio" to String.format("%.3f", autoRatio),
-                "recommend_ratio" to String.format("%.3f", recommendRatio),
-                "incremental_assign_rate" to String.format("%.3f", incrementalAssignRate),
+                "reranker_pass_rate" to format3(graphStats.rerankerPassRate),
+                "reranker_fallback_rate" to format3(graphStats.rerankerFallbackRate),
+                "auto_ratio" to format3(autoRatio),
+                "recommend_ratio" to format3(recommendRatio),
+                "incremental_assign_rate" to format3(incrementalAssignRate),
                 "concept_count" to activeConcepts.size,
                 "concept_preassigned_count" to conceptAssignedDocIds.size,
-                "concept_drift" to String.format("%.3f", conceptDriftAverage),
+                "concept_drift" to format3(conceptDriftAverage),
                 "optimizer_enabled" to treeProperties.optimizerEnabled,
                 "optimizer_iterations" to (optimizerOutcome?.iterations ?: 0),
-                "objective_score" to String.format("%.3f", optimizerOutcome?.after?.objectiveScore ?: 0.0),
-                "change_cost" to String.format("%.3f", optimizerOutcome?.after?.changeCost ?: 0.0),
+                "objective_score" to format3(optimizerOutcome?.after?.objectiveScore ?: 0.0),
+                "change_cost" to format3(optimizerOutcome?.after?.changeCost ?: 0.0),
                 "view_type" to normalizedView.apiValue,
                 "view_transformed_doc_count" to viewProjection.transformedDocCount,
                 "policy_threshold" to mapOf(
@@ -1017,10 +1129,19 @@ class TreeService(
                     "lexical_only" to graphStats.similaritySourceBreakdown.lexicalOnly,
                     "fused" to graphStats.similaritySourceBreakdown.fused
                 ),
+                "similarity_distributions" to similarityDistributionMap(graphStats.similarityDistributions),
+                "edge_statistics" to edgeFilterStatsMap(graphStats.edgeFilterStats),
+                "graph_statistics" to mapOf(
+                    "undirected_degree" to degreeStatsMap(graphStats.degreeStats)
+                ),
+                "min_similarity_decision" to minSimilarityDecisionMap(graphStats.minSimilarityDecision),
+                "reason_breakdown" to graphStats.reasonBreakdown,
+                "cluster_guardrail" to clusterInstrumentationMap(clusterStats),
                 "label_source_breakdown" to labelSourceBreakdown,
                 "rule_conflict_count" to ruleConflictCount,
                 "soft_rule_doc_count" to softRulePreferredLabelByDocument.size,
-                "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount()
+                "unsorted_reason_breakdown" to quarantineReasonByDocument.values.groupingBy { it }.eachCount(),
+                "config_echo" to treeConfigEcho()
             )
             treeTelemetry.logSummary(summaryPayload)
             treeTelemetry.storeDebugSnapshot(
@@ -1048,6 +1169,14 @@ class TreeService(
                         "reranker_validated_pairs" to graphStats.rerankerValidatedPairs,
                         "reranker_pass_rate" to graphStats.rerankerPassRate,
                         "reranker_fallback_rate" to graphStats.rerankerFallbackRate,
+                        "similarity_distributions" to similarityDistributionMap(graphStats.similarityDistributions),
+                        "edge_statistics" to edgeFilterStatsMap(graphStats.edgeFilterStats),
+                        "graph_statistics" to mapOf(
+                            "undirected_degree" to degreeStatsMap(graphStats.degreeStats)
+                        ),
+                        "min_similarity_decision" to minSimilarityDecisionMap(graphStats.minSimilarityDecision),
+                        "reason_breakdown" to graphStats.reasonBreakdown,
+                        "cluster_guardrail" to clusterInstrumentationMap(clusterStats),
                         "auto_ratio" to autoRatio,
                         "recommend_ratio" to recommendRatio,
                         "incremental_assign_rate" to incrementalAssignRate,
@@ -1294,9 +1423,13 @@ class TreeService(
             semanticWeight = treeProperties.fusionSemanticWeight,
             lexicalWeight = treeProperties.fusionLexicalWeight,
             lexicalGate = treeProperties.fusionLexicalGate,
-            mutualKnnRequired = treeProperties.neighborMutualKnnRequired,
-            snnThreshold = treeProperties.neighborSnnThreshold,
-            edgeBudget = treeProperties.neighborEdgeBudget
+            minSimilarityAuto = treeProperties.neighborMinSimilarityAuto,
+            minSimilarityAutoMargin = treeProperties.neighborMinSimilarityAutoMargin,
+            mutualKnnRequired = treeProperties.neighborMutualKnn,
+            sharedNeighborJaccardMin = treeProperties.neighborSharedNeighborJaccardMin,
+            edgeBudget = treeProperties.neighborEdgeBudget,
+            degreeCap = treeProperties.neighborDegreeCap,
+            bridgePrunePolicy = treeProperties.neighborBridgePrunePolicy
         )
         val neighbors = graph.adjacency[documentId].orEmpty().map { link ->
             mapOf(
@@ -1334,9 +1467,13 @@ class TreeService(
             semanticWeight = treeProperties.fusionSemanticWeight,
             lexicalWeight = treeProperties.fusionLexicalWeight,
             lexicalGate = treeProperties.fusionLexicalGate,
-            mutualKnnRequired = treeProperties.neighborMutualKnnRequired,
-            snnThreshold = treeProperties.neighborSnnThreshold,
-            edgeBudget = treeProperties.neighborEdgeBudget
+            minSimilarityAuto = treeProperties.neighborMinSimilarityAuto,
+            minSimilarityAutoMargin = treeProperties.neighborMinSimilarityAutoMargin,
+            mutualKnnRequired = treeProperties.neighborMutualKnn,
+            sharedNeighborJaccardMin = treeProperties.neighborSharedNeighborJaccardMin,
+            edgeBudget = treeProperties.neighborEdgeBudget,
+            degreeCap = treeProperties.neighborDegreeCap,
+            bridgePrunePolicy = treeProperties.neighborBridgePrunePolicy
         )
         val selectedLinks = graph.adjacency[documentId].orEmpty().take(topN.coerceIn(1, 20))
         val assignmentMembership = treeRepository.findMembershipByWorkspaceAndDocument(workspaceId, documentId)

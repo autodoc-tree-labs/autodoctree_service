@@ -47,6 +47,21 @@ docker compose --profile llm --profile llm-init up ollama-init
 ```
 임베딩은 `TITLE`, `BODY_SUMMARY`, `SECTION`, `SECTION_CENTROID` 채널로 저장되고 트리 리빌드 시 가중 결합됩니다.
 
+### Tree Rebuild Quality (defaults)
+- `neighbor-normalize=true`인 경우 무관 문서 cosine도 정규화 후 `0.5` 근처가 될 수 있으므로, 낮은 임계값(`0.25`)은 과연결을 유발할 수 있습니다.
+- normalize 환경에서는 `minSimilarity`를 보통 `0.6~0.8` 범위로 두고 시작하는 것이 안전합니다.
+- 기본/권장값:
+  - `tree.neighbor-normalize=true`
+  - `tree.neighbor-min-similarity=0.65`
+  - `tree.neighbor-top-k=5`
+  - `tree.neighbor-mutual-knn=true`
+  - `tree.neighbor-shared-neighbor-jaccard-min=0.10`
+  - `tree.cluster-merge-min-affinity=0.55`
+- `tree_rebuild_summary` 주요 확인 항목:
+  - `similarity_distributions.fused_sim.p95/p99`
+  - `edge_statistics.edges_after_top_k`, `edges_filtered_by_mutual_knn`, `edges_filtered_by_snn`, `edges_filtered_by_degree_cap`
+  - `graph_statistics.undirected_degree.p99/max` (과연결이면 p99가 급상승)
+
 Optional local reranker runtime (Stage-B edge validation):
 ```bash
 python3 scripts/model_manifest_verify.py --manifest models/manifest.json

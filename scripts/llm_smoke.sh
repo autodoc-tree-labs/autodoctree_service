@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_URL="${OLLAMA_BASE_URL:-http://localhost:11434}"
+BASE_URL="${OLLAMA_BASE_URL:-http://localhost:${OLLAMA_PORT:-11434}}"
 EMBED_MODEL="${EMBEDDING_OLLAMA_MODEL:-bge-m3}"
 LLM_MODEL="${LLM_OLLAMA_MODEL:-llama3.1:8b-instruct}"
 

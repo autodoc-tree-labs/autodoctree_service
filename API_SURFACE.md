@@ -111,6 +111,14 @@ Query: `status`, `q`, `page`, `size`, `sort`
 }
 ```
 
+## POST /documents/{documentId}/pipeline/retry
+```json
+{ "stage": "EMBED" }
+```
+- `OWNER|MEMBER` only
+- 해당 stage 상태가 `FAILED`일 때만 허용
+- outbox `StageRetry` 이벤트를 enqueue
+
 ## DELETE /documents/{documentId}
 - soft delete
 

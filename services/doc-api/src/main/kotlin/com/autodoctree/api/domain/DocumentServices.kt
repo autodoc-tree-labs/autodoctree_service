@@ -2,6 +2,7 @@ package com.autodoctree.api.domain
 
 import com.autodoctree.api.db.AttachmentRepository
 import com.autodoctree.api.db.DocumentRepository
+import com.autodoctree.api.db.PipelineStatusRow
 import com.autodoctree.api.db.PipelineStatusRepository
 import com.autodoctree.api.infra.BadRequestException
 import com.autodoctree.api.infra.LogSanitizer
@@ -11,6 +12,8 @@ import com.autodoctree.api.search.SearchSpec
 import com.autodoctree.api.search.TenantSearchClient
 import com.autodoctree.api.storage.S3StorageService
 import com.autodoctree.api.tenant.WorkspaceContext
+import com.autodoctree.common.Stage
+import com.autodoctree.common.StageStatus
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.stereotype.Service
@@ -53,7 +56,8 @@ class DocumentService(
     private val documentRepository: DocumentRepository,
     private val pipelineStatusRepository: PipelineStatusRepository,
     private val attachmentRepository: AttachmentRepository,
-    private val outboxService: OutboxService
+    private val outboxService: OutboxService,
+    private val auditService: AuditService
 ) {
 
     @Transactional
@@ -198,6 +202,51 @@ class DocumentService(
             eventType = "DocumentDeleted",
             payload = mapOf("document_id" to documentId)
         )
+    }
+
+    @Transactional
+    fun retryPipelineStage(context: WorkspaceContext, documentId: String, stage: String) {
+        requireEditor(context)
+        documentRepository.findByWorkspaceAndId(context.workspaceId, documentId) ?: throw NotFoundException()
+        val pipeline = pipelineStatusRepository.findByWorkspaceAndDocument(context.workspaceId, documentId)
+            ?: throw NotFoundException()
+        val parsedStage = parseStage(stage)
+        if (stageStatus(pipeline, parsedStage) != StageStatus.FAILED) {
+            throw BadRequestException("stage must be FAILED to retry")
+        }
+        val payload = mapOf(
+            "document_id" to documentId,
+            "stage" to parsedStage.name
+        )
+        outboxService.enqueue(
+            workspaceId = context.workspaceId,
+            documentId = documentId,
+            eventType = "StageRetry",
+            payload = payload
+        )
+        auditService.write(
+            context.workspaceId,
+            context.userId,
+            "document.pipeline.retry",
+            payload
+        )
+    }
+
+    private fun parseStage(raw: String): Stage {
+        return try {
+            Stage.valueOf(raw.trim().uppercase())
+        } catch (_: IllegalArgumentException) {
+            throw BadRequestException("unsupported stage")
+        }
+    }
+
+    private fun stageStatus(pipeline: PipelineStatusRow, stage: Stage): StageStatus {
+        return when (stage) {
+            Stage.INGEST -> pipeline.ingestStatus
+            Stage.EMBED -> pipeline.embedStatus
+            Stage.INDEX -> pipeline.indexStatus
+            Stage.TREE -> pipeline.treeStatus
+        }
     }
 }
 

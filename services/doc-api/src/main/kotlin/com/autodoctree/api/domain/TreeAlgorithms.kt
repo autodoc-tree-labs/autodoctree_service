@@ -16,6 +16,7 @@ import java.time.Duration
 import java.time.LocalDateTime
 import java.time.temporal.ChronoUnit
 import java.util.Locale
+import kotlin.random.Random
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.pow
@@ -47,7 +48,12 @@ data class NeighborBuildStats(
     val rerankerValidatedPairs: Int = 0,
     val rerankerPassRate: Double = 1.0,
     val rerankerFallbackRate: Double = 0.0,
-    val similaritySourceBreakdown: SimilaritySourceBreakdown = SimilaritySourceBreakdown()
+    val similaritySourceBreakdown: SimilaritySourceBreakdown = SimilaritySourceBreakdown(),
+    val similarityDistributions: SimilarityDistributions = SimilarityDistributions(),
+    val edgeFilterStats: EdgeFilterStats = EdgeFilterStats(),
+    val degreeStats: DegreeStats = DegreeStats(),
+    val reasonBreakdown: Map<String, Int> = emptyMap(),
+    val minSimilarityDecision: MinSimilarityDecision = MinSimilarityDecision()
 )
 
 data class SimilaritySourceBreakdown(
@@ -56,10 +62,73 @@ data class SimilaritySourceBreakdown(
     val fused: Int = 0
 )
 
+data class SimilarityDistributions(
+    val semantic: DistributionStats = DistributionStats(),
+    val lexical: DistributionStats = DistributionStats(),
+    val fused: DistributionStats = DistributionStats(),
+    val semanticScale: String = "normalized_cosine"
+)
+
+data class DistributionStats(
+    val count: Long = 0,
+    val sampledCount: Int = 0,
+    val mean: Double = 0.0,
+    val min: Double = 0.0,
+    val max: Double = 0.0,
+    val p50: Double = 0.0,
+    val p90: Double = 0.0,
+    val p95: Double = 0.0,
+    val p99: Double = 0.0
+)
+
+data class EdgeFilterStats(
+    val evaluatedPairs: Int = 0,
+    val edgesBeforeFilter: Int = 0,
+    val edgesFilteredByMinSimilarity: Int = 0,
+    val edgesAfterTopK: Int = 0,
+    val edgesFilteredByMutualKnn: Int = 0,
+    val edgesFilteredBySnn: Int = 0,
+    val edgesFilteredByDegreeCap: Int = 0,
+    val edgesAfterAllFilters: Int = 0
+)
+
+data class DegreeStats(
+    val mean: Double = 0.0,
+    val p95: Double = 0.0,
+    val p99: Double = 0.0,
+    val max: Int = 0,
+    val threshold: Int = 10,
+    val nodesAtOrAboveThreshold: Int = 0
+)
+
+data class MinSimilarityDecision(
+    val configuredThreshold: Double = 0.0,
+    val autoEnabled: Boolean = false,
+    val autoBaselineP95: Double? = null,
+    val autoThreshold: Double? = null,
+    val effectiveThreshold: Double = 0.0
+)
+
 data class TreeCluster(
     val id: String,
     val documentIds: List<String>,
     val qualityScore: Double = 1.0
+)
+
+data class ClusterBuildStats(
+    val clusterCount: Int = 0,
+    val mergeAttempted: Int = 0,
+    val merged: Int = 0,
+    val keptSingleton: Int = 0,
+    val splitOversizedAttempted: Int = 0,
+    val splitRetryAttempted: Int = 0,
+    val splitRetrySucceeded: Int = 0,
+    val splitFallbackUsed: Int = 0
+)
+
+data class ClusterBuildResult(
+    val clusters: List<TreeCluster>,
+    val stats: ClusterBuildStats = ClusterBuildStats()
 )
 
 data class PersonalizationModel(
@@ -155,20 +224,29 @@ class NeighborBuilder(
         lexicalWeight: Double = 0.2,
         lexicalGate: Double = 0.35,
         mutualKnnRequired: Boolean = true,
-        snnThreshold: Double = 0.0,
+        sharedNeighborJaccardMin: Double = 0.0,
         edgeBudget: Int = topK,
+        degreeCap: Int = 10,
+        bridgePrunePolicy: String = "LOWEST_SIM_FIRST",
+        minSimilarityAuto: Boolean = false,
+        minSimilarityAutoMargin: Double = 0.05,
         rerankerEnabled: Boolean = false,
         rerankerPerDocBudget: Int = 4,
         rerankerPassThreshold: Double = 0.55,
         rerankerTextByDocumentId: Map<String, String> = emptyMap()
     ): NeighborGraph {
         val sample = Timer.start()
-        val similarityThreshold = minSimilarity.coerceIn(-1.0, 1.0)
         val useEmbeddingSimilarity = embeddings.values.any { !it.modelVersion.startsWith("local-stub", ignoreCase = true) }
         val effectiveTopK = topK.coerceAtLeast(1)
-        val candidateTopK = maxOf(effectiveTopK * 3, effectiveTopK)
         val effectiveEdgeBudget = edgeBudget.coerceAtLeast(1)
-        val effectiveSnnThreshold = snnThreshold.coerceIn(0.0, 1.0)
+        val directionalTopK = minOf(effectiveTopK, effectiveEdgeBudget).coerceAtLeast(1)
+        val effectiveSnnThreshold = sharedNeighborJaccardMin.coerceIn(0.0, 1.0)
+        val configuredSimilarityThreshold = minSimilarity.coerceIn(-1.0, 1.0)
+        val effectiveDegreeCap = degreeCap.coerceAtLeast(1)
+        val normalizedBridgePolicy = bridgePrunePolicy.trim().uppercase(Locale.ROOT).ifBlank { "LOWEST_SIM_FIRST" }
+        val semanticSampler = ReservoirDistributionSampler(seed = 20260219L)
+        val lexicalSampler = ReservoirDistributionSampler(seed = 20260220L)
+        val fusedSampler = ReservoirDistributionSampler(seed = 20260221L)
         val vectorByDoc = documents.associate { document ->
             val vector = embeddings[document.id]?.let { embedding ->
                 objectMapper.readValue(embedding.vectorJson, List::class.java)
@@ -191,14 +269,134 @@ class NeighborBuilder(
             document.id to extractEntityTokens(document.title + " " + (document.bodyText ?: "")).toSet()
         }
 
-        val rawAdjacency = mutableMapOf<String, MutableList<NeighborLink>>()
-        var filteredBySimilarity = 0
+        data class PairSimilarity(
+            val similarity: Double,
+            val semanticSimilarity: Double?,
+            val lexicalSimilarity: Double,
+            val lexicalGatePassed: Boolean,
+            val sharedEntityCount: Int,
+            val titleOverlap: Int,
+            val reason: String
+        )
+
+        val docById = documents.associateBy { it.id }
+
+        fun computePairSimilarity(sourceId: String, candidateId: String): PairSimilarity {
+            val sourceDoc = docById[sourceId] ?: error("source doc missing")
+            val candidateDoc = docById[candidateId] ?: error("candidate doc missing")
+            val source = vectorByDoc[sourceId].orEmpty()
+            val candidateVector = vectorByDoc[candidateId].orEmpty()
+            val sourceLexical = lexicalVectors[sourceId].orEmpty()
+            val candidateLexical = lexicalVectors[candidateId].orEmpty()
+            val sourceTokens = lexicalTokens[sourceId].orEmpty()
+            val candidateTokens = lexicalTokens[candidateId].orEmpty()
+            val tokenOverlapScore = overlapCoefficient(
+                lexicalTokenSets[sourceId].orEmpty(),
+                lexicalTokenSets[candidateId].orEmpty()
+            )
+            val bm25Forward = bm25LiteScore(
+                queryTokens = sourceTokens,
+                candidateTermFreq = lexicalTermFrequencies[candidateId].orEmpty(),
+                candidateLength = candidateTokens.size,
+                avgDocLength = lexicalModel.avgDocLength,
+                idf = lexicalModel.idf
+            )
+            val bm25Reverse = bm25LiteScore(
+                queryTokens = candidateTokens,
+                candidateTermFreq = lexicalTermFrequencies[sourceId].orEmpty(),
+                candidateLength = sourceTokens.size,
+                avgDocLength = lexicalModel.avgDocLength,
+                idf = lexicalModel.idf
+            )
+            val bm25Similarity = normalizeBm25Lite((bm25Forward + bm25Reverse) / 2.0)
+            val tfidfSimilarity = cosineSparse(sourceLexical, candidateLexical).coerceIn(0.0, 1.0)
+            val lexicalSimilarity = (
+                (tfidfSimilarity * 0.30) +
+                    (tokenOverlapScore * 0.35) +
+                    (bm25Similarity * 0.35)
+                ).coerceIn(0.0, 1.0)
+            val titleOverlap = titleTokenSets[sourceDoc.id].orEmpty().intersect(
+                titleTokenSets[candidateDoc.id].orEmpty()
+            ).size
+            val sharedEntities = entityTokenSets[sourceDoc.id].orEmpty().intersect(
+                entityTokenSets[candidateDoc.id].orEmpty()
+            ).size
+            val embeddingSimilarity = if (useEmbeddingSimilarity && source.isNotEmpty() && candidateVector.isNotEmpty()) {
+                cosine(source, candidateVector).let { raw ->
+                    if (normalize) normalizeCosine(raw) else raw
+                }
+            } else {
+                null
+            }
+            val lexicalConsensus = ((tokenOverlapScore + bm25Similarity) / 2.0).coerceIn(0.0, 1.0)
+            val lexicalGatePassed = lexicalConsensus >= lexicalGate
+            val similarity = if (embeddingSimilarity != null) {
+                val semW = semanticWeight.coerceAtLeast(0.0)
+                val lexW = lexicalWeight.coerceAtLeast(0.0)
+                val effectiveLexW = if (lexicalGatePassed) lexW else 0.0
+                val denominator = (semW + effectiveLexW).coerceAtLeast(0.000001)
+                ((embeddingSimilarity * semW) + (lexicalSimilarity * effectiveLexW)) / denominator
+            } else {
+                lexicalSimilarity
+            }
+            return PairSimilarity(
+                similarity = similarity.coerceIn(-1.0, 1.0),
+                semanticSimilarity = embeddingSimilarity,
+                lexicalSimilarity = lexicalSimilarity,
+                lexicalGatePassed = lexicalGatePassed,
+                sharedEntityCount = sharedEntities,
+                titleOverlap = titleOverlap,
+                reason = when {
+                    embeddingSimilarity == null -> "LEXICAL_ONLY"
+                    lexicalGatePassed -> "EMBEDDING_LEXICAL_GATED"
+                    else -> "EMBEDDING_ONLY"
+                }
+            )
+        }
+
+        var evaluatedPairs = 0
+        documents.forEach { source ->
+            val sourceVector = vectorByDoc[source.id].orEmpty()
+            val sourceLexical = lexicalVectors[source.id].orEmpty()
+            if (sourceVector.isEmpty() && !useEmbeddingSimilarity && sourceLexical.isEmpty()) {
+                return@forEach
+            }
+            documents.asSequence()
+                .filter { it.id != source.id }
+                .forEach { candidate ->
+                    evaluatedPairs += 1
+                    val pair = computePairSimilarity(source.id, candidate.id)
+                    pair.semanticSimilarity?.let { semanticSampler.add(it) }
+                    lexicalSampler.add(pair.lexicalSimilarity)
+                    fusedSampler.add(pair.similarity)
+                }
+        }
+
+        val fusedDistribution = fusedSampler.stats()
+        val autoBaseline = if (minSimilarityAuto && fusedDistribution.count > 0) {
+            fusedDistribution.p95
+        } else {
+            null
+        }
+        val autoThreshold = autoBaseline?.let { (it + minSimilarityAutoMargin).coerceIn(-1.0, 1.0) }
+        val effectiveSimilarityThreshold = autoThreshold?.let { maxOf(configuredSimilarityThreshold, it) }
+            ?: configuredSimilarityThreshold
+        val minSimilarityDecision = MinSimilarityDecision(
+            configuredThreshold = configuredSimilarityThreshold,
+            autoEnabled = minSimilarityAuto,
+            autoBaselineP95 = autoBaseline,
+            autoThreshold = autoThreshold,
+            effectiveThreshold = effectiveSimilarityThreshold
+        )
+
+        val minFilteredAdjacency = mutableMapOf<String, MutableList<NeighborLink>>()
+        var filteredByMinSimilarity = 0
 
         documents.forEach { document ->
             val source = vectorByDoc[document.id].orEmpty()
             val sourceLexical = lexicalVectors[document.id].orEmpty()
             if (source.isEmpty() && !useEmbeddingSimilarity && sourceLexical.isEmpty()) {
-                rawAdjacency[document.id] = mutableListOf()
+                minFilteredAdjacency[document.id] = mutableListOf()
                 return@forEach
             }
 
@@ -206,136 +404,103 @@ class NeighborBuilder(
                 .asSequence()
                 .filter { it.id != document.id }
                 .mapNotNull { candidate ->
-                    val candidateVector = vectorByDoc[candidate.id].orEmpty()
-                    val candidateLexical = lexicalVectors[candidate.id].orEmpty()
-                    val sourceTokens = lexicalTokens[document.id].orEmpty()
-                    val candidateTokens = lexicalTokens[candidate.id].orEmpty()
-                    val tokenOverlapScore = overlapCoefficient(
-                        lexicalTokenSets[document.id].orEmpty(),
-                        lexicalTokenSets[candidate.id].orEmpty()
-                    )
-                    val bm25Forward = bm25LiteScore(
-                        queryTokens = sourceTokens,
-                        candidateTermFreq = lexicalTermFrequencies[candidate.id].orEmpty(),
-                        candidateLength = candidateTokens.size,
-                        avgDocLength = lexicalModel.avgDocLength,
-                        idf = lexicalModel.idf
-                    )
-                    val bm25Reverse = bm25LiteScore(
-                        queryTokens = candidateTokens,
-                        candidateTermFreq = lexicalTermFrequencies[document.id].orEmpty(),
-                        candidateLength = sourceTokens.size,
-                        avgDocLength = lexicalModel.avgDocLength,
-                        idf = lexicalModel.idf
-                    )
-                    val bm25Similarity = normalizeBm25Lite((bm25Forward + bm25Reverse) / 2.0)
-                    val tfidfSimilarity = cosineSparse(sourceLexical, candidateLexical).coerceIn(0.0, 1.0)
-                    val lexicalSimilarity = (
-                        (tfidfSimilarity * 0.30) +
-                            (tokenOverlapScore * 0.35) +
-                            (bm25Similarity * 0.35)
-                        ).coerceIn(0.0, 1.0)
-                    val titleOverlap = titleTokenSets[document.id].orEmpty().intersect(
-                        titleTokenSets[candidate.id].orEmpty()
-                    ).size
-                    val sharedEntities = entityTokenSets[document.id].orEmpty().intersect(
-                        entityTokenSets[candidate.id].orEmpty()
-                    ).size
-
-                    val embeddingSimilarity = if (useEmbeddingSimilarity && source.isNotEmpty() && candidateVector.isNotEmpty()) {
-                        cosine(source, candidateVector).let { raw ->
-                            if (normalize) normalizeCosine(raw) else raw
-                        }
-                    } else {
-                        null
-                    }
-
-                    val lexicalConsensus = ((tokenOverlapScore + bm25Similarity) / 2.0).coerceIn(0.0, 1.0)
-                    val lexicalGatePassed = lexicalConsensus >= lexicalGate
-                    val similarity = if (embeddingSimilarity != null) {
-                        val semW = semanticWeight.coerceAtLeast(0.0)
-                        val lexW = lexicalWeight.coerceAtLeast(0.0)
-                        val effectiveLexW = if (lexicalGatePassed) lexW else 0.0
-                        val denominator = (semW + effectiveLexW).coerceAtLeast(0.000001)
-                        ((embeddingSimilarity * semW) + (lexicalSimilarity * effectiveLexW)) / denominator
-                    } else {
-                        lexicalSimilarity
-                    }
-
-                    if (similarity < similarityThreshold) {
-                        filteredBySimilarity += 1
+                    val pair = computePairSimilarity(document.id, candidate.id)
+                    if (pair.similarity < effectiveSimilarityThreshold) {
+                        filteredByMinSimilarity += 1
                         return@mapNotNull null
                     }
-
                     NeighborLink(
                         documentId = candidate.id,
-                        similarity = similarity,
-                        semanticSimilarity = embeddingSimilarity,
-                        lexicalSimilarity = lexicalSimilarity,
-                        lexicalGatePassed = lexicalGatePassed,
-                        sharedEntityCount = sharedEntities,
-                        titleOverlap = titleOverlap,
-                        reason = when {
-                            embeddingSimilarity == null -> "LEXICAL_ONLY"
-                            lexicalGatePassed -> "EMBEDDING_LEXICAL_GATED"
-                            else -> "EMBEDDING_ONLY"
-                        }
+                        similarity = pair.similarity,
+                        semanticSimilarity = pair.semanticSimilarity,
+                        lexicalSimilarity = pair.lexicalSimilarity,
+                        lexicalGatePassed = pair.lexicalGatePassed,
+                        sharedEntityCount = pair.sharedEntityCount,
+                        titleOverlap = pair.titleOverlap,
+                        reason = pair.reason
                     )
                 }
                 .sortedByDescending { it.similarity }
                 .distinctBy { it.documentId }
-                .take(candidateTopK)
                 .toMutableList()
 
-            rawAdjacency[document.id] = neighbors
+            minFilteredAdjacency[document.id] = neighbors
         }
 
-        val topNeighborSets = rawAdjacency.mapValues { (_, neighbors) ->
-            neighbors.take(effectiveTopK).mapTo(mutableSetOf()) { it.documentId }
+        val topKAdjacency = minFilteredAdjacency.mapValues { (_, neighbors) ->
+            neighbors
+                .sortedByDescending { it.similarity }
+                .take(directionalTopK)
+                .toMutableList()
+        }
+        val edgesAfterTopK = topKAdjacency.values.sumOf { it.size }
+        val topNeighborSets = topKAdjacency.mapValues { (_, neighbors) ->
+            neighbors.mapTo(mutableSetOf()) { it.documentId }
         }
 
         var mutualEvaluated = 0
         var mutualPassed = 0
+        var edgesFilteredByMutual = 0
         var snnEvaluated = 0
         var snnPassed = 0
-        val adjacency = mutableMapOf<String, MutableList<NeighborLink>>()
+        var edgesFilteredBySnn = 0
+        val mutualSnnAdjacency = mutableMapOf<String, MutableList<NeighborLink>>()
+        val snnEnabled = effectiveSnnThreshold > 0.0
 
-        rawAdjacency.forEach { (docId, candidates) ->
+        topKAdjacency.forEach { (docId, candidates) ->
             val filtered = candidates.filter { link ->
                 if (mutualKnnRequired) {
                     mutualEvaluated += 1
                     val reverseTop = topNeighborSets[link.documentId].orEmpty()
                     if (!reverseTop.contains(docId)) {
+                        edgesFilteredByMutual += 1
                         return@filter false
                     }
                     mutualPassed += 1
                 }
 
-                val left = topNeighborSets[docId].orEmpty()
-                val right = topNeighborSets[link.documentId].orEmpty()
-                val union = left.union(right)
-                val snn = if (union.isEmpty()) {
-                    0.0
-                } else {
-                    left.intersect(right).size.toDouble() / union.size.toDouble()
+                if (snnEnabled) {
+                    val left = topNeighborSets[docId].orEmpty()
+                    val right = topNeighborSets[link.documentId].orEmpty()
+                    val union = left.union(right)
+                    val snn = if (union.isEmpty()) {
+                        0.0
+                    } else {
+                        left.intersect(right).size.toDouble() / union.size.toDouble()
+                    }
+                    snnEvaluated += 1
+                    if (snn >= effectiveSnnThreshold) {
+                        snnPassed += 1
+                    } else {
+                        edgesFilteredBySnn += 1
+                        return@filter false
+                    }
                 }
-                snnEvaluated += 1
-                if (snn >= effectiveSnnThreshold) {
-                    snnPassed += 1
-                    true
-                } else {
-                    false
-                }
+                true
             }.sortedByDescending { it.similarity }
-
-            val budgeted = filtered.take(minOf(effectiveTopK, effectiveEdgeBudget))
-            adjacency[docId] = budgeted.toMutableList()
+            mutualSnnAdjacency[docId] = filtered.toMutableList()
         }
+
+        val bridgePrunedAdjacency = applyDegreeCap(
+            adjacency = mutualSnnAdjacency,
+            allDocumentIds = documents.map { it.id },
+            degreeCap = effectiveDegreeCap,
+            policy = normalizedBridgePolicy
+        )
+        val edgesFilteredByDegreeCap = bridgePrunedAdjacency.filteredDirectionalEdges
+        val adjacencyAfterEdgePolicy = bridgePrunedAdjacency.adjacency
+
+        val degreeThreshold = 10
+        val degreeStats = computeDegreeStats(
+            allDocumentIds = documents.map { it.id },
+            adjacency = adjacencyAfterEdgePolicy,
+            threshold = degreeThreshold
+        )
 
         var rerankerValidatedPairs = 0
         var rerankerPassRate = 1.0
         var rerankerFallbackRate = 0.0
-        val finalAdjacency = adjacency.mapValues { (_, links) -> links.toMutableList() }.toMutableMap()
+        val finalAdjacency = adjacencyAfterEdgePolicy.mapValues { (_, links) -> links.toMutableList() }.toMutableMap()
         if (rerankerEnabled && pairRerankerClient != null) {
             val perDocBudget = rerankerPerDocBudget.coerceAtLeast(1)
             val scoreThreshold = rerankerPassThreshold.coerceIn(0.0, 1.0)
@@ -443,19 +608,19 @@ class NeighborBuilder(
         sample.stop(durationTimer)
         docsSummary.record(documents.size.toDouble())
         val edgeCount = finalAdjacency.values.sumOf { it.size }
-        val rawEdgeCount = rawAdjacency.values.sumOf { it.size }
-        val filteredOutCount = filteredBySimilarity + (rawEdgeCount - edgeCount).coerceAtLeast(0)
+        val edgesBeforeFilter = evaluatedPairs
+        val filteredOutCount = filteredByMinSimilarity + (edgesAfterTopK - edgeCount).coerceAtLeast(0)
         val mutualPassRate = if (!mutualKnnRequired || mutualEvaluated == 0) {
             1.0
         } else {
             mutualPassed.toDouble() / mutualEvaluated.toDouble()
         }
-        val snnPassRate = if (snnEvaluated == 0) {
+        val snnPassRate = if (!snnEnabled || snnEvaluated == 0) {
             1.0
         } else {
             snnPassed.toDouble() / snnEvaluated.toDouble()
         }
-        val hubDocCount = finalAdjacency.values.count { it.size >= effectiveEdgeBudget }
+        val hubDocCount = degreeStats.nodesAtOrAboveThreshold
         val lexicalGatePassRate = if (lexicalGateEvaluated == 0) {
             0.0
         } else {
@@ -484,6 +649,31 @@ class NeighborBuilder(
         if (lexicalCount > 0) {
             averageLexicalSummary.record(totalLexical / lexicalCount.toDouble())
         }
+        val reasonBreakdown = finalAdjacency.values
+            .flatten()
+            .groupingBy { normalizeReason(it.reason) }
+            .eachCount()
+        val similaritySourceBreakdown = SimilaritySourceBreakdown(
+            embeddingOnly = reasonBreakdown["EMBEDDING_ONLY"] ?: 0,
+            lexicalOnly = reasonBreakdown["LEXICAL_ONLY"] ?: 0,
+            fused = reasonBreakdown["EMBEDDING_LEXICAL_GATED"] ?: 0
+        )
+        val edgeFilterStats = EdgeFilterStats(
+            evaluatedPairs = evaluatedPairs,
+            edgesBeforeFilter = edgesBeforeFilter,
+            edgesFilteredByMinSimilarity = filteredByMinSimilarity,
+            edgesAfterTopK = edgesAfterTopK,
+            edgesFilteredByMutualKnn = edgesFilteredByMutual,
+            edgesFilteredBySnn = edgesFilteredBySnn,
+            edgesFilteredByDegreeCap = edgesFilteredByDegreeCap,
+            edgesAfterAllFilters = edgeCount
+        )
+        val similarityDistributions = SimilarityDistributions(
+            semantic = semanticSampler.stats(),
+            lexical = lexicalSampler.stats(),
+            fused = fusedDistribution,
+            semanticScale = if (normalize) "normalized_cosine" else "raw_cosine"
+        )
 
         return NeighborGraph(
             adjacency = finalAdjacency,
@@ -497,13 +687,196 @@ class NeighborBuilder(
                 rerankerValidatedPairs = rerankerValidatedPairs,
                 rerankerPassRate = rerankerPassRate,
                 rerankerFallbackRate = rerankerFallbackRate,
-                similaritySourceBreakdown = SimilaritySourceBreakdown(
-                    embeddingOnly = embeddingOnlyEdges,
-                    lexicalOnly = lexicalOnlyEdges,
-                    fused = fusedEdges
-                )
+                similaritySourceBreakdown = similaritySourceBreakdown,
+                similarityDistributions = similarityDistributions,
+                edgeFilterStats = edgeFilterStats,
+                degreeStats = degreeStats,
+                reasonBreakdown = reasonBreakdown,
+                minSimilarityDecision = minSimilarityDecision
             )
         )
+    }
+
+    private data class DegreeCapResult(
+        val adjacency: Map<String, MutableList<NeighborLink>>,
+        val filteredDirectionalEdges: Int
+    )
+
+    private fun applyDegreeCap(
+        adjacency: Map<String, MutableList<NeighborLink>>,
+        allDocumentIds: List<String>,
+        degreeCap: Int,
+        policy: String
+    ): DegreeCapResult {
+        val beforeEdgeCount = adjacency.values.sumOf { it.size }
+        val edgeWeightByPair = mutableMapOf<String, Double>()
+        val pairNodes = mutableMapOf<String, Pair<String, String>>()
+        val incidentPairsByNode = allDocumentIds.associateWith { mutableSetOf<String>() }.toMutableMap()
+        adjacency.forEach { (docId, links) ->
+            links.forEach { link ->
+                val pairKey = pairKey(docId, link.documentId)
+                val left = minOf(docId, link.documentId)
+                val right = maxOf(docId, link.documentId)
+                edgeWeightByPair[pairKey] = maxOf(edgeWeightByPair[pairKey] ?: 0.0, link.similarity)
+                pairNodes[pairKey] = left to right
+                incidentPairsByNode.getOrPut(left) { mutableSetOf() }.add(pairKey)
+                incidentPairsByNode.getOrPut(right) { mutableSetOf() }.add(pairKey)
+            }
+        }
+        if (degreeCap <= 0 || edgeWeightByPair.isEmpty()) {
+            return DegreeCapResult(adjacency, 0)
+        }
+        val degreeByNode = allDocumentIds.associateWith { node ->
+            incidentPairsByNode[node].orEmpty().size
+        }.toMutableMap()
+        val removedPairs = mutableSetOf<String>()
+        while (true) {
+            val overflowNode = degreeByNode.entries
+                .filter { it.value > degreeCap }
+                .maxWithOrNull(compareBy<Map.Entry<String, Int>> { it.value }.thenByDescending { it.key })
+                ?.key
+                ?: break
+            val candidatePairs = incidentPairsByNode[overflowNode].orEmpty()
+                .filterNot { removedPairs.contains(it) }
+            if (candidatePairs.isEmpty()) {
+                break
+            }
+            val selectedPair = when (policy) {
+                "LOWEST_SIM_FIRST" -> candidatePairs.minWithOrNull(
+                    compareBy<String> { edgeWeightByPair[it] ?: 0.0 }
+                        .thenBy { it }
+                )
+
+                else -> candidatePairs.minWithOrNull(
+                    compareBy<String> { edgeWeightByPair[it] ?: 0.0 }
+                        .thenBy { it }
+                )
+            } ?: break
+            removedPairs += selectedPair
+            val nodes = pairNodes[selectedPair] ?: continue
+            degreeByNode[nodes.first] = (degreeByNode[nodes.first] ?: 0).coerceAtLeast(1) - 1
+            degreeByNode[nodes.second] = (degreeByNode[nodes.second] ?: 0).coerceAtLeast(1) - 1
+        }
+        if (removedPairs.isEmpty()) {
+            return DegreeCapResult(adjacency, 0)
+        }
+        val prunedAdjacency = adjacency.mapValues { (docId, links) ->
+            links.filterNot { link ->
+                removedPairs.contains(pairKey(docId, link.documentId))
+            }.toMutableList()
+        }
+        val afterEdgeCount = prunedAdjacency.values.sumOf { it.size }
+        return DegreeCapResult(
+            adjacency = prunedAdjacency,
+            filteredDirectionalEdges = (beforeEdgeCount - afterEdgeCount).coerceAtLeast(0)
+        )
+    }
+
+    private fun computeDegreeStats(
+        allDocumentIds: List<String>,
+        adjacency: Map<String, MutableList<NeighborLink>>,
+        threshold: Int
+    ): DegreeStats {
+        if (allDocumentIds.isEmpty()) {
+            return DegreeStats(threshold = threshold)
+        }
+        val undirected = allDocumentIds.associateWith { mutableSetOf<String>() }.toMutableMap()
+        adjacency.forEach { (docId, links) ->
+            links.forEach { link ->
+                undirected.getOrPut(docId) { mutableSetOf() }.add(link.documentId)
+                undirected.getOrPut(link.documentId) { mutableSetOf() }.add(docId)
+            }
+        }
+        val degrees = allDocumentIds.map { docId -> undirected[docId].orEmpty().size }.sorted()
+        val mean = degrees.average().takeIf { !it.isNaN() } ?: 0.0
+        val p95 = percentileInt(degrees, 0.95).toDouble()
+        val p99 = percentileInt(degrees, 0.99).toDouble()
+        val max = degrees.maxOrNull() ?: 0
+        val nodesAtOrAboveThreshold = degrees.count { it >= threshold.coerceAtLeast(0) }
+        return DegreeStats(
+            mean = mean,
+            p95 = p95,
+            p99 = p99,
+            max = max,
+            threshold = threshold,
+            nodesAtOrAboveThreshold = nodesAtOrAboveThreshold
+        )
+    }
+
+    private fun percentileInt(sortedValues: List<Int>, quantile: Double): Int {
+        if (sortedValues.isEmpty()) {
+            return 0
+        }
+        val clamped = quantile.coerceIn(0.0, 1.0)
+        val index = ((sortedValues.size - 1) * clamped).toInt().coerceIn(0, sortedValues.size - 1)
+        return sortedValues[index]
+    }
+
+    private fun normalizeReason(raw: String): String {
+        val upper = raw.trim().uppercase(Locale.ROOT)
+        return when {
+            upper.contains("EMBEDDING_LEXICAL_GATED") -> "EMBEDDING_LEXICAL_GATED"
+            upper.contains("EMBEDDING_ONLY") -> "EMBEDDING_ONLY"
+            upper.contains("LEXICAL_ONLY") -> "LEXICAL_ONLY"
+            else -> upper.substringBefore("_RERANKED")
+        }
+    }
+
+    private class ReservoirDistributionSampler(
+        private val maxSamples: Int = 4096,
+        seed: Long = 20260219L
+    ) {
+        private val random = Random(seed)
+        private val samples = mutableListOf<Double>()
+        private var seen: Long = 0
+        private var sum = 0.0
+        private var min = Double.POSITIVE_INFINITY
+        private var max = Double.NEGATIVE_INFINITY
+
+        fun add(value: Double) {
+            if (!value.isFinite()) {
+                return
+            }
+            seen += 1
+            sum += value
+            min = minOf(min, value)
+            max = maxOf(max, value)
+            if (samples.size < maxSamples) {
+                samples += value
+                return
+            }
+            val replaceIndex = random.nextLong(seen).toInt()
+            if (replaceIndex < maxSamples) {
+                samples[replaceIndex] = value
+            }
+        }
+
+        fun stats(): DistributionStats {
+            if (seen == 0L || samples.isEmpty()) {
+                return DistributionStats()
+            }
+            val sorted = samples.sorted()
+            return DistributionStats(
+                count = seen,
+                sampledCount = sorted.size,
+                mean = sum / seen.toDouble(),
+                min = min,
+                max = max,
+                p50 = percentile(sorted, 0.50),
+                p90 = percentile(sorted, 0.90),
+                p95 = percentile(sorted, 0.95),
+                p99 = percentile(sorted, 0.99)
+            )
+        }
+
+        private fun percentile(sorted: List<Double>, quantile: Double): Double {
+            if (sorted.isEmpty()) {
+                return 0.0
+            }
+            val clamped = quantile.coerceIn(0.0, 1.0)
+            val index = ((sorted.size - 1) * clamped).toInt().coerceIn(0, sorted.size - 1)
+            return sorted[index]
+        }
     }
 
     private fun pairKey(leftDocId: String, rightDocId: String): String {
@@ -700,10 +1073,32 @@ class TreeClusterer(
         val strongEdgeCount: Int
     )
 
+    private data class MergeSmallResult(
+        val clusters: List<List<String>>,
+        val mergeAttempted: Int,
+        val merged: Int,
+        val keptSingleton: Int
+    )
+
+    private data class SplitComponentResult(
+        val components: List<List<String>>,
+        val retryAttempted: Boolean = false,
+        val retrySucceeded: Boolean = false,
+        val fallbackUsed: Boolean = false
+    )
+
     fun cluster(documents: List<DocumentRow>, graph: NeighborGraph, maxClusterSize: Int): List<TreeCluster> {
+        return clusterWithStats(
+            documents = documents,
+            graph = graph,
+            maxClusterSize = maxClusterSize
+        ).clusters
+    }
+
+    fun clusterWithStats(documents: List<DocumentRow>, graph: NeighborGraph, maxClusterSize: Int): ClusterBuildResult {
         val sample = Timer.start()
         if (documents.isEmpty()) {
-            return emptyList()
+            return ClusterBuildResult(emptyList(), ClusterBuildStats())
         }
 
         val ids = documents.map { it.id }
@@ -745,10 +1140,37 @@ class TreeClusterer(
                 strongEdgeCount = 0
             )
         }
-        val merged = mergeSmallClusters(consensusResult.communities, weighted, treeProperties.minClusterSize.coerceAtLeast(1))
+        val merged = mergeSmallClusters(
+            clusters = consensusResult.communities,
+            weighted = weighted,
+            minClusterSize = treeProperties.minClusterSize.coerceAtLeast(1),
+            minAffinity = treeProperties.clusterMergeMinAffinity.coerceIn(0.0, 1.0)
+        )
+        var splitOversizedAttempted = 0
+        var splitRetryAttempted = 0
+        var splitRetrySucceeded = 0
+        var splitFallbackUsed = 0
 
-        val bounded = merged.flatMap { component ->
-            splitOversizedComponent(component, undirected, weighted, maxClusterSize.coerceAtLeast(2))
+        val bounded = merged.clusters.flatMap { component ->
+            if (component.size > maxClusterSize.coerceAtLeast(2)) {
+                splitOversizedAttempted += 1
+            }
+            val splitResult = splitOversizedComponent(
+                component = component,
+                adjacency = undirected,
+                weighted = weighted,
+                maxClusterSize = maxClusterSize.coerceAtLeast(2)
+            )
+            if (splitResult.retryAttempted) {
+                splitRetryAttempted += 1
+            }
+            if (splitResult.retrySucceeded) {
+                splitRetrySucceeded += 1
+            }
+            if (splitResult.fallbackUsed) {
+                splitFallbackUsed += 1
+            }
+            splitResult.components
         }
             .filter { it.isNotEmpty() }
             .sortedByDescending { it.size }
@@ -760,6 +1182,16 @@ class TreeClusterer(
                 qualityScore = clusterQuality(component, weighted)
             )
         }
+        val clusterStats = ClusterBuildStats(
+            clusterCount = clusters.size,
+            mergeAttempted = merged.mergeAttempted,
+            merged = merged.merged,
+            keptSingleton = merged.keptSingleton,
+            splitOversizedAttempted = splitOversizedAttempted,
+            splitRetryAttempted = splitRetryAttempted,
+            splitRetrySucceeded = splitRetrySucceeded,
+            splitFallbackUsed = splitFallbackUsed
+        )
 
         sample.stop(durationTimer)
         docsSummary.record(documents.size.toDouble())
@@ -778,7 +1210,20 @@ class TreeClusterer(
                 consensusResult.unstableClusterCount
             )
         }
-        return clusters
+        logger.info(
+            "cluster_guardrail_summary merge_attempted={} merged={} kept_singleton={} split_oversized_attempted={} split_retry_attempted={} split_retry_succeeded={} split_fallback_used={}",
+            clusterStats.mergeAttempted,
+            clusterStats.merged,
+            clusterStats.keptSingleton,
+            clusterStats.splitOversizedAttempted,
+            clusterStats.splitRetryAttempted,
+            clusterStats.splitRetrySucceeded,
+            clusterStats.splitFallbackUsed
+        )
+        return ClusterBuildResult(
+            clusters = clusters,
+            stats = clusterStats
+        )
     }
 
     private fun applyConsensusClustering(
@@ -912,19 +1357,38 @@ class TreeClusterer(
         adjacency: Map<String, Set<String>>,
         weighted: Map<String, Map<String, Double>>,
         maxClusterSize: Int
-    ): List<List<String>> {
+    ): SplitComponentResult {
         if (component.size <= maxClusterSize) {
-            return listOf(component)
+            return SplitComponentResult(components = listOf(component))
         }
 
         val subgraph = component.associateWith { docId ->
             weighted[docId].orEmpty().filterKeys { component.contains(it) }
         }
-        val splitByCommunity = detectCommunities(component, subgraph, treeProperties.communityResolution + 0.25)
+        val splitByCommunity = detectCommunities(component, subgraph, treeProperties.communityResolution)
             .filter { it.isNotEmpty() }
         if (splitByCommunity.size > 1 && splitByCommunity.all { it.size <= maxClusterSize }) {
             splitClusterCounter.increment()
-            return splitByCommunity
+            return SplitComponentResult(components = splitByCommunity)
+        }
+
+        var retryAttempted = false
+        if (treeProperties.clusterSplitRetryWithHigherResolution) {
+            retryAttempted = true
+            val retryResolution = (
+                treeProperties.communityResolution *
+                    treeProperties.clusterSplitRetryResolutionMultiplier.coerceAtLeast(1.0)
+                ).coerceAtLeast(treeProperties.communityResolution + 0.05)
+            val retrySplit = detectCommunities(component, subgraph, retryResolution)
+                .filter { it.isNotEmpty() }
+            if (retrySplit.size > 1 && retrySplit.all { it.size <= maxClusterSize }) {
+                splitClusterCounter.increment()
+                return SplitComponentResult(
+                    components = retrySplit,
+                    retryAttempted = true,
+                    retrySucceeded = true
+                )
+            }
         }
 
         val ordered = component.sortedWith(
@@ -946,7 +1410,12 @@ class TreeClusterer(
             }
         }
 
-        return buckets.map { it.toList() }
+        return SplitComponentResult(
+            components = buckets.map { it.toList() },
+            retryAttempted = retryAttempted,
+            retrySucceeded = false,
+            fallbackUsed = true
+        )
     }
 
     private fun overlap(docId: String, bucket: List<String>, adjacency: Map<String, Set<String>>): Int {
@@ -1022,23 +1491,66 @@ class TreeClusterer(
     private fun mergeSmallClusters(
         clusters: List<List<String>>,
         weighted: Map<String, Map<String, Double>>,
-        minClusterSize: Int
-    ): List<List<String>> {
+        minClusterSize: Int,
+        minAffinity: Double
+    ): MergeSmallResult {
         if (clusters.isEmpty() || minClusterSize <= 1) {
-            return clusters
+            return MergeSmallResult(
+                clusters = clusters,
+                mergeAttempted = 0,
+                merged = 0,
+                keptSingleton = 0
+            )
         }
         val large = clusters.filter { it.size >= minClusterSize }.map { it.toMutableList() }.toMutableList()
         val small = clusters.filter { it.size < minClusterSize }
+        if (small.isEmpty()) {
+            return MergeSmallResult(
+                clusters = clusters,
+                mergeAttempted = 0,
+                merged = 0,
+                keptSingleton = 0
+            )
+        }
         if (large.isEmpty()) {
-            return clusters
+            return MergeSmallResult(
+                clusters = clusters,
+                mergeAttempted = small.size,
+                merged = 0,
+                keptSingleton = small.size
+            )
         }
+        var mergeAttempted = 0
+        var mergedCount = 0
+        var keptSingletonCount = 0
+        val keptSingletonClusters = mutableListOf<List<String>>()
         small.forEach { cluster ->
-            val target = large.maxByOrNull { candidate ->
-                averageAffinity(cluster, candidate, weighted)
-            } ?: large.first()
-            target += cluster
+            mergeAttempted += 1
+            val scoredTarget = large
+                .map { candidate -> candidate to averageAffinity(cluster, candidate, weighted) }
+                .maxWithOrNull(
+                    compareBy<Pair<MutableList<String>, Double>> { it.second }
+                        .thenBy { it.first.joinToString("|") }
+                )
+            val target = scoredTarget?.first
+            val affinity = scoredTarget?.second ?: 0.0
+            if (target != null && affinity >= minAffinity) {
+                target += cluster
+                mergedCount += 1
+            } else {
+                keptSingletonClusters += cluster.distinct().sorted()
+                keptSingletonCount += 1
+            }
         }
-        return large.map { it.distinct().sorted() }.sortedByDescending { it.size }
+        val mergedClusters = large.map { it.distinct().sorted() } + keptSingletonClusters
+        return MergeSmallResult(
+            clusters = mergedClusters
+                .filter { it.isNotEmpty() }
+                .sortedByDescending { it.size },
+            mergeAttempted = mergeAttempted,
+            merged = mergedCount,
+            keptSingleton = keptSingletonCount
+        )
     }
 
     private fun averageAffinity(

@@ -114,6 +114,7 @@ type UiNotice = {
 };
 
 type StatusTone = "neutral" | "good" | "warn" | "bad";
+type PipelineStage = "INGEST" | "EMBED" | "INDEX" | "TREE";
 
 const STATUS_TEXT: Record<string, string> = {
   DONE: "완료",
@@ -141,6 +142,7 @@ const TREE_VIEW_OPTIONS: Array<{ value: TreeView; label: string }> = [
   { value: "version", label: "Version" },
   { value: "template", label: "Template" }
 ];
+const REBUILD_REQUEST_TIMEOUT_MS = 15_000;
 
 const REASON_TEXT: Record<string, string> = {
   LOW_CONFIDENCE: "신뢰도 낮음",
@@ -201,6 +203,30 @@ const toUiError = (error: unknown, fallback: string): UiError => {
   };
 };
 
+class RequestTimeoutError extends Error {
+  constructor(message = "request_timeout") {
+    super(message);
+    this.name = "RequestTimeoutError";
+  }
+}
+
+const withRequestTimeout = <T,>(promise: Promise<T>, timeoutMs: number): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(new RequestTimeoutError());
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      })
+      .catch((error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+
 const statusTone = (value: string): StatusTone => {
   const normalized = value.trim().toUpperCase();
   if (normalized === "DONE" || normalized === "SUCCESS") {
@@ -218,6 +244,27 @@ const statusTone = (value: string): StatusTone => {
 const statusText = (value: string): string => STATUS_TEXT[value.trim().toUpperCase()] ?? value;
 
 const roleText = (value: string): string => ROLE_TEXT[value.trim().toUpperCase()] ?? value;
+
+const PIPELINE_STAGE_LABEL: Record<PipelineStage, string> = {
+  INGEST: "수집",
+  EMBED: "임베딩",
+  INDEX: "인덱스",
+  TREE: "트리"
+};
+
+const getFailedPipelineStage = (doc: DocumentItem): PipelineStage | null => {
+  const stageStatuses: Array<{ stage: PipelineStage; status: string }> = [
+    { stage: "INGEST", status: doc.pipeline_status.ingest },
+    { stage: "EMBED", status: doc.pipeline_status.embed },
+    { stage: "INDEX", status: doc.pipeline_status.index },
+    { stage: "TREE", status: doc.pipeline_status.tree }
+  ];
+  const failed = stageStatuses.find((entry) => {
+    const normalized = entry.status.trim().toUpperCase();
+    return normalized === "FAILED" || normalized === "ERROR";
+  });
+  return failed?.stage ?? null;
+};
 
 const isUnsortedNodeLabel = (label: string): boolean => {
   const normalized = label.trim().toLowerCase();
@@ -785,6 +832,15 @@ export default function App() {
     const [uploading, setUploading] = useState(false);
     const [documentError, setDocumentError] = useState<UiError | null>(null);
     const [uploadError, setUploadError] = useState<UiError | null>(null);
+    const [pipelineRetryError, setPipelineRetryError] = useState<UiError | null>(null);
+    const [pipelineRetryNotice, setPipelineRetryNotice] = useState<UiNotice | null>(null);
+    const [pipelineRetrying, setPipelineRetrying] = useState(false);
+    const failedPipelineStage = useMemo(() => (doc ? getFailedPipelineStage(doc) : null), [doc]);
+
+    useEffect(() => {
+      setPipelineRetryError(null);
+      setPipelineRetryNotice(null);
+    }, [params.documentId]);
 
     const loadDocument = useCallback(async () => {
       if (!params.documentId || !state.workspaceId) {
@@ -917,6 +973,33 @@ export default function App() {
       }
     }, [api, params.documentId]);
 
+    const retryFailedPipelineStage = useCallback(async () => {
+      if (!params.documentId || !failedPipelineStage) {
+        return;
+      }
+      setPipelineRetrying(true);
+      setPipelineRetryError(null);
+      try {
+        await api.request<void>(
+          `/documents/${params.documentId}/pipeline/retry`,
+          {
+            method: "POST",
+            body: JSON.stringify({ stage: failedPipelineStage })
+          },
+          true
+        );
+        setPipelineRetryNotice({
+          tone: "info",
+          message: `${PIPELINE_STAGE_LABEL[failedPipelineStage]} 단계 재실행을 요청했습니다.`
+        });
+        await loadDocument();
+      } catch (e) {
+        setPipelineRetryError(toUiError(e, "실패 단계 재실행에 실패했습니다"));
+      } finally {
+        setPipelineRetrying(false);
+      }
+    }, [api, failedPipelineStage, loadDocument, params.documentId]);
+
     useEffect(() => {
       if (!doc) {
         return;
@@ -984,6 +1067,31 @@ export default function App() {
                 <div className="meta-block meta-block-wide meta-warning">
                   <span className="meta-label">실패 사유</span>
                   <span>{doc.pipeline_status.failure_reason}</span>
+                </div>
+              ) : null}
+              {failedPipelineStage ? (
+                <div className="meta-block meta-block-wide">
+                  <span className="meta-label">실패 단계 재실행</span>
+                  <p className="muted">현재 실패 단계는 {PIPELINE_STAGE_LABEL[failedPipelineStage]}입니다.</p>
+                  <div className="action-row">
+                    <button
+                      className="btn btn-secondary"
+                      disabled={pipelineRetrying}
+                      onClick={() => {
+                        void retryFailedPipelineStage();
+                      }}
+                      type="button"
+                    >
+                      {pipelineRetrying ? "재실행 요청 중..." : `${PIPELINE_STAGE_LABEL[failedPipelineStage]} 재실행`}
+                    </button>
+                  </div>
+                  <NoticePanel notice={pipelineRetryNotice} />
+                  <ErrorPanel
+                    error={pipelineRetryError}
+                    onRetry={() => {
+                      void retryFailedPipelineStage();
+                    }}
+                  />
                 </div>
               ) : null}
               <div className="meta-block meta-block-wide">
@@ -1444,6 +1552,7 @@ export default function App() {
     const [dragSourceNodeId, setDragSourceNodeId] = useState<string | null>(null);
     const [treeError, setTreeError] = useState<UiError | null>(null);
     const [treeNotice, setTreeNotice] = useState<UiNotice | null>(null);
+    const [isRebuilding, setIsRebuilding] = useState(false);
     const isTopicView = selectedView === "topic";
 
     useEffect(() => {
@@ -1597,15 +1706,19 @@ export default function App() {
                 </label>
                 <button
                   className="btn btn-secondary"
-                  disabled={!state.workspaceId}
+                  disabled={!state.workspaceId || isRebuilding}
                   onClick={async () => {
                     setTreeError(null);
-                    setTreeNotice({ tone: "info", message: "재빌드를 실행 중입니다..." });
+                    setTreeNotice({ tone: "info", message: "재빌드 요청을 등록하는 중입니다..." });
+                    setIsRebuilding(true);
                     try {
-                      const rebuild = await api.request<{ snapshot_id: string | null; status: string; pending_count?: number }>(
-                        "/tree/rebuild",
-                        { method: "POST", body: JSON.stringify({ mode: "IMMEDIATE", view: selectedView }) },
-                        true
+                      const rebuild = await withRequestTimeout(
+                        api.request<{ snapshot_id: string | null; status: string; pending_count?: number }>(
+                          "/tree/rebuild",
+                          { method: "POST", body: JSON.stringify({ mode: "DEBOUNCED", view: selectedView }) },
+                          true
+                        ),
+                        REBUILD_REQUEST_TIMEOUT_MS
                       );
                       await refreshTree();
                       const normalized = rebuild.status.trim().toUpperCase();
@@ -1620,13 +1733,22 @@ export default function App() {
                         setTreeNotice({ tone: "success", message: `재빌드가 완료되었습니다 (${rebuild.status}).` });
                       }
                     } catch (e) {
-                      setTreeNotice(null);
-                      setTreeError(toUiError(e, "재빌드에 실패했습니다"));
+                      if (e instanceof RequestTimeoutError) {
+                        setTreeNotice({
+                          tone: "info",
+                          message: "요청이 길어지고 있습니다. 재빌드는 서버에서 계속 진행 중일 수 있습니다. 잠시 후 새로고침해 확인하세요."
+                        });
+                      } else {
+                        setTreeNotice(null);
+                        setTreeError(toUiError(e, "재빌드에 실패했습니다"));
+                      }
+                    } finally {
+                      setIsRebuilding(false);
                     }
                   }}
                   type="button"
                 >
-                  재빌드
+                  {isRebuilding ? "재빌드 요청 중..." : "재빌드"}
                 </button>
                 <button
                   className="btn btn-primary"

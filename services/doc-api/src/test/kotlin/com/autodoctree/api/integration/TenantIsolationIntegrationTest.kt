@@ -3,10 +3,14 @@ package com.autodoctree.api.integration
 import com.autodoctree.api.db.AttachmentRepository
 import com.autodoctree.api.db.DocumentRepository
 import com.autodoctree.api.db.MembershipRepository
+import com.autodoctree.api.db.OutboxRepository
 import com.autodoctree.api.db.PipelineStatusRepository
 import com.autodoctree.api.db.UserRepository
 import com.autodoctree.api.db.WorkspaceRepository
+import com.autodoctree.common.Stage
+import com.autodoctree.common.StageStatus
 import com.fasterxml.jackson.databind.ObjectMapper
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -48,6 +52,9 @@ class TenantIsolationIntegrationTest {
 
     @Autowired
     private lateinit var pipelineStatusRepository: PipelineStatusRepository
+
+    @Autowired
+    private lateinit var outboxRepository: OutboxRepository
 
     @Autowired
     private lateinit var attachmentRepository: AttachmentRepository
@@ -169,6 +176,18 @@ class TenantIsolationIntegrationTest {
                 .header("Authorization", "Bearer $tokenB")
                 .header("X-Workspace-Id", wsBId)
         ).andExpect(status().isNotFound)
+
+        mockMvc.perform(
+            post("/api/v1/documents/$wsADocId/pipeline/retry")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf("stage" to "EMBED")
+                    )
+                )
+        ).andExpect(status().isForbidden)
 
         mockMvc.perform(
             post("/api/v1/attachments/presign")
@@ -378,6 +397,38 @@ class TenantIsolationIntegrationTest {
                     )
                 )
         ).andExpect(status().isBadRequest)
+    }
+
+    @Test
+    fun `owner can request failed stage retry from document endpoint`() {
+        pipelineStatusRepository.updateStage(
+            workspaceId = wsAId,
+            documentId = wsADocId,
+            stage = Stage.EMBED,
+            status = StageStatus.FAILED,
+            failureReason = "embedding failed"
+        )
+
+        mockMvc.perform(
+            post("/api/v1/documents/$wsADocId/pipeline/retry")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf("stage" to "EMBED")
+                    )
+                )
+        ).andExpect(status().isNoContent)
+
+        val hasRetryEvent = outboxRepository.listByWorkspace(wsAId, wsADocId).any { event ->
+            if (event.eventType != "StageRetry") {
+                return@any false
+            }
+            val payload = objectMapper.readTree(event.payloadJson)
+            payload.path("stage").asText() == "EMBED"
+        }
+        assertTrue(hasRetryEvent, "Expected StageRetry outbox event for failed EMBED stage")
     }
 
     private fun login(email: String, password: String): String {

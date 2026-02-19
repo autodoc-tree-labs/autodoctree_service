@@ -8,6 +8,8 @@ import com.autodoctree.api.db.TreeRepository
 import com.autodoctree.api.db.UserRepository
 import com.autodoctree.api.db.WorkspaceRepository
 import com.autodoctree.api.domain.TreeService
+import com.autodoctree.common.Stage
+import com.autodoctree.common.StageStatus
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -351,6 +353,29 @@ class TreeAdminDebugIntegrationTest {
                 .header("Authorization", "Bearer $memberToken")
                 .header("X-Workspace-Id", workspaceId)
         ).andExpect(status().isForbidden)
+    }
+
+    @Test
+    fun `member can retry failed stage from document endpoint`() {
+        pipelineStatusRepository.updateStage(
+            workspaceId = workspaceId,
+            documentId = debugDocId,
+            stage = Stage.EMBED,
+            status = StageStatus.FAILED,
+            failureReason = "embedding failed"
+        )
+
+        mockMvc.perform(
+            post("/api/v1/documents/$debugDocId/pipeline/retry")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $memberToken")
+                .header("X-Workspace-Id", workspaceId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf("stage" to "EMBED")
+                    )
+                )
+        ).andExpect(status().isNoContent)
     }
 
     @Test

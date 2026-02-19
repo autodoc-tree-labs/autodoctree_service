@@ -131,7 +131,7 @@ class TreeAlgorithmsTest {
             lexicalWeight = 0.4,
             lexicalGate = 0.2,
             mutualKnnRequired = false,
-            snnThreshold = 0.0
+            sharedNeighborJaccardMin = 0.0
         )
 
         val link = graph.adjacency["doc-a"].orEmpty().firstOrNull { it.documentId == "doc-b" }
@@ -164,7 +164,7 @@ class TreeAlgorithmsTest {
             topK = 1,
             minSimilarity = 0.0,
             mutualKnnRequired = true,
-            snnThreshold = 0.0
+            sharedNeighborJaccardMin = 0.0
         )
         val relaxed = builder.build(
             workspaceId = "ws-a",
@@ -173,11 +173,198 @@ class TreeAlgorithmsTest {
             topK = 1,
             minSimilarity = 0.0,
             mutualKnnRequired = false,
-            snnThreshold = 0.0
+            sharedNeighborJaccardMin = 0.0
         )
 
         assertTrue(strict.adjacency["doc-c"].isNullOrEmpty())
         assertFalse(relaxed.adjacency["doc-c"].isNullOrEmpty())
+    }
+
+    @Test
+    fun `normalize with low min similarity overconnects graph`() {
+        // 설명: normalize=true일 때 0.25 임계값은 무관 baseline(~0.5)까지 통과시켜 과연결을 만들 수 있다.
+        val registry = SimpleMeterRegistry()
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
+        val docs = listOf(
+            doc("a-1", "finance alpha"),
+            doc("a-2", "finance beta"),
+            doc("a-3", "finance gamma"),
+            doc("a-4", "finance delta"),
+            doc("b-1", "history alpha"),
+            doc("b-2", "history beta"),
+            doc("b-3", "history gamma"),
+            doc("b-4", "history delta")
+        )
+        val embeddings = mapOf(
+            "a-1" to embedding("a-1", listOf(1.0, 0.0)),
+            "a-2" to embedding("a-2", listOf(0.99, 0.01)),
+            "a-3" to embedding("a-3", listOf(0.98, 0.02)),
+            "a-4" to embedding("a-4", listOf(0.97, 0.03)),
+            "b-1" to embedding("b-1", listOf(0.0, 1.0)),
+            "b-2" to embedding("b-2", listOf(0.01, 0.99)),
+            "b-3" to embedding("b-3", listOf(0.02, 0.98)),
+            "b-4" to embedding("b-4", listOf(0.03, 0.97))
+        )
+        val clusterer = testClusterer(
+            treeProperties = testTreeProperties().copy(maxClusterSize = 20, minClusterSize = 2),
+            featureFlags = testFeatureFlags().copy(communityClustering = false)
+        )
+
+        val graphLow = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 4,
+            edgeBudget = 4,
+            minSimilarity = 0.25,
+            normalize = true,
+            mutualKnnRequired = false,
+            sharedNeighborJaccardMin = 0.0,
+            degreeCap = 100
+        )
+        val lowClusters = clusterer.cluster(docs, graphLow, maxClusterSize = 20)
+
+        assertEquals(1, lowClusters.size)
+        assertTrue(graphLow.stats.edgeCount >= docs.size * 4)
+        assertTrue(graphLow.stats.degreeStats.p99 >= 4.0)
+    }
+
+    @Test
+    fun `raising normalized min similarity separates communities`() {
+        // 설명: 같은 입력에서 minSimilarity를 0.65로 올리면 cross-topic edge가 줄고 군집이 분리된다.
+        val registry = SimpleMeterRegistry()
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
+        val docs = listOf(
+            doc("a-1", "finance alpha"),
+            doc("a-2", "finance beta"),
+            doc("a-3", "finance gamma"),
+            doc("a-4", "finance delta"),
+            doc("b-1", "history alpha"),
+            doc("b-2", "history beta"),
+            doc("b-3", "history gamma"),
+            doc("b-4", "history delta")
+        )
+        val embeddings = mapOf(
+            "a-1" to embedding("a-1", listOf(1.0, 0.0)),
+            "a-2" to embedding("a-2", listOf(0.99, 0.01)),
+            "a-3" to embedding("a-3", listOf(0.98, 0.02)),
+            "a-4" to embedding("a-4", listOf(0.97, 0.03)),
+            "b-1" to embedding("b-1", listOf(0.0, 1.0)),
+            "b-2" to embedding("b-2", listOf(0.01, 0.99)),
+            "b-3" to embedding("b-3", listOf(0.02, 0.98)),
+            "b-4" to embedding("b-4", listOf(0.03, 0.97))
+        )
+        val clusterer = testClusterer(
+            treeProperties = testTreeProperties().copy(maxClusterSize = 20, minClusterSize = 2),
+            featureFlags = testFeatureFlags().copy(communityClustering = false)
+        )
+
+        val graphLow = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 4,
+            edgeBudget = 4,
+            minSimilarity = 0.25,
+            normalize = true,
+            mutualKnnRequired = false,
+            sharedNeighborJaccardMin = 0.0,
+            degreeCap = 100
+        )
+        val graphHigh = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 4,
+            edgeBudget = 4,
+            minSimilarity = 0.65,
+            normalize = true,
+            mutualKnnRequired = false,
+            sharedNeighborJaccardMin = 0.0,
+            degreeCap = 100
+        )
+        val highClusters = clusterer.cluster(docs, graphHigh, maxClusterSize = 20)
+
+        assertEquals(2, highClusters.size)
+        assertTrue(graphHigh.stats.edgeCount < graphLow.stats.edgeCount)
+        assertTrue(graphHigh.stats.degreeStats.p99 < graphLow.stats.degreeStats.p99)
+    }
+
+    @Test
+    fun `shared-neighbor jaccard prunes bridge edges`() {
+        // 설명: topK=1에서는 공유 이웃이 없는 링크의 Jaccard가 0이므로 SNN threshold로 브릿지를 제거할 수 있다.
+        val registry = SimpleMeterRegistry()
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
+        val docs = listOf(
+            doc("doc-a", "alpha topic"),
+            doc("doc-b", "alpha topic detail"),
+            doc("doc-c", "orthogonal topic")
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(1.0, 0.0)),
+            "doc-b" to embedding("doc-b", listOf(0.9, 0.1)),
+            "doc-c" to embedding("doc-c", listOf(0.0, 1.0))
+        )
+
+        val withoutSnn = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 1,
+            edgeBudget = 1,
+            minSimilarity = 0.0,
+            mutualKnnRequired = false,
+            sharedNeighborJaccardMin = 0.0
+        )
+        val withSnn = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 1,
+            edgeBudget = 1,
+            minSimilarity = 0.0,
+            mutualKnnRequired = false,
+            sharedNeighborJaccardMin = 0.10
+        )
+
+        assertTrue(withoutSnn.adjacency["doc-a"].orEmpty().any { it.documentId == "doc-b" })
+        assertTrue(withoutSnn.adjacency["doc-b"].orEmpty().any { it.documentId == "doc-a" })
+        assertFalse(withSnn.adjacency["doc-a"].orEmpty().any { it.documentId == "doc-b" })
+        assertFalse(withSnn.adjacency["doc-b"].orEmpty().any { it.documentId == "doc-a" })
+    }
+
+    @Test
+    fun `neighbor builder emits finite instrumentation stats`() {
+        // 설명: 리빌드 요약 계측값은 최소 케이스에서도 0/NaN-only가 아니어야 한다.
+        val registry = SimpleMeterRegistry()
+        val builder = NeighborBuilder(objectMapper, testLabeler(), registry)
+        val docs = listOf(
+            doc("doc-a", "finance invoice"),
+            doc("doc-b", "finance billing"),
+            doc("doc-c", "sports match")
+        )
+        val embeddings = mapOf(
+            "doc-a" to embedding("doc-a", listOf(1.0, 0.0)),
+            "doc-b" to embedding("doc-b", listOf(0.95, 0.05)),
+            "doc-c" to embedding("doc-c", listOf(0.0, 1.0))
+        )
+
+        val graph = builder.build(
+            workspaceId = "ws-a",
+            documents = docs,
+            embeddings = embeddings,
+            topK = 2,
+            minSimilarity = 0.0,
+            mutualKnnRequired = false,
+            sharedNeighborJaccardMin = 0.0
+        )
+
+        assertTrue(graph.stats.similarityDistributions.semantic.count > 0)
+        assertTrue(graph.stats.similarityDistributions.fused.count > 0)
+        assertTrue(graph.stats.similarityDistributions.semantic.p95.isFinite())
+        assertTrue(graph.stats.similarityDistributions.fused.mean.isFinite())
+        assertTrue(graph.stats.edgeFilterStats.evaluatedPairs > 0)
+        assertTrue(graph.stats.edgeFilterStats.edgesBeforeFilter > 0)
     }
 
     @Test
@@ -204,7 +391,7 @@ class TreeAlgorithmsTest {
             topK = 3,
             minSimilarity = 0.0,
             edgeBudget = 1,
-            snnThreshold = 0.0
+            sharedNeighborJaccardMin = 0.0
         )
 
         assertTrue(graph.adjacency.values.all { it.size <= 1 })
@@ -243,7 +430,7 @@ class TreeAlgorithmsTest {
             topK = 2,
             minSimilarity = 0.0,
             mutualKnnRequired = false,
-            snnThreshold = 0.0,
+            sharedNeighborJaccardMin = 0.0,
             rerankerEnabled = true,
             rerankerPerDocBudget = 2,
             rerankerPassThreshold = 0.5,
@@ -286,7 +473,7 @@ class TreeAlgorithmsTest {
             topK = 2,
             minSimilarity = 0.0,
             mutualKnnRequired = false,
-            snnThreshold = 0.0,
+            sharedNeighborJaccardMin = 0.0,
             rerankerEnabled = true,
             rerankerPerDocBudget = 2,
             rerankerPassThreshold = 0.5,
@@ -295,6 +482,42 @@ class TreeAlgorithmsTest {
 
         assertTrue(graph.adjacency["doc-a"].orEmpty().isNotEmpty())
         assertEquals(1.0, graph.stats.rerankerFallbackRate)
+    }
+
+    @Test
+    fun `cluster merge affinity keeps singleton when no strong target exists`() {
+        // 설명: small cluster의 max affinity가 threshold 미만이면 강제 병합하지 않고 singleton으로 유지한다.
+        val clusterer = testClusterer(
+            treeProperties = testTreeProperties().copy(
+                minClusterSize = 2,
+                clusterMergeMinAffinity = 0.55,
+                maxClusterSize = 10
+            ),
+            featureFlags = testFeatureFlags().copy(communityClustering = false)
+        )
+        val docs = listOf(
+            doc("a-1", "finance-a"),
+            doc("a-2", "finance-b"),
+            doc("b-1", "history-a"),
+            doc("b-2", "history-b"),
+            doc("s-1", "singleton")
+        )
+        val graph = NeighborGraph(
+            adjacency = mapOf(
+                "a-1" to listOf(NeighborLink("a-2", 0.92)),
+                "a-2" to listOf(NeighborLink("a-1", 0.92)),
+                "b-1" to listOf(NeighborLink("b-2", 0.91)),
+                "b-2" to listOf(NeighborLink("b-1", 0.91)),
+                "s-1" to emptyList()
+            )
+        )
+
+        val result = clusterer.clusterWithStats(docs, graph, maxClusterSize = 10)
+
+        assertTrue(result.clusters.any { it.documentIds.size == 1 && it.documentIds.contains("s-1") })
+        assertEquals(1, result.stats.mergeAttempted)
+        assertEquals(0, result.stats.merged)
+        assertEquals(1, result.stats.keptSingleton)
     }
 
     @Test
@@ -575,10 +798,14 @@ class TreeAlgorithmsTest {
         )
     }
 
-    private fun testClusterer(registry: SimpleMeterRegistry = SimpleMeterRegistry()): TreeClusterer {
+    private fun testClusterer(
+        registry: SimpleMeterRegistry = SimpleMeterRegistry(),
+        treeProperties: TreeProperties = testTreeProperties(),
+        featureFlags: FeatureFlags = testFeatureFlags()
+    ): TreeClusterer {
         return TreeClusterer(
-            treeProperties = testTreeProperties(),
-            featureFlags = testFeatureFlags(),
+            treeProperties = treeProperties,
+            featureFlags = featureFlags,
             meterRegistry = registry
         )
     }

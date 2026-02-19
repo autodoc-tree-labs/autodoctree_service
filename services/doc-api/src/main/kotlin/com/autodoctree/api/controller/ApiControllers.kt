@@ -209,6 +209,17 @@ class DocumentController(
         treeService.acceptExplain(context, documentId)
         return ResponseEntity.noContent().build()
     }
+
+    @PostMapping("/{documentId}/pipeline/retry")
+    fun retryPipelineStage(
+        request: HttpServletRequest,
+        @PathVariable documentId: String,
+        @Valid @RequestBody body: RetryPipelineStageRequest
+    ): ResponseEntity<Void> {
+        val context = workspaceContextResolver.resolve(request)
+        documentService.retryPipelineStage(context, documentId, body.stage)
+        return ResponseEntity.noContent().build()
+    }
 }
 
 @RestController
@@ -669,6 +680,10 @@ data class AnswerQuestionRequest(
 
 data class RetryRequest(
     @field:NotBlank val documentId: String,
+    @field:NotBlank val stage: String
+)
+
+data class RetryPipelineStageRequest(
     @field:NotBlank val stage: String
 )
 
