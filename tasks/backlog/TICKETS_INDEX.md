@@ -33,6 +33,7 @@
 | B-0901 | User Rule Engine v1 (조건→노드 라우팅 hardsoft) | `tasks/backlog/B-0901 — User Rule Engine v1 (조건노드 라우팅 hardsoft).md` |
 | B-0902 | Active Learning Queue v1 (관계 질문 생성소비) | `tasks/backlog/B-0902 — Active Learning Queue v1 (관계 질문 생성소비).md` |
 | B-1101 | Multi-Tenancy Hardening v2 (DBSearchCacheObjectStorage leak tests) | `tasks/backlog/B-1101 — Multi-Tenancy Hardening v2 (DBSearchCacheObjectStorage leak tests).md` |
+| B-1207 | Search v2 Multilingual Hybrid BM25+Vector | `tasks/backlog/B-1207 — Search v2 Multilingual Hybrid BM25+Vector.md` |
 | I-0101 | Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards | `tasks/backlog/I-0101 — Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards.md` |
 | I-0201 | Ollama Embedding Setup (bge-m3) — Offline Bootstrap & Healthchecks | `tasks/backlog/I-0201 — Ollama Embedding Setup (bge-m3) — Offline Bootstrap  Healthchecks.md` |
 | I-0301 | OpenSearch Korean Analyzer (nori) for Search Index + Field Mapping | `tasks/backlog/I-0301 — OpenSearch Korean Analyzer (nori) for Search Index  Field Mapping.md` |
@@ -45,3 +46,4 @@
 | U-0801 | User UI: Multi-View Navigator (TopicProjectTimelineVersion) | `tasks/backlog/U-0801 — User UI Multi-View Navigator (TopicProjectTimelineVersion).md` |
 | U-0802 | User UI: Explain Drawer v2 (근거이웃사유) + 수용되돌림 | `tasks/backlog/U-0802 — User UI Explain Drawer v2 (근거이웃사유)  수용되돌림.md` |
 | U-0902 | User UI: Smart Questions Inbox (2지선다쌍비교) | `tasks/backlog/U-0902 — User UI Smart Questions Inbox (2지선다쌍비교).md` |
+| U-1209 | Persist login session across refresh in web-user | `tasks/backlog/U-1209 — Persist login session across refresh in web-user.md` |

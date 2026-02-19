@@ -7,7 +7,7 @@ spring:
 feature:
   auto-tree: true
   explain: true
-  hybrid-search: false
+  hybrid-search: ${FEATURE_HYBRID_SEARCH:true}
   embedding-ollama: ${FEATURE_EMBEDDING_OLLAMA:false}
   llm-labeling: ${FEATURE_LLM_LABELING:true}
   llm-explain: ${FEATURE_LLM_EXPLAIN:true}

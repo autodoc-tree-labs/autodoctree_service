@@ -193,6 +193,14 @@ Important flags:
 - `STRUCTURE_WORKER_MAX_DEPTH`
 - `TREE_EMBEDDING_DOCUMENT_WEIGHT` / `TREE_EMBEDDING_SUMMARY_WEIGHT` / `TREE_EMBEDDING_SECTION_WEIGHT`
   - 채널별 임베딩 결합 가중치(TITLE, BODY_SUMMARY, SECTION_CENTROID)
+- `OPENSEARCH_TEMPLATE_NAME` (권장 `docs-template-v2`)
+- `OPENSEARCH_INDEX_PREFIX` (권장 `docs`)
+- `OPENSEARCH_INDEX_VERSION` (권장 `v2`)
+- `OPENSEARCH_VECTOR_FIELD` (권장 `doc_embedding`)
+- `SEARCH_HYBRID_RRF_K` (권장 `60`)
+- `SEARCH_HYBRID_CANDIDATE_SIZE` (권장 `100`)
+- `SEARCH_HYBRID_KNN_TOP_K` (권장 `100`)
+- `SEARCH_INDEX_SYNC_SAMPLE_RATE` (권장 `0.05`)
 
 ### Tree Rebuild 품질 기본값 (운영 권장)
 - normalize된 cosine(`TREE_NEIGHBOR_NORMALIZE=true`) 환경에서는 무관 문서 baseline이 `0.5` 근처가 될 수 있습니다.
@@ -216,17 +224,39 @@ Important flags:
 FEATURE_USER_RULES_V1=true FEATURE_ADMIN_TREE_DEBUG=true ./gradlew -p services :doc-api:bootRun
 ```
 
-## 5-1. OpenSearch ko_nori analyzer check
-`_index_template`는 서버 시작 시 자동 갱신됩니다. analyzer 확인:
+## 5-1. OpenSearch Search v2 진단
+현재 alias/template/plugin/mapping/settings/doc count를 한 번에 확인:
+```bash
+WS_ID=<workspace-id> ./scripts/opensearch/diagnose-v2.sh
+```
+
+수동 점검 커맨드:
+```bash
+curl -s http://localhost:59200/_cat/aliases?format=json | jq .
+curl -s http://localhost:59200/_index_template/docs-template-v2 | jq .
+curl -s http://localhost:59200/_cat/plugins?format=json | jq .
+curl -s http://localhost:59200/docs-active/_mapping | jq .
+curl -s http://localhost:59200/docs-active/_settings | jq .
+curl -s -X POST http://localhost:59200/docs-active/_count \
+  -H 'Content-Type: application/json' \
+  -d '{"query":{"term":{"workspace_id":"<workspace-id>"}}}' | jq .
+```
+
+## 5-2. Analyzer smoke (`_analyze`)
+`과학의 역사` 형태소/토큰 분해 확인:
 ```bash
 curl -s -X POST http://localhost:59200/_analyze \
   -H 'Content-Type: application/json' \
-  -d '{"analyzer":"ko_nori","text":"사랑하는 문서를 자동 분류합니다"}'
+  -d '{"analyzer":"ko_nori","text":"과학의 역사"}'
 ```
 
-매핑/템플릿 변경 후 reindex + alias swap:
+## 5-3. Blue/Green reindex + alias swap
 ```bash
-./scripts/opensearch_reindex_alias_swap.sh docs-active docs-v1-000002
+./scripts/opensearch/create-template-v2.sh
+TARGET_INDEX="$(./scripts/opensearch/create-index-v2.sh | awk -F= '/^\\[create-index-v2\\] index=/{print $2}')"
+./scripts/opensearch/reindex-to-v2.sh docs-active "$TARGET_INDEX"
+./scripts/opensearch/validate-counts.sh docs-active "$TARGET_INDEX"
+./scripts/opensearch/alias-swap.sh docs-active "$TARGET_INDEX"
 ```
 
 기본 연결값:
@@ -234,7 +264,14 @@ curl -s -X POST http://localhost:59200/_analyze \
 - `OPENSEARCH_INDEX_ALIAS=docs-active`
 - `OPENSEARCH_USERNAME` / `OPENSEARCH_PASSWORD` (필요 시)
 
-## 5-2. Offline model packaging bootstrap (I-1001)
+## 5-4. Search smoke (BM25 + Hybrid)
+```bash
+WS_ID=<workspace-id> ./scripts/search-smoke.sh
+```
+- BM25: `"과학"` 쿼리 hit > 0 이어야 함
+- Hybrid: `debug.vector_used=true` 또는 `debug.top_ranks[].rrf_score` 존재를 확인
+
+## 5-5. Offline model packaging bootstrap (I-1001)
 모델 파일은 `models/manifest.json`에 고정 경로/버전/체크섬으로 관리합니다.
 
 1) 모델 파일 반입(예시 경로):

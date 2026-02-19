@@ -10,6 +10,7 @@ import com.autodoctree.api.infra.NotFoundException
 import com.autodoctree.api.infra.requireEditor
 import com.autodoctree.api.search.SearchSpec
 import com.autodoctree.api.search.TenantSearchClient
+import com.autodoctree.api.search.SearchMode
 import com.autodoctree.api.storage.S3StorageService
 import com.autodoctree.api.tenant.WorkspaceContext
 import com.autodoctree.common.Stage
@@ -348,16 +349,29 @@ class AttachmentService(
 class SearchService(
     private val tenantSearchClient: TenantSearchClient
 ) {
-    fun search(context: WorkspaceContext, q: String, page: Int, size: Int): Map<String, Any?> {
+    fun search(
+        context: WorkspaceContext,
+        q: String,
+        mode: String,
+        page: Int,
+        size: Int,
+        debug: Boolean
+    ): Map<String, Any?> {
         if (q.isBlank()) {
             throw BadRequestException("q is required")
         }
-        val hits = tenantSearchClient.search(
+        val result = tenantSearchClient.search(
             workspaceId = context.workspaceId,
-            spec = SearchSpec(q, page, size)
+            spec = SearchSpec(
+                query = q,
+                page = page,
+                size = size,
+                mode = SearchMode.fromApi(mode),
+                debug = debug
+            )
         )
-        return mapOf(
-            "items" to hits.map {
+        val response = mutableMapOf<String, Any?>(
+            "items" to result.hits.map {
                 mapOf(
                     "document_id" to it.documentId,
                     "title" to it.title,
@@ -365,5 +379,7 @@ class SearchService(
                 )
             }
         )
+        result.debug?.let { response["debug"] = it }
+        return response
     }
 }

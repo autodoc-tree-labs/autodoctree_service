@@ -47,6 +47,42 @@ docker compose --profile llm --profile llm-init up ollama-init
 ```
 임베딩은 `TITLE`, `BODY_SUMMARY`, `SECTION`, `SECTION_CENTROID` 채널로 저장되고 트리 리빌드 시 가중 결합됩니다.
 
+### Search v2 (Multilingual + Hybrid)
+- 기본 lexical 검색은 `multi_match` + workspace filter(`workspace_id`) 강제 적용입니다.
+- v2 템플릿은 `title/body`에 `ko/std/edge` 멀티필드를 사용합니다.
+- 한국어는 nori, 다국어는 ICU(미설치 시 standard+asciifolding fallback)로 분석합니다.
+- Hybrid는 BM25 + vector(kNN) 결과를 RRF(`k=60`)로 결합합니다.
+- `GET /api/v1/search?...&debug=true`에서 아래 운영 진단이 가능합니다.
+  - `workspace_id`, `index_alias`, `resolved_index_name`
+  - `workspace_indexed_doc_count`
+  - `search_backend`, `lang_detected`, `vector_used`, `vector_reason`
+  - `top_ranks[].bm25_rank|knn_rank|rrf_score`
+
+권장 환경값:
+- `FEATURE_HYBRID_SEARCH=true`
+- `OPENSEARCH_TEMPLATE_NAME=docs-template-v2`
+- `OPENSEARCH_INDEX_PREFIX=docs`
+- `OPENSEARCH_INDEX_VERSION=v2`
+- `OPENSEARCH_VECTOR_FIELD=doc_embedding`
+- `SEARCH_HYBRID_RRF_K=60`
+- `SEARCH_HYBRID_CANDIDATE_SIZE=100`
+- `SEARCH_HYBRID_KNN_TOP_K=100`
+
+Blue/Green 마이그레이션:
+```bash
+WS_ID=<workspace-id> ./scripts/opensearch/diagnose-v2.sh
+./scripts/opensearch/create-template-v2.sh
+TARGET_INDEX="$(./scripts/opensearch/create-index-v2.sh | awk -F= '/^\[create-index-v2\] index=/{print $2}')"
+./scripts/opensearch/reindex-to-v2.sh docs-active "$TARGET_INDEX"
+./scripts/opensearch/validate-counts.sh docs-active "$TARGET_INDEX"
+./scripts/opensearch/alias-swap.sh docs-active "$TARGET_INDEX"
+```
+
+검색 스모크:
+```bash
+WS_ID=<workspace-id> ./scripts/search-smoke.sh
+```
+
 ### Tree Rebuild Quality (defaults)
 - `neighbor-normalize=true`인 경우 무관 문서 cosine도 정규화 후 `0.5` 근처가 될 수 있으므로, 낮은 임계값(`0.25`)은 과연결을 유발할 수 있습니다.
 - normalize 환경에서는 `minSimilarity`를 보통 `0.6~0.8` 범위로 두고 시작하는 것이 안전합니다.
@@ -81,11 +117,6 @@ docker compose --profile observability up -d prometheus grafana
 ```
 - Prometheus: `http://localhost:59090`
 - Grafana: `http://localhost:53000` (`admin` / `admin`)
-
-OpenSearch reindex + alias swap helper:
-```bash
-./scripts/opensearch_reindex_alias_swap.sh docs-active docs-v1-000002
-```
 
 Offline model manifest workflow:
 ```bash

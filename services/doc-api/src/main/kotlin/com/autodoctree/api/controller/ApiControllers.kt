@@ -268,11 +268,12 @@ class SearchController(
         request: HttpServletRequest,
         @RequestParam q: String,
         @RequestParam(defaultValue = "bm25") mode: String,
+        @RequestParam(defaultValue = "false") debug: Boolean,
         @RequestParam(defaultValue = "0") page: Int,
         @RequestParam(defaultValue = "20") size: Int
     ): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)
-        return searchService.search(context, q, page, size)
+        return searchService.search(context, q, mode, page, size, debug)
     }
 }
 

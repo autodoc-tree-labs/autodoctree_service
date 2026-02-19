@@ -1077,6 +1077,31 @@ class EmbeddingRepository(private val jdbcTemplate: JdbcTemplate) {
         workspaceId,
         modelVersion
     )
+
+    fun listByWorkspaceAndDocumentAndModel(
+        workspaceId: String,
+        documentId: String,
+        modelVersion: String
+    ): List<EmbeddingRow> = jdbcTemplate.query(
+        """
+        SELECT id, workspace_id, document_id, target_type, target_id, input_hash, vector_json, model_version, created_at
+        FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY workspace_id, document_id, target_type, target_id, model_version
+                       ORDER BY created_at DESC
+                   ) AS rn
+            FROM embeddings
+            WHERE workspace_id = ? AND document_id = ? AND model_version = ?
+        ) latest
+        WHERE latest.rn = 1
+        ORDER BY target_type, target_id
+        """.trimIndent(),
+        mapper,
+        workspaceId,
+        documentId,
+        modelVersion
+    )
 }
 
 @Repository

@@ -48,12 +48,20 @@ search:
   username: ${OPENSEARCH_USERNAME:admin}
   password: ${OPENSEARCH_PASSWORD:admin}
   index-alias: ${OPENSEARCH_INDEX_ALIAS:docs-active}
-  template-name: ${OPENSEARCH_TEMPLATE_NAME:docs-template}
+  template-name: ${OPENSEARCH_TEMPLATE_NAME:docs-template-v2}
+  index-prefix: ${OPENSEARCH_INDEX_PREFIX:docs}
+  index-version: ${OPENSEARCH_INDEX_VERSION:v2}
+  vector-field: ${OPENSEARCH_VECTOR_FIELD:doc_embedding}
+  hybrid-rrf-k: ${SEARCH_HYBRID_RRF_K:60}
+  hybrid-candidate-size: ${SEARCH_HYBRID_CANDIDATE_SIZE:100}
+  hybrid-knn-top-k: ${SEARCH_HYBRID_KNN_TOP_K:100}
+  hybrid-operator-fallback-minimum-should-match: ${SEARCH_HYBRID_OPERATOR_FALLBACK_MSM:60%}
+  index-sync-sample-rate: ${SEARCH_INDEX_SYNC_SAMPLE_RATE:0.05}
 
 feature:
   auto-tree: true
   explain: true
-  hybrid-search: false
+  hybrid-search: ${FEATURE_HYBRID_SEARCH:true}
   embedding-ollama: ${FEATURE_EMBEDDING_OLLAMA:false}
   llm-labeling: ${FEATURE_LLM_LABELING:true}
   llm-explain: ${FEATURE_LLM_EXPLAIN:true}
