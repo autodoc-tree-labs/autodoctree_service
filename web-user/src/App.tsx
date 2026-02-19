@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { ApiError, type Workspace } from "@autodoctree/api-client";
 import { createApiClient } from "./api";
@@ -54,6 +54,26 @@ type TreeDocumentView = {
     label: string;
     score: number;
   }>;
+};
+
+type EditorSidebarWorkspaceState = {
+  parents: Record<string, string | null>;
+  favorites: string[];
+};
+
+type EditorTreeNode = {
+  doc: DocumentItem;
+  children: EditorTreeNode[];
+};
+
+type EditorSidebarMode = "DOCUMENT" | "NODE";
+
+type EditorNodeTree = {
+  id: string;
+  label: string;
+  locked: boolean;
+  documents: Array<{ id: string; title: string }>;
+  children: EditorNodeTree[];
 };
 
 type QuestionItem = {
@@ -135,6 +155,7 @@ const ROLE_TEXT: Record<string, string> = {
 const TREE_INBOX_NODE_ID = "__virtual_inbox__";
 const TREE_TEMPLATES_NODE_ID = "__virtual_templates__";
 const TREE_VIEW_PREFERENCE_KEY = "autodoc.tree.view.by_workspace.v1";
+const EDITOR_SIDEBAR_STATE_KEY = "autodoc.editor.sidebar.by_workspace.v1";
 const TREE_VIEW_OPTIONS: Array<{ value: TreeView; label: string }> = [
   { value: "topic", label: "Topic" },
   { value: "project", label: "Project" },
@@ -331,6 +352,161 @@ const toTreeDocumentView = (node: TreeNode, summary: TreeNodeDocumentSummary): T
       score: Number.isFinite(candidate.score) ? Math.max(0, Math.min(1, candidate.score)) : 0
     }))
 });
+
+const emptyEditorSidebarState = (): EditorSidebarWorkspaceState => ({
+  parents: {},
+  favorites: []
+});
+
+const normalizeEditorSidebarState = (state: EditorSidebarWorkspaceState): EditorSidebarWorkspaceState => {
+  const parents: Record<string, string | null> = {};
+  for (const [docId, parentId] of Object.entries(state.parents)) {
+    if (!docId) {
+      continue;
+    }
+    if (typeof parentId === "string" && parentId.trim()) {
+      parents[docId] = parentId;
+    }
+  }
+  const favorites = Array.from(new Set(state.favorites.filter((value) => value.trim().length > 0)));
+  return { parents, favorites };
+};
+
+const parseEditorSidebarWorkspaceState = (raw: unknown): EditorSidebarWorkspaceState => {
+  if (!raw || typeof raw !== "object") {
+    return emptyEditorSidebarState();
+  }
+  const record = raw as Record<string, unknown>;
+  const parentsRaw = record.parents;
+  const favoritesRaw = record.favorites;
+
+  const parents: Record<string, string | null> = {};
+  if (parentsRaw && typeof parentsRaw === "object") {
+    for (const [docId, parentId] of Object.entries(parentsRaw as Record<string, unknown>)) {
+      if (typeof docId !== "string" || !docId.trim()) {
+        continue;
+      }
+      if (typeof parentId === "string" && parentId.trim()) {
+        parents[docId] = parentId;
+      }
+    }
+  }
+
+  const favorites = Array.isArray(favoritesRaw)
+    ? favoritesRaw.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+
+  return normalizeEditorSidebarState({ parents, favorites });
+};
+
+const loadEditorSidebarState = (workspaceId: string | null): EditorSidebarWorkspaceState => {
+  if (!workspaceId || typeof window === "undefined") {
+    return emptyEditorSidebarState();
+  }
+  try {
+    const raw = window.localStorage.getItem(EDITOR_SIDEBAR_STATE_KEY);
+    if (!raw) {
+      return emptyEditorSidebarState();
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return parseEditorSidebarWorkspaceState(parsed[workspaceId]);
+  } catch {
+    return emptyEditorSidebarState();
+  }
+};
+
+const saveEditorSidebarState = (workspaceId: string | null, state: EditorSidebarWorkspaceState) => {
+  if (!workspaceId || typeof window === "undefined") {
+    return;
+  }
+  try {
+    const raw = window.localStorage.getItem(EDITOR_SIDEBAR_STATE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    parsed[workspaceId] = normalizeEditorSidebarState(state);
+    window.localStorage.setItem(EDITOR_SIDEBAR_STATE_KEY, JSON.stringify(parsed));
+  } catch {
+    // Ignore localStorage errors in local environments.
+  }
+};
+
+const sanitizeEditorSidebarState = (state: EditorSidebarWorkspaceState, documents: DocumentItem[]): EditorSidebarWorkspaceState => {
+  const docIds = new Set(documents.map((document) => document.id));
+  const parents: Record<string, string | null> = {};
+
+  for (const document of documents) {
+    const parentId = state.parents[document.id];
+    if (typeof parentId === "string" && docIds.has(parentId) && parentId !== document.id) {
+      parents[document.id] = parentId;
+    }
+  }
+
+  for (const docId of Object.keys(parents)) {
+    const seen = new Set<string>([docId]);
+    let cursor = parents[docId];
+    while (cursor) {
+      if (seen.has(cursor)) {
+        delete parents[docId];
+        break;
+      }
+      seen.add(cursor);
+      cursor = parents[cursor] ?? null;
+    }
+  }
+
+  const favorites = state.favorites.filter((docId) => docIds.has(docId));
+  return normalizeEditorSidebarState({ parents, favorites });
+};
+
+const isEditorSidebarStateEqual = (left: EditorSidebarWorkspaceState, right: EditorSidebarWorkspaceState): boolean => {
+  const leftParents = Object.entries(left.parents)
+    .filter(([, parentId]) => typeof parentId === "string" && parentId.length > 0)
+    .sort(([a], [b]) => a.localeCompare(b));
+  const rightParents = Object.entries(right.parents)
+    .filter(([, parentId]) => typeof parentId === "string" && parentId.length > 0)
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  if (leftParents.length !== rightParents.length) {
+    return false;
+  }
+  for (let index = 0; index < leftParents.length; index += 1) {
+    const [leftDocId, leftParentId] = leftParents[index];
+    const [rightDocId, rightParentId] = rightParents[index];
+    if (leftDocId !== rightDocId || leftParentId !== rightParentId) {
+      return false;
+    }
+  }
+
+  const leftFavorites = Array.from(new Set(left.favorites)).sort((a, b) => a.localeCompare(b));
+  const rightFavorites = Array.from(new Set(right.favorites)).sort((a, b) => a.localeCompare(b));
+  if (leftFavorites.length !== rightFavorites.length) {
+    return false;
+  }
+  for (let index = 0; index < leftFavorites.length; index += 1) {
+    if (leftFavorites[index] !== rightFavorites[index]) {
+      return false;
+    }
+  }
+  return true;
+};
+
+const copyTextToClipboard = async (text: string): Promise<void> => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const succeeded = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!succeeded) {
+    throw new Error("clipboard_copy_failed");
+  }
+};
 
 function StatusChip({ label, value }: { label: string; value: string }) {
   return <span className={`status-chip status-chip-${statusTone(value)}`}>{label}: {statusText(value)}</span>;
@@ -760,57 +936,1095 @@ export default function App() {
   }
 
   function EditorPage() {
-    const [title, setTitle] = useState("초안 제목");
-    const [body, setBody] = useState("# 메모\n\n내용");
+    const [documents, setDocuments] = useState<DocumentItem[]>([]);
+    const [sidebarState, setSidebarState] = useState<EditorSidebarWorkspaceState>(emptyEditorSidebarState);
+    const [sidebarMode, setSidebarMode] = useState<EditorSidebarMode>("DOCUMENT");
+    const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
+    const [selectedDocument, setSelectedDocument] = useState<DocumentItem | null>(null);
+    const [draftTitle, setDraftTitle] = useState("");
+    const [draftBody, setDraftBody] = useState("");
+    const [searchQuery, setSearchQuery] = useState("");
+    const [collapsedIds, setCollapsedIds] = useState<string[]>([]);
+    const [collapsedNodeIds, setCollapsedNodeIds] = useState<string[]>([]);
+    const [openMenuDocId, setOpenMenuDocId] = useState<string | null>(null);
+    const [loadingList, setLoadingList] = useState(false);
+    const [loadingNodeTree, setLoadingNodeTree] = useState(false);
+    const [loadingDocument, setLoadingDocument] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [creatingParentId, setCreatingParentId] = useState<string | null>(null);
+    const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
+    const [nodeTreeResponse, setNodeTreeResponse] = useState<TreeActiveResponse | null>(null);
+    const [nodeTreeError, setNodeTreeError] = useState<UiError | null>(null);
     const [error, setError] = useState<UiError | null>(null);
-    const navigate = useNavigate();
+    const [notice, setNotice] = useState<UiNotice | null>(null);
+    const selectedRequestSequence = useRef(0);
+    const ROOT_CREATE_ID = "__root__";
 
-    return (
-      <Layout>
-        <section className="panel">
-          <PageHeader title="에디터" subtitle="마크다운 문서를 작성해 파이프라인으로 전송하세요." />
-          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
-          <ErrorPanel error={error} />
+    const loadDocuments = useCallback(async () => {
+      if (!state.workspaceId) {
+        setDocuments([]);
+        return;
+      }
+      setLoadingList(true);
+      setError(null);
+      try {
+        const response = await api.request<DocumentListResponse>("/documents?page=0&size=200", {}, true);
+        setDocuments(response.items);
+      } catch (e) {
+        setError(toUiError(e, "문서 목록을 불러오지 못했습니다"));
+      } finally {
+        setLoadingList(false);
+      }
+    }, [api, state.workspaceId]);
 
-          <div className="field-stack">
-            <label className="field-label" htmlFor="editor-title">
-              제목
-            </label>
-            <input className="field-input" id="editor-title" onChange={(e) => setTitle(e.target.value)} placeholder="문서 제목" value={title} />
+    const loadNodeTree = useCallback(async () => {
+      if (!state.workspaceId) {
+        setNodeTreeResponse(null);
+        setNodeTreeError(null);
+        return;
+      }
+      setLoadingNodeTree(true);
+      setNodeTreeError(null);
+      try {
+        const response = await api.request<TreeActiveResponse>("/trees?view=topic", {}, true);
+        setNodeTreeResponse(response);
+      } catch (e) {
+        setNodeTreeError(toUiError(e, "노드 분류 트리를 불러오지 못했습니다"));
+      } finally {
+        setLoadingNodeTree(false);
+      }
+    }, [api, state.workspaceId]);
 
-            <label className="field-label" htmlFor="editor-body">
-              본문 (Markdown)
-            </label>
-            <textarea className="field-textarea editor-textarea" id="editor-body" onChange={(e) => setBody(e.target.value)} rows={14} value={body} />
+    useEffect(() => {
+      setSidebarState(loadEditorSidebarState(state.workspaceId));
+      setCollapsedIds([]);
+      setCollapsedNodeIds([]);
+      setSidebarMode("DOCUMENT");
+      setOpenMenuDocId(null);
+      setNodeTreeResponse(null);
+      setNodeTreeError(null);
+    }, [state.workspaceId]);
 
-            <div className="action-row">
+    useEffect(() => {
+      saveEditorSidebarState(state.workspaceId, sidebarState);
+    }, [sidebarState, state.workspaceId]);
+
+    useEffect(() => {
+      if (!state.workspaceId) {
+        setDocuments([]);
+        setSelectedDocumentId(null);
+        setSelectedDocument(null);
+        setDraftTitle("");
+        setDraftBody("");
+        return;
+      }
+      void loadDocuments();
+    }, [loadDocuments, state.workspaceId]);
+
+    useEffect(() => {
+      if (!state.workspaceId) {
+        return;
+      }
+      if (sidebarMode !== "NODE") {
+        return;
+      }
+      void loadNodeTree();
+    }, [loadNodeTree, sidebarMode, state.workspaceId]);
+
+    useEffect(() => {
+      setSidebarState((previous) => {
+        const sanitized = sanitizeEditorSidebarState(previous, documents);
+        return isEditorSidebarStateEqual(previous, sanitized) ? previous : sanitized;
+      });
+    }, [documents]);
+
+    const favoriteSet = useMemo(() => new Set(sidebarState.favorites), [sidebarState.favorites]);
+    const collapsedSet = useMemo(() => new Set(collapsedIds), [collapsedIds]);
+    const collapsedNodeSet = useMemo(() => new Set(collapsedNodeIds), [collapsedNodeIds]);
+    const documentById = useMemo(() => new Map(documents.map((document) => [document.id, document])), [documents]);
+
+    const orderedDocuments = useMemo(() => {
+      return [...documents].sort((left, right) => {
+        const favoriteDelta = Number(favoriteSet.has(right.id)) - Number(favoriteSet.has(left.id));
+        if (favoriteDelta !== 0) {
+          return favoriteDelta;
+        }
+        const leftUpdated = Date.parse(left.updated_at);
+        const rightUpdated = Date.parse(right.updated_at);
+        const safeLeftUpdated = Number.isFinite(leftUpdated) ? leftUpdated : 0;
+        const safeRightUpdated = Number.isFinite(rightUpdated) ? rightUpdated : 0;
+        if (safeRightUpdated !== safeLeftUpdated) {
+          return safeRightUpdated - safeLeftUpdated;
+        }
+        return left.title.localeCompare(right.title, "ko");
+      });
+    }, [documents, favoriteSet]);
+
+    const treeRoots = useMemo<EditorTreeNode[]>(() => {
+      const nodeById = new Map<string, EditorTreeNode>();
+      for (const document of orderedDocuments) {
+        nodeById.set(document.id, { doc: document, children: [] });
+      }
+      const roots: EditorTreeNode[] = [];
+      for (const document of orderedDocuments) {
+        const node = nodeById.get(document.id);
+        if (!node) {
+          continue;
+        }
+        const parentId = sidebarState.parents[document.id];
+        const parentNode = parentId ? nodeById.get(parentId) : undefined;
+        if (parentNode && parentId !== document.id) {
+          parentNode.children.push(node);
+        } else {
+          roots.push(node);
+        }
+      }
+      return roots;
+    }, [orderedDocuments, sidebarState.parents]);
+
+    const orderedDocumentIds = useMemo(() => {
+      const result: string[] = [];
+      const traverse = (nodes: EditorTreeNode[]) => {
+        for (const node of nodes) {
+          result.push(node.doc.id);
+          if (node.children.length > 0) {
+            traverse(node.children);
+          }
+        }
+      };
+      traverse(treeRoots);
+      return result;
+    }, [treeRoots]);
+
+    const nodeTrees = useMemo<EditorNodeTree[]>(() => {
+      if (!nodeTreeResponse) {
+        return [];
+      }
+
+      const nodes = nodeTreeResponse.nodes;
+      const grouped = new Map<
+        string,
+        {
+          id: string;
+          parentId: string | null;
+          label: string;
+          locked: boolean;
+          documents: Array<{ id: string; title: string }>;
+          children: EditorNodeTree[];
+        }
+      >();
+
+      for (const node of nodes) {
+        const summaryTitleById = new Map((node.document_summaries ?? []).map((summary) => [summary.id, summary.title?.trim() ?? ""]));
+        const nodeDocumentIds = Array.from(new Set([...(node.documents ?? []), ...(node.document_summaries ?? []).map((summary) => summary.id)]));
+        grouped.set(node.id, {
+          id: node.id,
+          parentId: node.parent_id,
+          label: node.label,
+          locked: node.locked,
+          documents: nodeDocumentIds
+            .map((documentId) => ({
+              id: documentId,
+              title: summaryTitleById.get(documentId) || documentById.get(documentId)?.title || documentId
+            }))
+            .sort((left, right) => left.title.localeCompare(right.title, "ko")),
+          children: []
+        });
+      }
+
+      const roots: EditorNodeTree[] = [];
+      for (const value of grouped.values()) {
+        const node: EditorNodeTree = {
+          id: value.id,
+          label: value.label,
+          locked: value.locked,
+          documents: value.documents,
+          children: value.children
+        };
+        const parent = value.parentId ? grouped.get(value.parentId) : undefined;
+        if (parent) {
+          parent.children.push(node);
+        } else {
+          roots.push(node);
+        }
+      }
+
+      const sortNodes = (list: EditorNodeTree[]) => {
+        list.sort((left, right) => left.label.localeCompare(right.label, "ko"));
+        for (const item of list) {
+          if (item.children.length > 0) {
+            sortNodes(item.children);
+          }
+        }
+      };
+      sortNodes(roots);
+      return roots;
+    }, [documentById, nodeTreeResponse]);
+
+    const nodeModeDocumentIds = useMemo(() => {
+      const result: string[] = [];
+      const seen = new Set<string>();
+
+      const traverse = (nodes: EditorNodeTree[]) => {
+        for (const node of nodes) {
+          for (const document of node.documents) {
+            if (!seen.has(document.id)) {
+              seen.add(document.id);
+              result.push(document.id);
+            }
+          }
+          if (node.children.length > 0) {
+            traverse(node.children);
+          }
+        }
+      };
+
+      traverse(nodeTrees);
+      return result;
+    }, [nodeTrees]);
+
+    const activeSelectableDocumentIds = useMemo(
+      () => (sidebarMode === "NODE" ? nodeModeDocumentIds : orderedDocumentIds),
+      [nodeModeDocumentIds, orderedDocumentIds, sidebarMode]
+    );
+
+    useEffect(() => {
+      if (!state.workspaceId) {
+        setSelectedDocumentId(null);
+        return;
+      }
+      if (activeSelectableDocumentIds.length === 0) {
+        setSelectedDocumentId(null);
+        return;
+      }
+      if (selectedDocumentId && activeSelectableDocumentIds.includes(selectedDocumentId)) {
+        return;
+      }
+      setSelectedDocumentId(activeSelectableDocumentIds[0]);
+    }, [activeSelectableDocumentIds, selectedDocumentId, state.workspaceId]);
+
+    useEffect(() => {
+      if (!state.workspaceId || !selectedDocumentId) {
+        setSelectedDocument(null);
+        setDraftTitle("");
+        setDraftBody("");
+        return;
+      }
+      let active = true;
+      const sequence = selectedRequestSequence.current + 1;
+      selectedRequestSequence.current = sequence;
+      setLoadingDocument(true);
+      setError(null);
+
+      void (async () => {
+        try {
+          const payload = await api.request<DocumentItem>(`/documents/${selectedDocumentId}`, {}, true);
+          if (!active || selectedRequestSequence.current !== sequence) {
+            return;
+          }
+          setSelectedDocument(payload);
+          setDraftTitle(payload.title);
+          setDraftBody(payload.body_markdown ?? "");
+        } catch (e) {
+          if (!active || selectedRequestSequence.current !== sequence) {
+            return;
+          }
+          setError(toUiError(e, "문서를 불러오지 못했습니다"));
+        } finally {
+          if (active && selectedRequestSequence.current === sequence) {
+            setLoadingDocument(false);
+          }
+        }
+      })();
+
+      return () => {
+        active = false;
+      };
+    }, [api, selectedDocumentId, state.workspaceId]);
+
+    useEffect(() => {
+      if (!openMenuDocId) {
+        return;
+      }
+
+      const closeOnOutsideClick = (event: MouseEvent) => {
+        let cursor = event.target as HTMLElement | null;
+        while (cursor) {
+          if (cursor.dataset.editorMenuRoot === openMenuDocId) {
+            return;
+          }
+          cursor = cursor.parentElement;
+        }
+        setOpenMenuDocId(null);
+      };
+
+      const closeOnEscape = (event: KeyboardEvent) => {
+        if (event.key === "Escape") {
+          setOpenMenuDocId(null);
+        }
+      };
+
+      window.addEventListener("mousedown", closeOnOutsideClick);
+      window.addEventListener("keydown", closeOnEscape);
+      return () => {
+        window.removeEventListener("mousedown", closeOnOutsideClick);
+        window.removeEventListener("keydown", closeOnEscape);
+      };
+    }, [openMenuDocId]);
+
+    const toggleCollapsed = useCallback((documentId: string) => {
+      setCollapsedIds((previous) =>
+        previous.includes(documentId) ? previous.filter((item) => item !== documentId) : [...previous, documentId]
+      );
+    }, []);
+
+    const toggleNodeCollapsed = useCallback((nodeId: string) => {
+      setCollapsedNodeIds((previous) => (previous.includes(nodeId) ? previous.filter((item) => item !== nodeId) : [...previous, nodeId]));
+    }, []);
+
+    const toggleFavorite = useCallback((documentId: string) => {
+      setSidebarState((previous) => {
+        const favorites = new Set(previous.favorites);
+        if (favorites.has(documentId)) {
+          favorites.delete(documentId);
+        } else {
+          favorites.add(documentId);
+        }
+        return normalizeEditorSidebarState({ ...previous, favorites: Array.from(favorites) });
+      });
+    }, []);
+
+    const createDocument = useCallback(
+      async (parentId: string | null) => {
+        if (!state.workspaceId) {
+          return;
+        }
+        setCreatingParentId(parentId ?? ROOT_CREATE_ID);
+        setError(null);
+        setNotice(null);
+        try {
+          const parentTitle = parentId ? documentById.get(parentId)?.title?.trim() : "";
+          const newTitle = parentTitle ? `${parentTitle} 하위 페이지` : "새 페이지";
+          const created = await api.request<{ id: string }>(
+            "/documents",
+            {
+              method: "POST",
+              body: JSON.stringify({
+                title: newTitle,
+                body_markdown: "",
+                source_type: "EDITOR"
+              })
+            },
+            true
+          );
+
+          setSidebarState((previous) => {
+            const parents = { ...previous.parents };
+            if (parentId) {
+              parents[created.id] = parentId;
+            } else {
+              delete parents[created.id];
+            }
+            return normalizeEditorSidebarState({ ...previous, parents });
+          });
+
+          if (parentId) {
+            setCollapsedIds((previous) => previous.filter((value) => value !== parentId));
+          }
+          setOpenMenuDocId(null);
+          await loadDocuments();
+          setSelectedDocumentId(created.id);
+          setNotice({
+            tone: "success",
+            message: parentId ? "하위 페이지를 생성했습니다." : "새 페이지를 생성했습니다."
+          });
+        } catch (e) {
+          setError(toUiError(e, "문서 생성에 실패했습니다"));
+        } finally {
+          setCreatingParentId(null);
+        }
+      },
+      [ROOT_CREATE_ID, api, documentById, loadDocuments, state.workspaceId]
+    );
+
+    const saveSelectedDocument = useCallback(async () => {
+      if (!selectedDocumentId || !selectedDocument || !state.workspaceId) {
+        return;
+      }
+      if (typeof selectedDocument.version !== "number") {
+        setError({ message: "문서 버전을 확인할 수 없습니다. 다시 열어주세요.", status: null });
+        return;
+      }
+
+      const normalizedTitle = draftTitle.trim() || "제목 없음";
+      setSaving(true);
+      setError(null);
+      setNotice(null);
+      try {
+        await api.request<void>(
+          `/documents/${selectedDocumentId}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({
+              version: selectedDocument.version,
+              title: normalizedTitle,
+              body_markdown: draftBody
+            })
+          },
+          true
+        );
+
+        const refreshed = await api.request<DocumentItem>(`/documents/${selectedDocumentId}`, {}, true);
+        setSelectedDocument(refreshed);
+        setDraftTitle(refreshed.title);
+        setDraftBody(refreshed.body_markdown ?? "");
+        setDocuments((previous) =>
+          previous.map((document) =>
+            document.id === refreshed.id
+              ? {
+                  ...document,
+                  title: refreshed.title,
+                  status: refreshed.status,
+                  pipeline_status: refreshed.pipeline_status,
+                  attachments: refreshed.attachments,
+                  updated_at: refreshed.updated_at,
+                  version: refreshed.version
+                }
+              : document
+          )
+        );
+        setNotice({ tone: "success", message: "문서를 저장했습니다." });
+      } catch (e) {
+        setError(toUiError(e, "문서 저장에 실패했습니다"));
+      } finally {
+        setSaving(false);
+      }
+    }, [api, draftBody, draftTitle, selectedDocument, selectedDocumentId, state.workspaceId]);
+
+    const renameDocument = useCallback(
+      async (documentId: string) => {
+        if (!state.workspaceId) {
+          return;
+        }
+        const target = documentById.get(documentId);
+        if (!target) {
+          return;
+        }
+        const renamed = window.prompt("새 페이지 이름을 입력하세요.", target.title);
+        if (renamed === null) {
+          return;
+        }
+        const nextTitle = renamed.trim();
+        if (!nextTitle || nextTitle === target.title) {
+          return;
+        }
+
+        setOpenMenuDocId(null);
+        setError(null);
+        setNotice(null);
+        try {
+          let version: number | undefined;
+          let bodyMarkdown = "";
+          if (selectedDocumentId === documentId && selectedDocument) {
+            version = selectedDocument.version;
+            bodyMarkdown = draftBody;
+          } else {
+            const current = await api.request<DocumentItem>(`/documents/${documentId}`, {}, true);
+            version = current.version;
+            bodyMarkdown = current.body_markdown ?? "";
+          }
+          if (typeof version !== "number") {
+            throw new Error("document_version_missing");
+          }
+
+          await api.request<void>(
+            `/documents/${documentId}`,
+            {
+              method: "PATCH",
+              body: JSON.stringify({
+                version,
+                title: nextTitle,
+                body_markdown: bodyMarkdown
+              })
+            },
+            true
+          );
+
+          await loadDocuments();
+          if (selectedDocumentId === documentId) {
+            const refreshed = await api.request<DocumentItem>(`/documents/${documentId}`, {}, true);
+            setSelectedDocument(refreshed);
+            setDraftTitle(refreshed.title);
+            setDraftBody(refreshed.body_markdown ?? "");
+          }
+          setNotice({ tone: "success", message: "페이지 이름을 변경했습니다." });
+        } catch (e) {
+          setError(toUiError(e, "페이지 이름 변경에 실패했습니다"));
+        }
+      },
+      [api, documentById, draftBody, loadDocuments, selectedDocument, selectedDocumentId, state.workspaceId]
+    );
+
+    const deleteDocument = useCallback(
+      async (documentId: string) => {
+        if (!state.workspaceId) {
+          return;
+        }
+        const target = documentById.get(documentId);
+        if (!target) {
+          return;
+        }
+
+        const confirmed = window.confirm(`"${target.title}" 페이지를 삭제하시겠습니까?`);
+        if (!confirmed) {
+          return;
+        }
+
+        setDeletingDocumentId(documentId);
+        setOpenMenuDocId(null);
+        setError(null);
+        setNotice(null);
+
+        try {
+          await api.request<void>(
+            `/documents/${documentId}`,
+            {
+              method: "DELETE"
+            },
+            true
+          );
+
+          setSidebarState((previous) => {
+            const parents = { ...previous.parents };
+            const deletedParentId = parents[documentId] ?? null;
+            delete parents[documentId];
+            for (const [childId, parentId] of Object.entries(parents)) {
+              if (parentId === documentId) {
+                parents[childId] = deletedParentId;
+              }
+            }
+            return normalizeEditorSidebarState({
+              parents,
+              favorites: previous.favorites.filter((favoriteId) => favoriteId !== documentId)
+            });
+          });
+
+          if (selectedDocumentId === documentId) {
+            setSelectedDocumentId(null);
+            setSelectedDocument(null);
+            setDraftTitle("");
+            setDraftBody("");
+          }
+          setDocuments((previous) => previous.filter((document) => document.id !== documentId));
+          await loadDocuments();
+          setNotice({ tone: "success", message: "페이지를 삭제했습니다." });
+        } catch (e) {
+          setError(toUiError(e, "페이지 삭제에 실패했습니다"));
+        } finally {
+          setDeletingDocumentId(null);
+        }
+      },
+      [api, documentById, loadDocuments, selectedDocumentId, state.workspaceId]
+    );
+
+    const copyDocumentLink = useCallback(async (documentId: string) => {
+      setOpenMenuDocId(null);
+      setError(null);
+      try {
+        await copyTextToClipboard(`${window.location.origin}/documents/${documentId}`);
+        setNotice({ tone: "info", message: "문서 링크를 복사했습니다." });
+      } catch (e) {
+        setError(toUiError(e, "링크 복사에 실패했습니다"));
+      }
+    }, []);
+
+    useEffect(() => {
+      const handleSaveShortcut = (event: KeyboardEvent) => {
+        if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") {
+          return;
+        }
+        if (!selectedDocumentId || saving) {
+          return;
+        }
+        event.preventDefault();
+        void saveSelectedDocument();
+      };
+      window.addEventListener("keydown", handleSaveShortcut);
+      return () => {
+        window.removeEventListener("keydown", handleSaveShortcut);
+      };
+    }, [saveSelectedDocument, saving, selectedDocumentId]);
+
+    const filteredTreeRoots = useMemo(() => {
+      const normalized = searchQuery.trim().toLowerCase();
+      if (!normalized) {
+        return treeRoots;
+      }
+      const filterTree = (node: EditorTreeNode): EditorTreeNode | null => {
+        const filteredChildren = node.children
+          .map((child) => filterTree(child))
+          .filter((child): child is EditorTreeNode => child !== null);
+        const matched = node.doc.title.toLowerCase().includes(normalized);
+        if (!matched && filteredChildren.length === 0) {
+          return null;
+        }
+        return {
+          doc: node.doc,
+          children: filteredChildren
+        };
+      };
+      return treeRoots
+        .map((node) => filterTree(node))
+        .filter((node): node is EditorTreeNode => node !== null);
+    }, [searchQuery, treeRoots]);
+
+    const filteredNodeTrees = useMemo(() => {
+      const normalized = searchQuery.trim().toLowerCase();
+      if (!normalized) {
+        return nodeTrees;
+      }
+
+      const filterNode = (node: EditorNodeTree): EditorNodeTree | null => {
+        const filteredChildren = node.children
+          .map((child) => filterNode(child))
+          .filter((child): child is EditorNodeTree => child !== null);
+        const filteredDocuments = node.documents.filter((document) => document.title.toLowerCase().includes(normalized));
+        const matchedLabel = node.label.toLowerCase().includes(normalized);
+        if (!matchedLabel && filteredChildren.length === 0 && filteredDocuments.length === 0) {
+          return null;
+        }
+        return {
+          ...node,
+          children: filteredChildren,
+          documents: matchedLabel ? node.documents : filteredDocuments
+        };
+      };
+
+      return nodeTrees.map((node) => filterNode(node)).filter((node): node is EditorNodeTree => node !== null);
+    }, [nodeTrees, searchQuery]);
+
+    const selectedNodeLabel = useMemo(() => {
+      if (!selectedDocumentId || !nodeTreeResponse) {
+        return null;
+      }
+      for (const node of nodeTreeResponse.nodes) {
+        if (node.documents.includes(selectedDocumentId) || (node.document_summaries ?? []).some((summary) => summary.id === selectedDocumentId)) {
+          return node.label;
+        }
+      }
+      return null;
+    }, [nodeTreeResponse, selectedDocumentId]);
+
+    const selectedParentTitle = useMemo(() => {
+      if (sidebarMode === "NODE") {
+        return selectedNodeLabel ? `노드: ${selectedNodeLabel}` : "노드 미분류";
+      }
+      if (!selectedDocumentId) {
+        return null;
+      }
+      const parentId = sidebarState.parents[selectedDocumentId];
+      if (!parentId) {
+        return "상위: 루트 페이지";
+      }
+      return `상위: ${documentById.get(parentId)?.title ?? "루트 페이지"}`;
+    }, [documentById, selectedDocumentId, selectedNodeLabel, sidebarMode, sidebarState.parents]);
+
+    const isDirty =
+      selectedDocument !== null &&
+      (draftTitle.trim() !== selectedDocument.title.trim() || draftBody !== (selectedDocument.body_markdown ?? ""));
+
+    const renderTree = (nodes: EditorTreeNode[], depth: number): React.ReactNode =>
+      nodes.map((node) => {
+        const hasChildren = node.children.length > 0;
+        const isCollapsed = !searchQuery.trim() && collapsedSet.has(node.doc.id);
+        const isSelected = selectedDocumentId === node.doc.id;
+        const isFavorite = favoriteSet.has(node.doc.id);
+        const isCreatingChild = creatingParentId === node.doc.id;
+        const isDeleting = deletingDocumentId === node.doc.id;
+
+        return (
+          <li className="editor-tree-item" key={node.doc.id}>
+            <div className={`editor-tree-row${isSelected ? " is-selected" : ""}`} data-editor-menu-root={node.doc.id}>
               <button
-                className="btn btn-primary"
-                disabled={!state.workspaceId}
-                onClick={async () => {
-                  setError(null);
-                  try {
-                    const created = await api.request<{ id: string }>(
-                      "/documents",
-                      {
-                        method: "POST",
-                        body: JSON.stringify({
-                          title,
-                          body_markdown: body,
-                          source_type: "EDITOR"
-                        })
-                      },
-                      true
-                    );
-                    navigate(`/documents/${created.id}`);
-                  } catch (e) {
-                    setError(toUiError(e, "문서 저장에 실패했습니다"));
+                aria-label={hasChildren ? "하위 문서 펼치기/접기" : "하위 문서 없음"}
+                className={`editor-tree-toggle${hasChildren ? "" : " is-placeholder"}`}
+                disabled={!hasChildren}
+                onClick={() => {
+                  if (hasChildren) {
+                    toggleCollapsed(node.doc.id);
                   }
                 }}
                 type="button"
               >
-                문서 저장
+                {hasChildren ? (isCollapsed ? "▶" : "▼") : "•"}
               </button>
+
+              <button
+                className="editor-tree-main"
+                onClick={() => {
+                  setSelectedDocumentId(node.doc.id);
+                  setOpenMenuDocId(null);
+                }}
+                style={{ paddingLeft: `${depth * 16}px` }}
+                type="button"
+              >
+                <span className="editor-tree-title">{node.doc.title}</span>
+                {isFavorite ? <span className="editor-tree-favorite" title="즐겨찾기">★</span> : null}
+              </button>
+
+              <div className="editor-tree-row-actions">
+                <button
+                  aria-label="하위 페이지 추가"
+                  className="editor-tree-action"
+                  disabled={isCreatingChild || isDeleting}
+                  onClick={() => {
+                    void createDocument(node.doc.id);
+                  }}
+                  type="button"
+                >
+                  +
+                </button>
+                <button
+                  aria-expanded={openMenuDocId === node.doc.id}
+                  aria-label="페이지 메뉴"
+                  className="editor-tree-action"
+                  onClick={() => {
+                    setOpenMenuDocId((previous) => (previous === node.doc.id ? null : node.doc.id));
+                  }}
+                  type="button"
+                >
+                  ...
+                </button>
+                {openMenuDocId === node.doc.id ? (
+                  <div className="editor-tree-menu" role="menu">
+                    <button
+                      className="editor-tree-menu-item"
+                      onClick={() => {
+                        toggleFavorite(node.doc.id);
+                        setOpenMenuDocId(null);
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      {isFavorite ? "즐겨찾기 해제" : "즐겨찾기에 추가"}
+                    </button>
+                    <button
+                      className="editor-tree-menu-item"
+                      onClick={() => {
+                        void copyDocumentLink(node.doc.id);
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      링크 복사
+                    </button>
+                    <button
+                      className="editor-tree-menu-item"
+                      onClick={() => {
+                        void renameDocument(node.doc.id);
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      이름 바꾸기
+                    </button>
+                    <button
+                      className="editor-tree-menu-item is-danger"
+                      disabled={isDeleting}
+                      onClick={() => {
+                        void deleteDocument(node.doc.id);
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      휴지통으로 이동
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            {hasChildren && !isCollapsed ? <ul className="editor-tree-list">{renderTree(node.children, depth + 1)}</ul> : null}
+          </li>
+        );
+      });
+
+    const countNodeDocuments = useCallback((node: EditorNodeTree): number => {
+      return node.documents.length + node.children.reduce((acc, child) => acc + countNodeDocuments(child), 0);
+    }, []);
+
+    const renderNodeTree = (nodes: EditorNodeTree[], depth: number): React.ReactNode =>
+      nodes.map((node) => {
+        const hasChildren = node.children.length > 0;
+        const hasDocuments = node.documents.length > 0;
+        const canToggle = hasChildren || hasDocuments;
+        const isCollapsed = !searchQuery.trim() && collapsedNodeSet.has(node.id);
+        const totalDocuments = countNodeDocuments(node);
+
+        return (
+          <li className="editor-node-item" key={node.id}>
+            <div className="editor-node-row">
+              <button
+                aria-label={canToggle ? "노드 펼치기/접기" : "하위 항목 없음"}
+                className={`editor-tree-toggle${canToggle ? "" : " is-placeholder"}`}
+                disabled={!canToggle}
+                onClick={() => {
+                  if (canToggle) {
+                    toggleNodeCollapsed(node.id);
+                  }
+                }}
+                type="button"
+              >
+                {canToggle ? (isCollapsed ? "▶" : "▼") : "•"}
+              </button>
+
+              <button
+                className="editor-node-label"
+                onClick={() => {
+                  if (canToggle) {
+                    toggleNodeCollapsed(node.id);
+                  }
+                }}
+                style={{ paddingLeft: `${depth * 16}px` }}
+                type="button"
+              >
+                <span>{node.label}</span>
+                <span className="editor-node-meta">
+                  {node.locked ? <span className="lock-badge">잠금</span> : null}
+                  <span className="tree-node-count">{totalDocuments}</span>
+                </span>
+              </button>
+            </div>
+
+            {!isCollapsed ? (
+              <>
+                {hasDocuments ? (
+                  <ul className="editor-node-doc-list">
+                    {node.documents.map((document) => (
+                      <li key={`${node.id}:${document.id}`}>
+                        <button
+                          className={`editor-node-doc-button${selectedDocumentId === document.id ? " is-selected" : ""}`}
+                          onClick={() => {
+                            setSelectedDocumentId(document.id);
+                            setOpenMenuDocId(null);
+                          }}
+                          style={{ marginLeft: `${(depth + 1) * 16}px` }}
+                          type="button"
+                        >
+                          {document.title}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {hasChildren ? <ul className="editor-node-list">{renderNodeTree(node.children, depth + 1)}</ul> : null}
+              </>
+            ) : null}
+          </li>
+        );
+      });
+
+    return (
+      <Layout>
+        <section className="panel">
+          <PageHeader title="에디터" subtitle="노션처럼 문서를 트리로 관리하고 빠르게 생성/수정/삭제하세요." />
+          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
+          <NoticePanel notice={notice} />
+          <ErrorPanel
+            error={error}
+            onRetry={() => {
+              void loadDocuments();
+            }}
+          />
+
+          <div className="editor-workbench">
+            <aside className="editor-sidebar panel-soft">
+              <div className="editor-sidebar-header">
+                <h3 className="section-title">분류 보기</h3>
+              </div>
+
+              <div className="editor-view-toggle" role="tablist" aria-label="에디터 사이드바 보기 전환">
+                <button
+                  aria-selected={sidebarMode === "DOCUMENT"}
+                  className={`editor-view-toggle-button${sidebarMode === "DOCUMENT" ? " is-active" : ""}`}
+                  onClick={() => {
+                    setSidebarMode("DOCUMENT");
+                    setOpenMenuDocId(null);
+                  }}
+                  role="tab"
+                  type="button"
+                >
+                  문서로 분류
+                </button>
+                <button
+                  aria-selected={sidebarMode === "NODE"}
+                  className={`editor-view-toggle-button${sidebarMode === "NODE" ? " is-active" : ""}`}
+                  onClick={() => {
+                    setSidebarMode("NODE");
+                    setOpenMenuDocId(null);
+                  }}
+                  role="tab"
+                  type="button"
+                >
+                  노드로 분류
+                </button>
+              </div>
+
+              <div className="editor-sidebar-header">
+                <button
+                  className="btn btn-secondary btn-small"
+                  disabled={!state.workspaceId || creatingParentId === ROOT_CREATE_ID}
+                  onClick={() => {
+                    void createDocument(null);
+                  }}
+                  type="button"
+                >
+                  새 페이지
+                </button>
+                {sidebarMode === "NODE" ? (
+                  <button
+                    className="btn btn-ghost btn-small"
+                    disabled={!state.workspaceId || loadingNodeTree}
+                    onClick={() => {
+                      void loadNodeTree();
+                    }}
+                    type="button"
+                  >
+                    {loadingNodeTree ? "갱신 중..." : "노드 갱신"}
+                  </button>
+                ) : null}
+              </div>
+
+              <label className="field-label" htmlFor="editor-tree-search">
+                검색
+              </label>
+              <input
+                className="field-input"
+                id="editor-tree-search"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder={sidebarMode === "NODE" ? "노드/문서 제목 검색" : "페이지 제목 검색"}
+                value={searchQuery}
+              />
+
+              {loadingList ? <p className="muted">문서 목록을 불러오는 중입니다...</p> : null}
+              {sidebarMode === "NODE" ? (
+                <>
+                  <ErrorPanel
+                    error={nodeTreeError}
+                    onRetry={() => {
+                      void loadNodeTree();
+                    }}
+                  />
+                  {loadingNodeTree ? <p className="muted">노드 분류 트리를 불러오는 중입니다...</p> : null}
+                </>
+              ) : null}
+              {!loadingList && state.workspaceId && documents.length === 0 ? (
+                <EmptyState title="문서가 없습니다" description="새 페이지 버튼으로 첫 문서를 만들어 보세요." />
+              ) : null}
+              {sidebarMode === "DOCUMENT" ? (
+                <>
+                  {!loadingList && state.workspaceId && documents.length > 0 && filteredTreeRoots.length === 0 ? (
+                    <EmptyState title="검색 결과가 없습니다" description="검색어를 지우거나 다른 키워드를 입력해 보세요." />
+                  ) : null}
+                  {!loadingList && filteredTreeRoots.length > 0 ? <ul className="editor-tree-list">{renderTree(filteredTreeRoots, 0)}</ul> : null}
+                </>
+              ) : (
+                <>
+                  {!loadingNodeTree && state.workspaceId && nodeTrees.length === 0 ? (
+                    <EmptyState title="노드가 없습니다" description="문서 분류가 끝난 뒤 노드로 전환해 보세요." />
+                  ) : null}
+                  {!loadingNodeTree && state.workspaceId && nodeTrees.length > 0 && filteredNodeTrees.length === 0 ? (
+                    <EmptyState title="검색 결과가 없습니다" description="검색어를 지우거나 다른 키워드를 입력해 보세요." />
+                  ) : null}
+                  {!loadingNodeTree && filteredNodeTrees.length > 0 ? <ul className="editor-node-list">{renderNodeTree(filteredNodeTrees, 0)}</ul> : null}
+                </>
+              )}
+            </aside>
+
+            <div className="editor-main panel-soft">
+              {!state.workspaceId ? null : (
+                <>
+                  <div className="editor-main-header">
+                    <div>
+                      <h3 className="section-title">{selectedDocument ? selectedDocument.title : "페이지를 선택하세요"}</h3>
+                      <p className="section-subtitle">
+                        {selectedParentTitle ?? "왼쪽 트리에서 페이지를 선택하거나 새로 만드세요."}
+                      </p>
+                    </div>
+                    <div className="action-row">
+                      <button
+                        className="btn btn-secondary"
+                        disabled={!selectedDocumentId || creatingParentId === selectedDocumentId}
+                        onClick={() => {
+                          if (selectedDocumentId) {
+                            void createDocument(selectedDocumentId);
+                          }
+                        }}
+                        type="button"
+                      >
+                        하위 페이지
+                      </button>
+                      <button
+                        className="btn btn-primary"
+                        disabled={!selectedDocumentId || saving || loadingDocument || deletingDocumentId === selectedDocumentId}
+                        onClick={() => {
+                          void saveSelectedDocument();
+                        }}
+                        type="button"
+                      >
+                        {saving ? "저장 중..." : "저장"}
+                      </button>
+                      <button
+                        className="btn btn-ghost"
+                        disabled={!selectedDocumentId || deletingDocumentId === selectedDocumentId}
+                        onClick={() => {
+                          if (selectedDocumentId) {
+                            void deleteDocument(selectedDocumentId);
+                          }
+                        }}
+                        type="button"
+                      >
+                        삭제
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="field-stack">
+                    <label className="field-label" htmlFor="editor-title">
+                      제목
+                    </label>
+                    <input
+                      className="field-input"
+                      disabled={!selectedDocumentId || loadingDocument || deletingDocumentId === selectedDocumentId}
+                      id="editor-title"
+                      onChange={(event) => setDraftTitle(event.target.value)}
+                      placeholder="문서 제목"
+                      value={draftTitle}
+                    />
+
+                    <label className="field-label" htmlFor="editor-body">
+                      본문 (Markdown)
+                    </label>
+                    <textarea
+                      className="field-textarea editor-notion-textarea"
+                      disabled={!selectedDocumentId || loadingDocument || deletingDocumentId === selectedDocumentId}
+                      id="editor-body"
+                      onChange={(event) => setDraftBody(event.target.value)}
+                      placeholder="여기에 문서를 작성하세요. Cmd/Ctrl + S로 저장할 수 있습니다."
+                      rows={18}
+                      value={draftBody}
+                    />
+
+                    {selectedDocumentId ? (
+                      <p className="muted">
+                        {isDirty ? "저장되지 않은 변경사항이 있습니다." : "저장 완료 상태입니다."} 단축키: Cmd/Ctrl + S
+                      </p>
+                    ) : (
+                      <EmptyState title="페이지를 선택하세요" description="왼쪽에서 페이지를 선택하면 즉시 편집할 수 있습니다." />
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </section>
@@ -1553,12 +2767,18 @@ export default function App() {
     const [treeError, setTreeError] = useState<UiError | null>(null);
     const [treeNotice, setTreeNotice] = useState<UiNotice | null>(null);
     const [isRebuilding, setIsRebuilding] = useState(false);
+    const [includeDescendants, setIncludeDescendants] = useState(false);
     const isTopicView = selectedView === "topic";
 
     useEffect(() => {
       setSelectedView(loadTreeViewPreference(state.workspaceId));
       setSelectedNode(null);
+      setIncludeDescendants(false);
     }, [state.workspaceId]);
+
+    useEffect(() => {
+      setIncludeDescendants(false);
+    }, [selectedNode, selectedView]);
 
     const refreshTree = useCallback(async () => {
       if (!state.workspaceId) {
@@ -1662,7 +2882,68 @@ export default function App() {
       [allDocuments]
     );
 
+    const descendantNodeIdsByNode = useMemo<Map<string, Set<string>>>(() => {
+      if (!tree) {
+        return new Map();
+      }
+      const childrenByParent = new Map<string, string[]>();
+      tree.nodes.forEach((node) => {
+        if (!node.parent_id) {
+          return;
+        }
+        const children = childrenByParent.get(node.parent_id) ?? [];
+        children.push(node.id);
+        childrenByParent.set(node.parent_id, children);
+      });
+
+      const cache = new Map<string, Set<string>>();
+      const collectDescendants = (nodeId: string): Set<string> => {
+        const cached = cache.get(nodeId);
+        if (cached) {
+          return cached;
+        }
+        const ids = new Set<string>([nodeId]);
+        (childrenByParent.get(nodeId) ?? []).forEach((childId) => {
+          collectDescendants(childId).forEach((id) => ids.add(id));
+        });
+        cache.set(nodeId, ids);
+        return ids;
+      };
+
+      tree.nodes.forEach((node) => {
+        collectDescendants(node.id);
+      });
+      return cache;
+    }, [tree]);
+
     const selected = tree?.nodes.find((n) => n.id === selectedNode) ?? null;
+    const selectedDirectDocuments = useMemo<TreeDocumentView[]>(() => {
+      if (!selected) {
+        return [];
+      }
+      return allDocuments.filter((document) => document.node_id === selected.id);
+    }, [allDocuments, selected]);
+
+    const selectedSubtreeDocuments = useMemo<TreeDocumentView[]>(() => {
+      if (!selected) {
+        return [];
+      }
+      const subtree = descendantNodeIdsByNode.get(selected.id) ?? new Set([selected.id]);
+      const seenDocuments = new Set<string>();
+      return allDocuments.filter((document) => {
+        if (!subtree.has(document.node_id)) {
+          return false;
+        }
+        if (seenDocuments.has(document.id)) {
+          return false;
+        }
+        seenDocuments.add(document.id);
+        return true;
+      });
+    }, [allDocuments, descendantNodeIdsByNode, selected]);
+
+    const selectedSubtreeOnlyCount = Math.max(0, selectedSubtreeDocuments.length - selectedDirectDocuments.length);
+
     const selectedDocuments = useMemo<TreeDocumentView[]>(() => {
       if (selectedNode === TREE_INBOX_NODE_ID) {
         return inboxDocuments;
@@ -1673,8 +2954,8 @@ export default function App() {
       if (!selected) {
         return [];
       }
-      return allDocuments.filter((document) => document.node_id === selected.id);
-    }, [allDocuments, inboxDocuments, selected, selectedNode, templateDocuments]);
+      return includeDescendants ? selectedSubtreeDocuments : selectedDirectDocuments;
+    }, [includeDescendants, inboxDocuments, selected, selectedDirectDocuments, selectedNode, selectedSubtreeDocuments, templateDocuments]);
 
     return (
       <Layout>
@@ -1871,6 +3152,16 @@ export default function App() {
               {selectedNode === TREE_INBOX_NODE_ID ? <p className="section-subtitle">유보 문서를 빠르게 확정하는 작업함입니다.</p> : null}
               {selectedNode === TREE_TEMPLATES_NODE_ID ? <p className="section-subtitle">템플릿 의심 문서를 모아 검토합니다.</p> : null}
               {selected ? <p className="section-subtitle">노드: {selected.label}</p> : null}
+              {selected && selectedSubtreeOnlyCount > 0 ? (
+                <label className="tree-subtree-toggle">
+                  <input
+                    checked={includeDescendants}
+                    onChange={(event) => setIncludeDescendants(event.target.checked)}
+                    type="checkbox"
+                  />
+                  하위 노드 문서 포함 보기 (+{selectedSubtreeOnlyCount})
+                </label>
+              ) : null}
 
               {selectedDocuments.length === 0 ? (
                 <EmptyState
