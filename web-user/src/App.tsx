@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiError, type Workspace } from "@autodoctree/api-client";
 import { createApiClient } from "./api";
 import { useSession } from "./session";
@@ -75,6 +75,14 @@ type EditorNodeTree = {
   documents: Array<{ id: string; title: string }>;
   children: EditorNodeTree[];
 };
+
+type SidebarPageNode = {
+  doc: DocumentItem;
+  children: SidebarPageNode[];
+};
+
+type SidebarViewKey = "documents" | "tree" | "questions" | "workspace";
+type AppApiClient = ReturnType<typeof createApiClient>;
 
 type QuestionItem = {
   id: string;
@@ -164,6 +172,8 @@ const TREE_VIEW_OPTIONS: Array<{ value: TreeView; label: string }> = [
   { value: "template", label: "Template" }
 ];
 const REBUILD_REQUEST_TIMEOUT_MS = 15_000;
+const LAST_WORKSPACE_ID_KEY = "autodoc.user.last-workspace.v1";
+const COMMAND_PALETTE_MAX_RESULTS = 8;
 
 const REASON_TEXT: Record<string, string> = {
   LOW_CONFIDENCE: "신뢰도 낮음",
@@ -265,6 +275,119 @@ const statusTone = (value: string): StatusTone => {
 const statusText = (value: string): string => STATUS_TEXT[value.trim().toUpperCase()] ?? value;
 
 const roleText = (value: string): string => ROLE_TEXT[value.trim().toUpperCase()] ?? value;
+
+const workspaceRootPath = (workspaceId: string): string => `/w/${encodeURIComponent(workspaceId)}`;
+
+const workspaceViewPath = (workspaceId: string, view: Exclude<SidebarViewKey, "workspace">): string =>
+  `/w/${encodeURIComponent(workspaceId)}/view/${view}`;
+
+const workspaceDocumentPath = (workspaceId: string, documentId: string): string =>
+  `/w/${encodeURIComponent(workspaceId)}/doc/${encodeURIComponent(documentId)}`;
+
+const workspaceDocumentDetailPath = (workspaceId: string, documentId: string): string =>
+  `/w/${encodeURIComponent(workspaceId)}/doc/${encodeURIComponent(documentId)}/details`;
+
+const detectSidebarView = (pathname: string): SidebarViewKey => {
+  if (pathname.includes("/view/tree") || pathname.endsWith("/tree")) {
+    return "tree";
+  }
+  if (pathname.includes("/view/questions") || pathname.endsWith("/questions")) {
+    return "questions";
+  }
+  if (pathname === "/workspace" || pathname.startsWith("/workspace/")) {
+    return "workspace";
+  }
+  return "documents";
+};
+
+const parseTimestamp = (value: string | undefined): number => {
+  if (!value) {
+    return 0;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const sortDocumentsByRecency = (left: DocumentItem, right: DocumentItem): number => {
+  const delta = parseTimestamp(right.updated_at) - parseTimestamp(left.updated_at);
+  if (delta !== 0) {
+    return delta;
+  }
+  return left.title.localeCompare(right.title, "ko");
+};
+
+const buildSidebarPageTree = (documents: DocumentItem[]): SidebarPageNode[] => {
+  const ordered = [...documents].sort(sortDocumentsByRecency);
+  const nodeById = new Map<string, SidebarPageNode>();
+  ordered.forEach((document) => {
+    nodeById.set(document.id, { doc: document, children: [] });
+  });
+
+  const roots: SidebarPageNode[] = [];
+  ordered.forEach((document) => {
+    const node = nodeById.get(document.id);
+    if (!node) {
+      return;
+    }
+    const parentId = document.parent_document_id ?? null;
+    const parent = parentId ? nodeById.get(parentId) : undefined;
+    if (parent && parentId !== document.id) {
+      parent.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+
+  const sortNodes = (nodes: SidebarPageNode[]) => {
+    nodes.sort((left, right) => sortDocumentsByRecency(left.doc, right.doc));
+    nodes.forEach((node) => {
+      if (node.children.length > 0) {
+        sortNodes(node.children);
+      }
+    });
+  };
+  sortNodes(roots);
+  return roots;
+};
+
+const filterSidebarPageTree = (nodes: SidebarPageNode[], query: string): SidebarPageNode[] => {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) {
+    return nodes;
+  }
+  const walk = (node: SidebarPageNode): SidebarPageNode | null => {
+    const matched = node.doc.title.toLowerCase().includes(normalized);
+    const children = node.children.map(walk).filter((child): child is SidebarPageNode => child !== null);
+    if (!matched && children.length === 0) {
+      return null;
+    }
+    return { doc: node.doc, children };
+  };
+  return nodes.map(walk).filter((node): node is SidebarPageNode => node !== null);
+};
+
+const loadLastWorkspaceId = (): string | null => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const saved = window.localStorage.getItem(LAST_WORKSPACE_ID_KEY);
+    return saved?.trim() ? saved : null;
+  } catch {
+    return null;
+  }
+};
+
+const saveLastWorkspaceId = (workspaceId: string | null) => {
+  if (!workspaceId || typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(LAST_WORKSPACE_ID_KEY, workspaceId);
+  } catch {
+    // Ignore localStorage write failures in local/dev environments.
+  }
+};
 
 const PIPELINE_STAGE_LABEL: Record<PipelineStage, string> = {
   INGEST: "수집",
@@ -617,60 +740,763 @@ const renameNodeInTree = (tree: TreeActiveResponse, nodeId: string, label: strin
   };
 };
 
-function Layout({ children }: { children: React.ReactNode }) {
-  const { state, clearTokens } = useSession();
+function Layout({ children, api }: { children: React.ReactNode; api: AppApiClient }) {
+  const { state, clearTokens, setWorkspace } = useSession();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaceError, setWorkspaceError] = useState<UiError | null>(null);
+  const [sidebarDocuments, setSidebarDocuments] = useState<DocumentItem[]>([]);
+  const [documentError, setDocumentError] = useState<UiError | null>(null);
+  const [sidebarNodeError, setSidebarNodeError] = useState<UiError | null>(null);
+  const [sidebarNodeTreeResponse, setSidebarNodeTreeResponse] = useState<TreeActiveResponse | null>(null);
+  const [loadingSidebarNodeTree, setLoadingSidebarNodeTree] = useState(false);
+  const [pagesBrowseMode, setPagesBrowseMode] = useState<EditorSidebarMode>("DOCUMENT");
+  const [sidebarQuery, setSidebarQuery] = useState("");
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isPaletteOpen, setIsPaletteOpen] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  const [creatingRootPage, setCreatingRootPage] = useState(false);
+  const paletteInputRef = useRef<HTMLInputElement | null>(null);
+
+  const routeWorkspaceMatch = useMemo(() => location.pathname.match(/^\/w\/([^/]+)/), [location.pathname]);
+  const routeWorkspaceId = routeWorkspaceMatch?.[1] ? decodeURIComponent(routeWorkspaceMatch[1]) : null;
+  const activeWorkspaceId = routeWorkspaceId ?? state.workspaceId;
+  const activeView = detectSidebarView(location.pathname);
+
+  useEffect(() => {
+    setIsSidebarOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!state.workspaceId) {
+      return;
+    }
+    saveLastWorkspaceId(state.workspaceId);
+  }, [state.workspaceId]);
+
+  useEffect(() => {
+    if (!state.accessToken) {
+      setWorkspaces([]);
+      setSidebarDocuments([]);
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const response = await api.request<WorkspaceListResponse>("/workspaces");
+        if (!active) {
+          return;
+        }
+        setWorkspaces(response.items);
+        setWorkspaceError(null);
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+        setWorkspaceError(toUiError(error, "워크스페이스 목록을 불러오지 못했습니다"));
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [api, state.accessToken]);
+
+  useEffect(() => {
+    if (!routeWorkspaceId) {
+      return;
+    }
+    if (state.workspaceId === routeWorkspaceId) {
+      return;
+    }
+    const matched = workspaces.find((workspace) => workspace.id === routeWorkspaceId);
+    if (matched) {
+      setWorkspace(matched.id, matched.name);
+      return;
+    }
+    setWorkspace(routeWorkspaceId, state.workspaceName ?? routeWorkspaceId);
+  }, [routeWorkspaceId, setWorkspace, state.workspaceId, state.workspaceName, workspaces]);
+
+  useEffect(() => {
+    if (!state.accessToken || state.workspaceId || routeWorkspaceId || workspaces.length === 0) {
+      return;
+    }
+    const savedWorkspaceId = loadLastWorkspaceId();
+    const nextWorkspace = workspaces.find((workspace) => workspace.id === savedWorkspaceId) ?? workspaces[0];
+    setWorkspace(nextWorkspace.id, nextWorkspace.name);
+    if (!location.pathname.startsWith("/workspace")) {
+      navigate(workspaceRootPath(nextWorkspace.id), { replace: true });
+    }
+  }, [location.pathname, navigate, routeWorkspaceId, setWorkspace, state.accessToken, state.workspaceId, workspaces]);
+
+  useEffect(() => {
+    if (!activeWorkspaceId) {
+      setSidebarDocuments([]);
+      setSidebarNodeTreeResponse(null);
+      setSidebarNodeError(null);
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const response = await api.request<DocumentListResponse>("/documents?page=0&size=200", {}, true);
+        if (!active) {
+          return;
+        }
+        setSidebarDocuments(response.items);
+        setDocumentError(null);
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+        setDocumentError(toUiError(error, "페이지 목록을 불러오지 못했습니다"));
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [activeWorkspaceId, api]);
+
+  const loadSidebarNodeTree = useCallback(async () => {
+    if (!activeWorkspaceId) {
+      setSidebarNodeTreeResponse(null);
+      setSidebarNodeError(null);
+      return;
+    }
+    setLoadingSidebarNodeTree(true);
+    setSidebarNodeError(null);
+    try {
+      const response = await api.request<TreeActiveResponse>("/trees?view=topic", {}, true);
+      setSidebarNodeTreeResponse(response);
+    } catch (error) {
+      setSidebarNodeError(toUiError(error, "노드 분류 목록을 불러오지 못했습니다"));
+    } finally {
+      setLoadingSidebarNodeTree(false);
+    }
+  }, [activeWorkspaceId, api]);
+
+  useEffect(() => {
+    if (pagesBrowseMode !== "NODE") {
+      return;
+    }
+    void loadSidebarNodeTree();
+  }, [loadSidebarNodeTree, pagesBrowseMode]);
+
+  useEffect(() => {
+    const openPalette = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setIsPaletteOpen(true);
+        return;
+      }
+      if (event.key === "Escape") {
+        setIsPaletteOpen(false);
+      }
+    };
+    window.addEventListener("keydown", openPalette);
+    return () => {
+      window.removeEventListener("keydown", openPalette);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isPaletteOpen) {
+      setPaletteQuery("");
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      paletteInputRef.current?.focus();
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [isPaletteOpen]);
+
+  const pageTreeRoots = useMemo(() => buildSidebarPageTree(sidebarDocuments), [sidebarDocuments]);
+  const filteredPageTreeRoots = useMemo(() => filterSidebarPageTree(pageTreeRoots, sidebarQuery), [pageTreeRoots, sidebarQuery]);
+
+  const sidebarNodeTrees = useMemo<EditorNodeTree[]>(() => {
+    if (!sidebarNodeTreeResponse) {
+      return [];
+    }
+
+    const documentById = new Map(sidebarDocuments.map((document) => [document.id, document]));
+    const grouped = new Map<
+      string,
+      {
+        id: string;
+        parentId: string | null;
+        label: string;
+        locked: boolean;
+        documents: Array<{ id: string; title: string }>;
+        children: EditorNodeTree[];
+      }
+    >();
+
+    for (const node of sidebarNodeTreeResponse.nodes) {
+      const summaryTitleById = new Map((node.document_summaries ?? []).map((summary) => [summary.id, summary.title?.trim() ?? ""]));
+      const nodeDocumentIds = Array.from(new Set([...(node.documents ?? []), ...(node.document_summaries ?? []).map((summary) => summary.id)]));
+      grouped.set(node.id, {
+        id: node.id,
+        parentId: node.parent_id,
+        label: node.label,
+        locked: node.locked,
+        documents: nodeDocumentIds
+          .map((documentId) => ({
+            id: documentId,
+            title: summaryTitleById.get(documentId) || documentById.get(documentId)?.title || documentId
+          }))
+          .sort((left, right) => left.title.localeCompare(right.title, "ko")),
+        children: []
+      });
+    }
+
+    const roots: EditorNodeTree[] = [];
+    for (const value of grouped.values()) {
+      const node: EditorNodeTree = {
+        id: value.id,
+        label: value.label,
+        locked: value.locked,
+        documents: value.documents,
+        children: value.children
+      };
+      const parent = value.parentId ? grouped.get(value.parentId) : undefined;
+      if (parent) {
+        parent.children.push(node);
+      } else {
+        roots.push(node);
+      }
+    }
+
+    const sortNodes = (list: EditorNodeTree[]) => {
+      list.sort((left, right) => left.label.localeCompare(right.label, "ko"));
+      for (const item of list) {
+        if (item.children.length > 0) {
+          sortNodes(item.children);
+        }
+      }
+    };
+    sortNodes(roots);
+    return roots;
+  }, [sidebarDocuments, sidebarNodeTreeResponse]);
+
+  const filteredSidebarNodeTrees = useMemo(() => {
+    const normalized = sidebarQuery.trim().toLowerCase();
+    if (!normalized) {
+      return sidebarNodeTrees;
+    }
+    const filterNode = (node: EditorNodeTree): EditorNodeTree | null => {
+      const filteredChildren = node.children
+        .map((child) => filterNode(child))
+        .filter((child): child is EditorNodeTree => child !== null);
+      const filteredDocuments = node.documents.filter((document) => document.title.toLowerCase().includes(normalized));
+      const matchedLabel = node.label.toLowerCase().includes(normalized);
+      if (!matchedLabel && filteredChildren.length === 0 && filteredDocuments.length === 0) {
+        return null;
+      }
+      return {
+        ...node,
+        children: filteredChildren,
+        documents: matchedLabel ? node.documents : filteredDocuments
+      };
+    };
+    return sidebarNodeTrees.map((node) => filterNode(node)).filter((node): node is EditorNodeTree => node !== null);
+  }, [sidebarNodeTrees, sidebarQuery]);
+
+  const createRootPage = useCallback(async () => {
+    if (!activeWorkspaceId || creatingRootPage) {
+      return;
+    }
+    setCreatingRootPage(true);
+    try {
+      const created = await api.request<{ id: string }>(
+        "/documents",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            title: "새 페이지",
+            body_markdown: "",
+            source_type: "EDITOR",
+            parent_document_id: null
+          })
+        },
+        true
+      );
+      navigate(workspaceDocumentPath(activeWorkspaceId, created.id));
+    } catch {
+      // Keep action non-blocking inside quick action.
+    } finally {
+      setCreatingRootPage(false);
+      setIsPaletteOpen(false);
+    }
+  }, [activeWorkspaceId, api, creatingRootPage, navigate]);
+
+  const goToView = useCallback(
+    (view: Exclude<SidebarViewKey, "workspace">) => {
+      if (!activeWorkspaceId) {
+        return;
+      }
+      navigate(view === "documents" ? workspaceRootPath(activeWorkspaceId) : workspaceViewPath(activeWorkspaceId, view));
+      setIsPaletteOpen(false);
+    },
+    [activeWorkspaceId, navigate]
+  );
+
+  const handleWorkspaceChange = useCallback(
+    (nextWorkspaceId: string) => {
+      const nextWorkspace = workspaces.find((workspace) => workspace.id === nextWorkspaceId);
+      if (!nextWorkspace) {
+        return;
+      }
+      setWorkspace(nextWorkspace.id, nextWorkspace.name);
+      saveLastWorkspaceId(nextWorkspace.id);
+      navigate(workspaceRootPath(nextWorkspace.id));
+      setIsPaletteOpen(false);
+    },
+    [navigate, setWorkspace, workspaces]
+  );
+
+  const goToWorkspaceHome = useCallback(() => {
+    navigate("/workspace");
+    setIsPaletteOpen(false);
+    setIsSidebarOpen(false);
+  }, [navigate]);
+
+  const commandActions = useMemo(
+    () => [
+      {
+        id: "action:new-page",
+        label: "새 페이지 만들기",
+        description: "루트 페이지를 즉시 생성합니다.",
+        keywords: "new create page",
+        execute: () => {
+          void createRootPage();
+        }
+      },
+      {
+        id: "action:view-documents",
+        label: "문서함 보기",
+        description: "카드/리스트 뷰로 문서를 탐색합니다.",
+        keywords: "documents list cards",
+        execute: () => goToView("documents")
+      },
+      {
+        id: "action:view-tree",
+        label: "트리 보기",
+        description: "가상 폴더 스냅샷을 탐색합니다.",
+        keywords: "tree topic nodes",
+        execute: () => goToView("tree")
+      },
+      {
+        id: "action:view-questions",
+        label: "질문 인박스 보기",
+        description: "답변이 필요한 질문을 처리합니다.",
+        keywords: "questions inbox review",
+        execute: () => goToView("questions")
+      }
+    ],
+    [createRootPage, goToView]
+  );
+
+  const filteredPaletteActions = useMemo(() => {
+    const query = paletteQuery.trim().toLowerCase();
+    if (!query) {
+      return commandActions;
+    }
+    return commandActions.filter(
+      (action) =>
+        action.label.toLowerCase().includes(query) ||
+        action.description.toLowerCase().includes(query) ||
+        action.keywords.includes(query)
+    );
+  }, [commandActions, paletteQuery]);
+
+  const filteredPaletteDocuments = useMemo(() => {
+    if (!activeWorkspaceId) {
+      return [];
+    }
+    const query = paletteQuery.trim().toLowerCase();
+    const source = query
+      ? sidebarDocuments.filter((document) => document.title.toLowerCase().includes(query))
+      : [...sidebarDocuments].sort(sortDocumentsByRecency);
+    return source.slice(0, COMMAND_PALETTE_MAX_RESULTS).map((document) => ({
+      id: `doc:${document.id}`,
+      label: document.title,
+      description: "페이지 열기",
+      execute: () => {
+        navigate(workspaceDocumentPath(activeWorkspaceId, document.id));
+        setIsPaletteOpen(false);
+      }
+    }));
+  }, [activeWorkspaceId, navigate, paletteQuery, sidebarDocuments]);
+
+  const paletteItems = useMemo(() => [...filteredPaletteActions, ...filteredPaletteDocuments], [filteredPaletteActions, filteredPaletteDocuments]);
+
+  const renderPageTree = (nodes: SidebarPageNode[], depth: number): React.ReactNode =>
+    nodes.map((node) => {
+      const isActive = location.pathname.includes(`/doc/${node.doc.id}`);
+      return (
+        <li className="sidebar-page-item" key={node.doc.id}>
+          <button
+            className={`sidebar-page-button${isActive ? " is-active" : ""}`}
+            onClick={() => {
+              if (!activeWorkspaceId) {
+                return;
+              }
+              navigate(workspaceDocumentPath(activeWorkspaceId, node.doc.id));
+            }}
+            style={{ paddingLeft: `${12 + depth * 16}px` }}
+            type="button"
+          >
+            <span className="sidebar-page-dot">•</span>
+            <span className="sidebar-page-title">{node.doc.title}</span>
+          </button>
+          {node.children.length > 0 ? <ul className="sidebar-page-list">{renderPageTree(node.children, depth + 1)}</ul> : null}
+        </li>
+      );
+    });
+
+  const countSidebarNodeDocuments = (node: EditorNodeTree): number => {
+    return node.documents.length + node.children.reduce((acc, child) => acc + countSidebarNodeDocuments(child), 0);
+  };
+
+  const renderSidebarNodeTree = (nodes: EditorNodeTree[], depth: number): React.ReactNode =>
+    nodes.map((node) => {
+      const totalDocuments = countSidebarNodeDocuments(node);
+      return (
+        <li className="sidebar-node-item" key={node.id}>
+          <div className="sidebar-node-row" style={{ paddingLeft: `${12 + depth * 16}px` }}>
+            <span className="sidebar-node-label">
+              {node.label}
+              {node.locked ? <span className="lock-badge">잠금</span> : null}
+            </span>
+            <span className="tree-node-count">{totalDocuments}</span>
+          </div>
+          {node.documents.length > 0 ? (
+            <ul className="sidebar-node-doc-list">
+              {node.documents.map((document) => {
+                const isActive = location.pathname.includes(`/doc/${document.id}`);
+                return (
+                  <li key={`${node.id}:${document.id}`}>
+                    <button
+                      className={`sidebar-node-doc-button${isActive ? " is-active" : ""}`}
+                      onClick={() => {
+                        if (!activeWorkspaceId) {
+                          return;
+                        }
+                        navigate(workspaceDocumentPath(activeWorkspaceId, document.id));
+                      }}
+                      style={{ paddingLeft: `${24 + depth * 16}px` }}
+                      type="button"
+                    >
+                      <span className="sidebar-node-doc-title">{document.title}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+          {node.children.length > 0 ? <ul className="sidebar-node-list">{renderSidebarNodeTree(node.children, depth + 1)}</ul> : null}
+        </li>
+      );
+    });
 
   return (
-    <div className="app-shell">
-      <header className="panel panel-compact topbar">
-        <div className="brand">
-          <span className="brand-mark">오</span>
-          <div className="brand-text">
-            <strong>오토독 트리</strong>
-            <span>사용자 콘솔</span>
+    <div className="workspace-layout">
+      <div className={`workspace-sidebar-backdrop${isSidebarOpen ? " is-open" : ""}`} onClick={() => setIsSidebarOpen(false)} role="presentation" />
+      <aside className={`workspace-sidebar${isSidebarOpen ? " is-open" : ""}`}>
+        <div className="workspace-sidebar-header">
+          <button
+            aria-label="워크스페이스 홈으로 이동"
+            className="brand brand-link"
+            onClick={goToWorkspaceHome}
+            type="button"
+          >
+            <span className="brand-mark">오</span>
+            <div className="brand-text">
+              <strong>오토독 트리</strong>
+              <span>문서 워크스페이스</span>
+            </div>
+          </button>
+          <label className="sidebar-workspace-switcher" htmlFor="workspace-switcher">
+            <span>WORKSPACE</span>
+            <select
+              className="field-input"
+              id="workspace-switcher"
+              onChange={(event) => handleWorkspaceChange(event.target.value)}
+              value={activeWorkspaceId ?? ""}
+            >
+              {workspaces.map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="sidebar-section">
+          <p className="sidebar-section-label">Quick Actions</p>
+          <div className="sidebar-quick-actions">
+            <button className="btn btn-secondary btn-small" disabled={!activeWorkspaceId || creatingRootPage} onClick={() => void createRootPage()} type="button">
+              {creatingRootPage ? "생성 중..." : "새 페이지"}
+            </button>
+            <button
+              className="btn btn-ghost btn-small"
+              onClick={() => {
+                setIsPaletteOpen(true);
+              }}
+              type="button"
+            >
+              검색 / Cmd+K
+            </button>
           </div>
         </div>
 
-        <div className="workspace-chip" title={state.workspaceId ?? undefined}>
-          <span>워크스페이스</span>
-          <strong>{state.workspaceName ?? "미선택"}</strong>
+        <div className="sidebar-section sidebar-section-pages">
+          <div className="sidebar-section-title-row">
+            <p className="sidebar-section-label">Pages</p>
+            <span className="sidebar-pill">{pagesBrowseMode === "DOCUMENT" ? sidebarDocuments.length : sidebarNodeTreeResponse?.nodes.length ?? 0}</span>
+          </div>
+          <div className="editor-view-toggle" role="tablist" aria-label="페이지 보기 모드 전환">
+            <button
+              aria-selected={pagesBrowseMode === "DOCUMENT"}
+              className={`editor-view-toggle-button${pagesBrowseMode === "DOCUMENT" ? " is-active" : ""}`}
+              onClick={() => setPagesBrowseMode("DOCUMENT")}
+              role="tab"
+              type="button"
+            >
+              문서로 분류
+            </button>
+            <button
+              aria-selected={pagesBrowseMode === "NODE"}
+              className={`editor-view-toggle-button${pagesBrowseMode === "NODE" ? " is-active" : ""}`}
+              onClick={() => setPagesBrowseMode("NODE")}
+              role="tab"
+              type="button"
+            >
+              노드로 분류
+            </button>
+          </div>
+          <input
+            className="field-input sidebar-filter-input"
+            onChange={(event) => setSidebarQuery(event.target.value)}
+            placeholder={pagesBrowseMode === "DOCUMENT" ? "페이지 제목 검색" : "노드/문서 검색"}
+            value={sidebarQuery}
+          />
+          {pagesBrowseMode === "DOCUMENT" ? (
+            <>
+              <ErrorPanel error={documentError} />
+              <ul className="sidebar-page-list">
+                {filteredPageTreeRoots.length > 0 ? (
+                  renderPageTree(filteredPageTreeRoots, 0)
+                ) : (
+                  <li className="sidebar-empty">페이지가 없습니다.</li>
+                )}
+              </ul>
+            </>
+          ) : (
+            <>
+              <ErrorPanel
+                error={sidebarNodeError}
+                onRetry={() => {
+                  void loadSidebarNodeTree();
+                }}
+              />
+              {loadingSidebarNodeTree ? <p className="muted">노드 분류를 불러오는 중입니다...</p> : null}
+              <ul className="sidebar-page-list sidebar-node-scroll">
+                {!loadingSidebarNodeTree && filteredSidebarNodeTrees.length > 0 ? (
+                  renderSidebarNodeTree(filteredSidebarNodeTrees, 0)
+                ) : !loadingSidebarNodeTree ? (
+                  <li className="sidebar-empty">노드가 없습니다.</li>
+                ) : null}
+              </ul>
+            </>
+          )}
         </div>
 
-        <nav className="top-nav" aria-label="메인 내비게이션">
-          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/workspace">
-            워크스페이스
-          </NavLink>
-          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/inbox">
-            문서함
-          </NavLink>
-          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/editor">
-            에디터
-          </NavLink>
-          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/search">
-            검색
-          </NavLink>
-          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/questions">
-            질문함
-          </NavLink>
-          <NavLink className={({ isActive }) => `top-nav-link${isActive ? " is-active" : ""}`} to="/tree">
-            트리
-          </NavLink>
-        </nav>
+        <div className="sidebar-section">
+          <p className="sidebar-section-label">Views</p>
+          <div className="sidebar-view-list">
+            <button
+              className={`sidebar-view-button${activeView === "documents" ? " is-active" : ""}`}
+              onClick={() => goToView("documents")}
+              type="button"
+            >
+              Documents
+            </button>
+            <button
+              className={`sidebar-view-button${activeView === "tree" ? " is-active" : ""}`}
+              onClick={() => goToView("tree")}
+              type="button"
+            >
+              Tree
+            </button>
+            <button
+              className={`sidebar-view-button${activeView === "questions" ? " is-active" : ""}`}
+              onClick={() => goToView("questions")}
+              type="button"
+            >
+              Questions
+            </button>
+          </div>
+        </div>
 
-        <button
-          className="btn btn-secondary"
+        <div className="sidebar-footer">
+          <ErrorPanel error={workspaceError} />
+          <button className="btn btn-ghost btn-small" onClick={() => navigate("/workspace")} type="button">
+            워크스페이스 설정
+          </button>
+          <button
+            className="btn btn-secondary btn-small"
+            onClick={() => {
+              clearTokens();
+              navigate("/login");
+            }}
+            type="button"
+          >
+            로그아웃
+          </button>
+        </div>
+      </aside>
+
+      <div className="workspace-main">
+        <header className="workspace-header panel panel-compact">
+          <div className="workspace-header-menu-wrap">
+            <button
+              aria-expanded={isSidebarOpen}
+              className="btn btn-ghost btn-small sidebar-menu-button"
+              onClick={() => {
+                setIsSidebarOpen((previous) => !previous);
+              }}
+              type="button"
+            >
+              메뉴
+            </button>
+            {isSidebarOpen ? (
+              <div className="header-menu-panel">
+                <strong>{state.workspaceName ?? "워크스페이스"}</strong>
+                <button
+                  className="header-menu-item"
+                  onClick={() => {
+                    goToView("documents");
+                    setIsSidebarOpen(false);
+                  }}
+                  type="button"
+                >
+                  Documents
+                </button>
+                <button
+                  className="header-menu-item"
+                  onClick={() => {
+                    goToView("tree");
+                    setIsSidebarOpen(false);
+                  }}
+                  type="button"
+                >
+                  Tree
+                </button>
+                <button
+                  className="header-menu-item"
+                  onClick={() => {
+                    goToView("questions");
+                    setIsSidebarOpen(false);
+                  }}
+                  type="button"
+                >
+                  Questions
+                </button>
+                <button
+                  className="header-menu-item"
+                  onClick={() => {
+                    navigate("/workspace");
+                    setIsSidebarOpen(false);
+                  }}
+                  type="button"
+                >
+                  워크스페이스 설정
+                </button>
+                <button
+                  className="header-menu-item"
+                  onClick={() => {
+                    clearTokens();
+                    navigate("/login");
+                    setIsSidebarOpen(false);
+                  }}
+                  type="button"
+                >
+                  로그아웃
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <div className="workspace-header-crumbs">
+            <span>{state.workspaceName ?? "Workspace"}</span>
+            <span>/</span>
+            <strong>
+              {activeView === "tree" ? "Tree" : activeView === "questions" ? "Questions" : activeView === "workspace" ? "Settings" : "Documents"}
+            </strong>
+          </div>
+          <button
+            className="btn btn-secondary btn-small"
+            onClick={() => {
+              setIsPaletteOpen(true);
+            }}
+            type="button"
+          >
+            Search / Cmd+K
+          </button>
+        </header>
+        <main className="page-stack">{children}</main>
+      </div>
+
+      {isPaletteOpen ? (
+        <div
+          className="command-palette-backdrop"
           onClick={() => {
-            clearTokens();
-            navigate("/login");
+            setIsPaletteOpen(false);
           }}
-          type="button"
+          role="presentation"
         >
-          로그아웃
-        </button>
-      </header>
-
-      <main className="page-stack">{children}</main>
+          <div
+            className="command-palette"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="검색 및 커맨드 팔레트"
+          >
+            <input
+              className="field-input command-palette-input"
+              onChange={(event) => setPaletteQuery(event.target.value)}
+              placeholder="문서 검색 또는 명령 입력..."
+              ref={paletteInputRef}
+              value={paletteQuery}
+            />
+            <ul className="command-palette-results">
+              {paletteItems.length > 0 ? (
+                paletteItems.map((item) => (
+                  <li key={item.id}>
+                    <button
+                      className="command-palette-item"
+                      onClick={() => {
+                        item.execute();
+                        setIsPaletteOpen(false);
+                      }}
+                      type="button"
+                    >
+                      <strong>{item.label}</strong>
+                      <span>{item.description}</span>
+                    </button>
+                  </li>
+                ))
+              ) : (
+                <li className="sidebar-empty">결과가 없습니다.</li>
+              )}
+            </ul>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -705,7 +1531,7 @@ function LoginPage() {
             body: JSON.stringify({ email, password })
           });
           setTokens(response.access_token, response.refresh_token);
-          navigate("/workspace");
+          navigate("/");
         } catch (e) {
           setError(toUiError(e, "로그인에 실패했습니다"));
         }
@@ -794,10 +1620,38 @@ export default function App() {
     [clearTokens, setTokens, state.accessToken, state.refreshToken, state.workspaceId]
   );
 
+  useEffect(() => {
+    saveLastWorkspaceId(state.workspaceId);
+  }, [state.workspaceId]);
+
+  useEffect(() => {
+    if (!state.accessToken || state.workspaceId) {
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const response = await api.request<WorkspaceListResponse>("/workspaces");
+        if (!active || response.items.length === 0) {
+          return;
+        }
+        const savedWorkspaceId = loadLastWorkspaceId();
+        const nextWorkspace = response.items.find((workspace) => workspace.id === savedWorkspaceId) ?? response.items[0];
+        setWorkspace(nextWorkspace.id, nextWorkspace.name);
+      } catch {
+        // Ignore bootstrap errors and keep workspace selection page reachable.
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [api, setWorkspace, state.accessToken, state.workspaceId]);
+
   function WorkspacePage() {
     const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
     const [name, setName] = useState("내 워크스페이스");
     const [error, setError] = useState<UiError | null>(null);
+    const navigate = useNavigate();
 
     const loadWorkspaces = useCallback(async () => {
       setError(null);
@@ -814,7 +1668,7 @@ export default function App() {
     }, [loadWorkspaces]);
 
     return (
-      <Layout>
+      <Layout api={api}>
         <section className="panel">
           <PageHeader title="워크스페이스" subtitle="문서를 탐색하거나 편집하기 전에 테넌트 컨텍스트를 선택하세요." />
           <ErrorPanel
@@ -859,7 +1713,14 @@ export default function App() {
                 const isSelected = state.workspaceId === ws.id;
                 return (
                   <li className={`workspace-item${isSelected ? " is-selected" : ""}`} key={ws.id}>
-                    <button className="workspace-button" onClick={() => setWorkspace(ws.id, ws.name)} type="button">
+                    <button
+                      className="workspace-button"
+                      onClick={() => {
+                        setWorkspace(ws.id, ws.name);
+                        navigate(workspaceRootPath(ws.id));
+                      }}
+                      type="button"
+                    >
                       <span className="workspace-name">{ws.name}</span>
                       <span className={`role-badge role-${roleName}`}>{roleText(ws.role)}</span>
                       {isSelected ? <span className="workspace-current">사용 중</span> : null}
@@ -877,6 +1738,8 @@ export default function App() {
   function InboxPage() {
     const [documents, setDocuments] = useState<DocumentItem[]>([]);
     const [error, setError] = useState<UiError | null>(null);
+    const [viewMode, setViewMode] = useState<"CARD" | "LIST">("CARD");
+    const [sortBy, setSortBy] = useState<"UPDATED" | "TITLE">("UPDATED");
 
     const loadDocuments = useCallback(async () => {
       setError(null);
@@ -896,10 +1759,59 @@ export default function App() {
       void loadDocuments();
     }, [loadDocuments, state.workspaceId]);
 
+    const sortedDocuments = useMemo(() => {
+      const ordered = [...documents];
+      if (sortBy === "TITLE") {
+        ordered.sort((left, right) => left.title.localeCompare(right.title, "ko"));
+        return ordered;
+      }
+      ordered.sort(sortDocumentsByRecency);
+      return ordered;
+    }, [documents, sortBy]);
+
     return (
-      <Layout>
+      <Layout api={api}>
         <section className="panel">
-          <PageHeader title="문서함" subtitle="최근 수집된 문서와 파이프라인 단계별 진행 상태를 확인하세요." />
+          <PageHeader
+            title="Documents"
+            subtitle="문서 데이터베이스를 카드/리스트 뷰로 탐색하고 바로 편집으로 이동하세요."
+            action={
+              <div className="action-row">
+                <div className="editor-view-toggle" role="tablist" aria-label="문서함 보기 전환">
+                  <button
+                    aria-selected={viewMode === "CARD"}
+                    className={`editor-view-toggle-button${viewMode === "CARD" ? " is-active" : ""}`}
+                    onClick={() => setViewMode("CARD")}
+                    role="tab"
+                    type="button"
+                  >
+                    카드
+                  </button>
+                  <button
+                    aria-selected={viewMode === "LIST"}
+                    className={`editor-view-toggle-button${viewMode === "LIST" ? " is-active" : ""}`}
+                    onClick={() => setViewMode("LIST")}
+                    role="tab"
+                    type="button"
+                  >
+                    리스트
+                  </button>
+                </div>
+                <label className="view-selector" htmlFor="documents-sort-select">
+                  <span>정렬</span>
+                  <select
+                    className="field-input"
+                    id="documents-sort-select"
+                    onChange={(event) => setSortBy(event.target.value as "UPDATED" | "TITLE")}
+                    value={sortBy}
+                  >
+                    <option value="UPDATED">최근 수정</option>
+                    <option value="TITLE">제목</option>
+                  </select>
+                </label>
+              </div>
+            }
+          />
           {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
           <ErrorPanel
             error={error}
@@ -912,24 +1824,56 @@ export default function App() {
             <EmptyState title="문서가 없습니다" description="에디터 탭에서 문서를 작성하거나 업로드하세요." />
           ) : null}
 
-          <div className="doc-grid">
-            {documents.map((doc) => (
-              <article className="panel panel-soft doc-card" key={doc.id}>
-                <div className="doc-card-header">
-                  <Link className="doc-link" to={`/documents/${doc.id}`}>
-                    {doc.title}
-                  </Link>
-                  <StatusChip label="상태" value={doc.status} />
-                </div>
-                <div className="pipeline-grid">
-                  <StatusChip label="수집" value={doc.pipeline_status.ingest} />
-                  <StatusChip label="임베딩" value={doc.pipeline_status.embed} />
-                  <StatusChip label="인덱스" value={doc.pipeline_status.index} />
-                  <StatusChip label="트리" value={doc.pipeline_status.tree} />
-                </div>
-              </article>
-            ))}
-          </div>
+          {viewMode === "CARD" ? (
+            <div className="doc-grid">
+              {sortedDocuments.map((doc) => (
+                <article className="panel panel-soft doc-card" key={doc.id}>
+                  <div className="doc-card-header">
+                    <Link className="doc-link" to={state.workspaceId ? workspaceDocumentPath(state.workspaceId, doc.id) : `/documents/${doc.id}`}>
+                      {doc.title}
+                    </Link>
+                    <StatusChip label="상태" value={doc.status} />
+                  </div>
+                  <div className="pipeline-grid">
+                    <StatusChip label="수집" value={doc.pipeline_status.ingest} />
+                    <StatusChip label="임베딩" value={doc.pipeline_status.embed} />
+                    <StatusChip label="인덱스" value={doc.pipeline_status.index} />
+                    <StatusChip label="트리" value={doc.pipeline_status.tree} />
+                  </div>
+                  <div className="action-row">
+                    <Link className="btn btn-secondary btn-small" to={state.workspaceId ? workspaceDocumentPath(state.workspaceId, doc.id) : `/documents/${doc.id}`}>
+                      열기
+                    </Link>
+                    <Link
+                      className="btn btn-ghost btn-small"
+                      to={state.workspaceId ? workspaceDocumentDetailPath(state.workspaceId, doc.id) : `/documents/${doc.id}`}
+                    >
+                      상세
+                    </Link>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <ul className="documents-list-view">
+              {sortedDocuments.map((doc) => (
+                <li className="documents-list-row" key={doc.id}>
+                  <div className="documents-list-main">
+                    <Link className="doc-link" to={state.workspaceId ? workspaceDocumentPath(state.workspaceId, doc.id) : `/documents/${doc.id}`}>
+                      {doc.title}
+                    </Link>
+                    <p className="muted">마지막 수정 {new Date(doc.updated_at).toLocaleString("ko-KR")}</p>
+                  </div>
+                  <div className="pipeline-grid">
+                    <StatusChip label="수집" value={doc.pipeline_status.ingest} />
+                    <StatusChip label="임베딩" value={doc.pipeline_status.embed} />
+                    <StatusChip label="인덱스" value={doc.pipeline_status.index} />
+                    <StatusChip label="트리" value={doc.pipeline_status.tree} />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       </Layout>
     );
@@ -1542,12 +2486,15 @@ export default function App() {
       setOpenMenuDocId(null);
       setError(null);
       try {
-        await copyTextToClipboard(`${window.location.origin}/documents/${documentId}`);
+        const copiedUrl = state.workspaceId
+          ? `${window.location.origin}${workspaceDocumentPath(state.workspaceId, documentId)}`
+          : `${window.location.origin}/documents/${documentId}`;
+        await copyTextToClipboard(copiedUrl);
         setNotice({ tone: "info", message: "문서 링크를 복사했습니다." });
       } catch (e) {
         setError(toUiError(e, "링크 복사에 실패했습니다"));
       }
-    }, []);
+    }, [state.workspaceId]);
 
     useEffect(() => {
       const handleSaveShortcut = (event: KeyboardEvent) => {
@@ -1837,9 +2784,9 @@ export default function App() {
       });
 
     return (
-      <Layout>
+      <Layout api={api}>
         <section className="panel">
-          <PageHeader title="에디터" subtitle="노션처럼 문서를 트리로 관리하고 빠르게 생성/수정/삭제하세요." />
+          <PageHeader title="에디터" subtitle="문서를 트리로 관리하고 빠르게 생성/수정/삭제하세요." />
           {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
           <NoticePanel notice={notice} />
           <ErrorPanel
@@ -2018,7 +2965,7 @@ export default function App() {
                       본문 (Markdown)
                     </label>
                     <textarea
-                      className="field-textarea editor-notion-textarea"
+                      className="field-textarea editor-page-textarea"
                       disabled={!selectedDocumentId || loadingDocument || deletingDocumentId === selectedDocumentId}
                       id="editor-body"
                       onChange={(event) => setDraftBody(event.target.value)}
@@ -2039,6 +2986,253 @@ export default function App() {
               )}
             </div>
           </div>
+        </section>
+      </Layout>
+    );
+  }
+
+  function WorkspaceDocumentEditorPage() {
+    const params = useParams();
+    const navigate = useNavigate();
+    const workspaceId = params.workspaceId ?? state.workspaceId;
+    const documentId = params.documentId ?? null;
+    const [doc, setDoc] = useState<DocumentItem | null>(null);
+    const [draftTitle, setDraftTitle] = useState("");
+    const [draftBody, setDraftBody] = useState("");
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [creatingChild, setCreatingChild] = useState(false);
+    const [deleting, setDeleting] = useState(false);
+    const [error, setError] = useState<UiError | null>(null);
+    const [notice, setNotice] = useState<UiNotice | null>(null);
+
+    const loadDocument = useCallback(async () => {
+      if (!documentId || !state.workspaceId) {
+        setDoc(null);
+        setDraftTitle("");
+        setDraftBody("");
+        return;
+      }
+      setLoading(true);
+      setError(null);
+      try {
+        const payload = await api.request<DocumentItem>(`/documents/${documentId}`, {}, true);
+        setDoc(payload);
+        setDraftTitle(payload.title);
+        setDraftBody(payload.body_markdown ?? "");
+      } catch (e) {
+        setError(toUiError(e, "문서를 불러오지 못했습니다"));
+      } finally {
+        setLoading(false);
+      }
+    }, [api, documentId, state.workspaceId]);
+
+    useEffect(() => {
+      void loadDocument();
+    }, [loadDocument]);
+
+    const isDirty = useMemo(() => {
+      if (!doc) {
+        return false;
+      }
+      return draftTitle.trim() !== doc.title.trim() || draftBody !== (doc.body_markdown ?? "");
+    }, [doc, draftBody, draftTitle]);
+
+    const saveDocument = useCallback(async () => {
+      if (!documentId || !doc || !state.workspaceId || typeof doc.version !== "number") {
+        return;
+      }
+      setSaving(true);
+      setError(null);
+      setNotice(null);
+      try {
+        await api.request<void>(
+          `/documents/${documentId}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({
+              version: doc.version,
+              title: draftTitle.trim() || "제목 없음",
+              body_markdown: draftBody
+            })
+          },
+          true
+        );
+        await loadDocument();
+        setNotice({ tone: "success", message: "문서를 저장했습니다." });
+      } catch (e) {
+        setError(toUiError(e, "문서 저장에 실패했습니다"));
+      } finally {
+        setSaving(false);
+      }
+    }, [api, doc, documentId, draftBody, draftTitle, loadDocument, state.workspaceId]);
+
+    const createChildPage = useCallback(async () => {
+      if (!state.workspaceId || !documentId || !workspaceId) {
+        return;
+      }
+      setCreatingChild(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const created = await api.request<{ id: string }>(
+          "/documents",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              title: `${(draftTitle.trim() || doc?.title || "새 페이지")} 하위 페이지`,
+              body_markdown: "",
+              source_type: "EDITOR",
+              parent_document_id: documentId
+            })
+          },
+          true
+        );
+        navigate(workspaceDocumentPath(workspaceId, created.id));
+      } catch (e) {
+        setError(toUiError(e, "하위 페이지 생성에 실패했습니다"));
+      } finally {
+        setCreatingChild(false);
+      }
+    }, [api, doc?.title, documentId, draftTitle, navigate, state.workspaceId, workspaceId]);
+
+    const deleteDocument = useCallback(async () => {
+      if (!documentId || !state.workspaceId || !workspaceId) {
+        return;
+      }
+      if (!window.confirm("현재 페이지를 삭제하시겠습니까?")) {
+        return;
+      }
+      setDeleting(true);
+      setError(null);
+      setNotice(null);
+      try {
+        await api.request<void>(
+          `/documents/${documentId}`,
+          {
+            method: "DELETE"
+          },
+          true
+        );
+        setNotice({ tone: "success", message: "페이지를 삭제했습니다." });
+        navigate(workspaceRootPath(workspaceId));
+      } catch (e) {
+        setError(toUiError(e, "페이지 삭제에 실패했습니다"));
+      } finally {
+        setDeleting(false);
+      }
+    }, [api, documentId, navigate, state.workspaceId, workspaceId]);
+
+    useEffect(() => {
+      const onSaveShortcut = (event: KeyboardEvent) => {
+        if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") {
+          return;
+        }
+        if (!documentId || saving) {
+          return;
+        }
+        event.preventDefault();
+        void saveDocument();
+      };
+      window.addEventListener("keydown", onSaveShortcut);
+      return () => {
+        window.removeEventListener("keydown", onSaveShortcut);
+      };
+    }, [documentId, saveDocument, saving]);
+
+    return (
+      <Layout api={api}>
+        <section className="panel">
+          <div className="page-breadcrumb">
+            <span>{state.workspaceName ?? "Workspace"}</span>
+            <span>/</span>
+            <span>Page</span>
+            <span>/</span>
+            <strong>{doc?.title ?? "문서"}</strong>
+          </div>
+          <PageHeader
+            title={doc?.title ?? "문서 페이지"}
+            subtitle="페이지를 바로 편집하고 저장 상태를 확인하세요."
+            action={
+              <div className="action-row">
+                <button className="btn btn-secondary" disabled={!documentId || creatingChild || deleting} onClick={() => void createChildPage()} type="button">
+                  {creatingChild ? "생성 중..." : "하위 페이지"}
+                </button>
+                <button className="btn btn-primary" disabled={!documentId || saving || deleting} onClick={() => void saveDocument()} type="button">
+                  {saving ? "저장 중..." : "저장"}
+                </button>
+                <button className="btn btn-ghost" disabled={!documentId || deleting} onClick={() => void deleteDocument()} type="button">
+                  {deleting ? "삭제 중..." : "삭제"}
+                </button>
+              </div>
+            }
+          />
+          <NoticePanel notice={notice} />
+          <ErrorPanel
+            error={error}
+            onRetry={() => {
+              void loadDocument();
+            }}
+          />
+
+          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
+
+          {loading ? <p className="muted">문서를 불러오는 중입니다...</p> : null}
+
+          {doc ? (
+            <div className="editor-doc-layout">
+              <div className="editor-doc-main">
+                <div className="field-stack">
+                  <label className="field-label" htmlFor="workspace-doc-title">
+                    제목
+                  </label>
+                  <input
+                    className="field-input"
+                    id="workspace-doc-title"
+                    onChange={(event) => setDraftTitle(event.target.value)}
+                    placeholder="문서 제목"
+                    value={draftTitle}
+                  />
+
+                  <label className="field-label" htmlFor="workspace-doc-body">
+                    본문 (Markdown)
+                  </label>
+                  <textarea
+                    className="field-textarea editor-page-textarea"
+                    id="workspace-doc-body"
+                    onChange={(event) => setDraftBody(event.target.value)}
+                    placeholder="여기에 내용을 입력하세요. Cmd/Ctrl + S로 저장할 수 있습니다."
+                    rows={22}
+                    value={draftBody}
+                  />
+                </div>
+                <p className="muted">{isDirty ? "저장되지 않은 변경사항이 있습니다." : "모든 변경사항이 저장되었습니다."}</p>
+              </div>
+
+              <aside className="editor-doc-side panel-soft">
+                <h3 className="section-title">문서 컨텍스트</h3>
+                <p className="section-subtitle">트리 위치/추천 스냅샷과 파이프라인 상세를 바로 확인할 수 있습니다.</p>
+                <div className="pipeline-grid">
+                  <StatusChip label="수집" value={doc.pipeline_status.ingest} />
+                  <StatusChip label="임베딩" value={doc.pipeline_status.embed} />
+                  <StatusChip label="인덱스" value={doc.pipeline_status.index} />
+                  <StatusChip label="트리" value={doc.pipeline_status.tree} />
+                </div>
+                {workspaceId ? (
+                  <div className="field-stack">
+                    <Link className="btn btn-secondary" to={workspaceViewPath(workspaceId, "tree")}>
+                      트리에서 위치/이동 보기
+                    </Link>
+                    <Link className="btn btn-ghost" to={workspaceDocumentDetailPath(workspaceId, doc.id)}>
+                      파이프라인 상세
+                    </Link>
+                  </div>
+                ) : null}
+              </aside>
+            </div>
+          ) : (
+            <EmptyState title="문서를 찾을 수 없습니다" description="좌측 Pages에서 문서를 선택해 주세요." />
+          )}
         </section>
       </Layout>
     );
@@ -2256,7 +3450,7 @@ export default function App() {
     };
 
     return (
-      <Layout>
+      <Layout api={api}>
         <section className="panel">
           <PageHeader
             title={doc?.title ?? "문서 상세"}
@@ -2493,7 +3687,14 @@ export default function App() {
                             return (
                               <li className="neighbor-evidence-item" key={neighbor.document_id}>
                                 <div className="neighbor-evidence-head">
-                                  <Link className="doc-link" to={`/documents/${neighbor.document_id}`}>
+                                  <Link
+                                    className="doc-link"
+                                    to={
+                                      state.workspaceId
+                                        ? workspaceDocumentDetailPath(state.workspaceId, neighbor.document_id)
+                                        : `/documents/${neighbor.document_id}`
+                                    }
+                                  >
                                     {neighbor.title || neighbor.document_id}
                                   </Link>
                                   <span className="score-pill">{neighbor.edge_decision?.reason_code ?? "UNKNOWN"}</span>
@@ -2529,7 +3730,11 @@ export default function App() {
                       >
                         {acceptingExplain ? "수용 처리 중..." : "수용"}
                       </button>
-                      <Link className="btn btn-secondary" onClick={() => setExplainDrawerOpen(false)} to="/tree">
+                      <Link
+                        className="btn btn-secondary"
+                        onClick={() => setExplainDrawerOpen(false)}
+                        to={state.workspaceId ? workspaceViewPath(state.workspaceId, "tree") : "/tree"}
+                      >
                         다른 폴더로 이동
                       </Link>
                     </div>
@@ -2564,7 +3769,7 @@ export default function App() {
     }, [api, q, state.workspaceId]);
 
     return (
-      <Layout>
+      <Layout api={api}>
         <section className="panel">
           <PageHeader title="검색" subtitle="워크스페이스 범위 검색 인덱스에서 문서를 찾습니다." />
           {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
@@ -2595,7 +3800,10 @@ export default function App() {
           <ul className="search-results">
             {results.map((item) => (
               <li className="search-result-item" key={item.document_id}>
-                <Link className="doc-link" to={`/documents/${item.document_id}`}>
+                <Link
+                  className="doc-link"
+                  to={state.workspaceId ? workspaceDocumentDetailPath(state.workspaceId, item.document_id) : `/documents/${item.document_id}`}
+                >
                   {item.title}
                 </Link>
                 <span className="score-pill">점수 {item.score.toFixed(2)}</span>
@@ -2667,7 +3875,7 @@ export default function App() {
     );
 
     return (
-      <Layout>
+      <Layout api={api}>
         <section className="panel">
           <PageHeader
             title="질문 인박스"
@@ -2970,7 +4178,7 @@ export default function App() {
     }, [includeDescendants, inboxDocuments, selected, selectedDirectDocuments, selectedNode, selectedSubtreeDocuments, templateDocuments]);
 
     return (
-      <Layout>
+      <Layout api={api}>
         <section className="panel">
           <PageHeader
             title="트리"
@@ -3195,7 +4403,10 @@ export default function App() {
                     return (
                       <li className="tree-doc-item" key={document.id}>
                         <div className="tree-doc-card">
-                          <Link className="tree-doc-link" to={`/documents/${document.id}`}>
+                          <Link
+                            className="tree-doc-link"
+                            to={state.workspaceId ? workspaceDocumentDetailPath(state.workspaceId, document.id) : `/documents/${document.id}`}
+                          >
                             <span className="drag-doc-title">{document.title}</span>
                             {document.title !== document.id ? <span className="drag-doc-id">{document.id}</span> : null}
                           </Link>
@@ -3326,9 +4537,86 @@ export default function App() {
     );
   }
 
+  function WorkspaceRouteSync({ children }: { children: React.ReactNode }) {
+    const params = useParams();
+    const workspaceId = params.workspaceId ?? null;
+
+    useEffect(() => {
+      if (!workspaceId || state.workspaceId === workspaceId) {
+        return;
+      }
+      let active = true;
+      void (async () => {
+        try {
+          const response = await api.request<WorkspaceListResponse>("/workspaces");
+          if (!active) {
+            return;
+          }
+          const matched = response.items.find((workspace) => workspace.id === workspaceId);
+          setWorkspace(workspaceId, matched?.name ?? workspaceId);
+        } catch {
+          if (!active) {
+            return;
+          }
+          setWorkspace(workspaceId, state.workspaceName ?? workspaceId);
+        }
+      })();
+      return () => {
+        active = false;
+      };
+    }, [api, setWorkspace, state.workspaceId, state.workspaceName, workspaceId]);
+
+    if (!workspaceId) {
+      return <Navigate to="/workspace" replace />;
+    }
+    if (state.workspaceId !== workspaceId) {
+      return (
+        <div className="app-shell">
+          <section className="panel">
+            <p className="muted">워크스페이스 컨텍스트를 동기화하는 중입니다...</p>
+          </section>
+        </div>
+      );
+    }
+    return <>{children}</>;
+  }
+
+  function HomeRedirect() {
+    if (!state.accessToken) {
+      return <Navigate to="/login" replace />;
+    }
+    if (state.workspaceId) {
+      return <Navigate to={workspaceRootPath(state.workspaceId)} replace />;
+    }
+    return <Navigate to="/workspace" replace />;
+  }
+
+  function LegacyViewRedirect({ view }: { view: Exclude<SidebarViewKey, "workspace"> }) {
+    if (!state.workspaceId) {
+      return <Navigate to="/workspace" replace />;
+    }
+    return <Navigate to={view === "documents" ? workspaceRootPath(state.workspaceId) : workspaceViewPath(state.workspaceId, view)} replace />;
+  }
+
+  function LegacyDocumentRedirect() {
+    const params = useParams();
+    if (!params.documentId || !state.workspaceId) {
+      return <Navigate to="/workspace" replace />;
+    }
+    return <Navigate to={workspaceDocumentDetailPath(state.workspaceId, params.documentId)} replace />;
+  }
+
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route
+        path="/"
+        element={
+          <ProtectedRoute>
+            <HomeRedirect />
+          </ProtectedRoute>
+        }
+      />
       <Route
         path="/workspace"
         element={
@@ -3337,43 +4625,93 @@ export default function App() {
           </ProtectedRoute>
         }
       />
+
+      <Route
+        path="/w/:workspaceId"
+        element={
+          <ProtectedRoute>
+            <WorkspaceRouteSync>
+              <InboxPage />
+            </WorkspaceRouteSync>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/w/:workspaceId/doc/:documentId"
+        element={
+          <ProtectedRoute>
+            <WorkspaceRouteSync>
+              <WorkspaceDocumentEditorPage />
+            </WorkspaceRouteSync>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/w/:workspaceId/doc/:documentId/details"
+        element={
+          <ProtectedRoute>
+            <WorkspaceRouteSync>
+              <DocumentPage />
+            </WorkspaceRouteSync>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/w/:workspaceId/view/documents"
+        element={
+          <ProtectedRoute>
+            <WorkspaceRouteSync>
+              <InboxPage />
+            </WorkspaceRouteSync>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/w/:workspaceId/view/tree"
+        element={
+          <ProtectedRoute>
+            <WorkspaceRouteSync>
+              <TreePage />
+            </WorkspaceRouteSync>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/w/:workspaceId/view/questions"
+        element={
+          <ProtectedRoute>
+            <WorkspaceRouteSync>
+              <QuestionsPage />
+            </WorkspaceRouteSync>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/w/:workspaceId/view/editor"
+        element={
+          <ProtectedRoute>
+            <WorkspaceRouteSync>
+              <EditorPage />
+            </WorkspaceRouteSync>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/w/:workspaceId/search"
+        element={
+          <ProtectedRoute>
+            <WorkspaceRouteSync>
+              <SearchPage />
+            </WorkspaceRouteSync>
+          </ProtectedRoute>
+        }
+      />
+
       <Route
         path="/inbox"
         element={
           <ProtectedRoute>
-            <InboxPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/editor"
-        element={
-          <ProtectedRoute>
-            <EditorPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/documents/:documentId"
-        element={
-          <ProtectedRoute>
-            <DocumentPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/search"
-        element={
-          <ProtectedRoute>
-            <SearchPage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/questions"
-        element={
-          <ProtectedRoute>
-            <QuestionsPage />
+            <LegacyViewRedirect view="documents" />
           </ProtectedRoute>
         }
       />
@@ -3381,11 +4719,43 @@ export default function App() {
         path="/tree"
         element={
           <ProtectedRoute>
-            <TreePage />
+            <LegacyViewRedirect view="tree" />
           </ProtectedRoute>
         }
       />
-      <Route path="*" element={<Navigate to="/login" replace />} />
+      <Route
+        path="/questions"
+        element={
+          <ProtectedRoute>
+            <LegacyViewRedirect view="questions" />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/editor"
+        element={
+          <ProtectedRoute>
+            <LegacyViewRedirect view="documents" />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/search"
+        element={
+          <ProtectedRoute>
+            <LegacyViewRedirect view="documents" />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/documents/:documentId"
+        element={
+          <ProtectedRoute>
+            <LegacyDocumentRedirect />
+          </ProtectedRoute>
+        }
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

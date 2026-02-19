@@ -108,6 +108,17 @@ Quick test:
 curl -s http://localhost:8080/api/v1/health
 ```
 
+### 2-1. Test workspace 시드(SQL + Shell)
+`Test` 워크스페이스와 다양한 주제 문서를 SQL로 주입합니다.
+
+```bash
+./scripts/seed_test_workspace.sh
+```
+
+- SQL 파일: `scripts/sql/seed_test_workspace.sql`
+- 문서 모드 검증용 부모-자식(`parent_document_id`) 데이터와 노드 모드 검증용 다주제 문서가 함께 생성됩니다.
+- 스크립트는 idempotent하게 동작합니다.
+
 Ollama smoke:
 ```bash
 ./scripts/llm_smoke.sh
@@ -119,6 +130,27 @@ pnpm -w install
 pnpm -C web-admin dev --port 5173
 pnpm -C web-user dev --port 5174
 ```
+
+### 3-1. web-user IA / 라우트
+`web-user`는 Workspace-first AppShell을 사용합니다.
+- Sidebar: Workspace switcher, Quick actions, Pages 트리, Views
+- Main: 문서 중심 편집/탐색
+
+주요 라우트:
+- `/w/:workspaceId` (기본 Documents)
+- `/w/:workspaceId/doc/:docId` (문서 편집)
+- `/w/:workspaceId/doc/:docId/details` (문서 상세/파이프라인)
+- `/w/:workspaceId/view/documents`
+- `/w/:workspaceId/view/tree`
+- `/w/:workspaceId/view/questions`
+
+단축키:
+- `Cmd/Ctrl + K`: Command Palette
+- `Cmd/Ctrl + S`: 문서 저장(문서 편집 화면)
+
+워크스페이스 선택 규칙:
+- 마지막 사용 workspace(`autodoc.user.last-workspace.v1`) 자동 복원
+- 저장값이 없으면 첫 workspace 자동 선택
 
 ## 4. HTTP smoke
 Use IntelliJ HTTP Client files in `tools/http/`:
