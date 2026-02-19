@@ -16,6 +16,7 @@ export type DocumentItem = {
   id: string;
   title: string;
   status: string;
+  parent_document_id?: string | null;
   pipeline_status: PipelineStatus;
   attachments: AttachmentSummary[];
   updated_at: string;

@@ -158,7 +158,7 @@ class DocumentController(
         @Valid @RequestBody body: CreateDocumentRequest
     ): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)
-        return documentService.createDocument(context, body.title, body.bodyMarkdown, body.sourceType)
+        return documentService.createDocument(context, body.title, body.bodyMarkdown, body.sourceType, body.parentDocumentId)
     }
 
     @GetMapping("/{documentId}")
@@ -631,7 +631,8 @@ data class UpdateMemberRoleRequest(
 data class CreateDocumentRequest(
     @field:NotBlank val title: String,
     val bodyMarkdown: String?,
-    @field:NotBlank val sourceType: String
+    @field:NotBlank val sourceType: String,
+    val parentDocumentId: String? = null
 )
 
 data class PatchDocumentRequest(

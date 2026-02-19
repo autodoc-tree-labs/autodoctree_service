@@ -948,6 +948,7 @@ export default function App() {
     const [collapsedNodeIds, setCollapsedNodeIds] = useState<string[]>([]);
     const [openMenuDocId, setOpenMenuDocId] = useState<string | null>(null);
     const [loadingList, setLoadingList] = useState(false);
+    const [documentsLoaded, setDocumentsLoaded] = useState(false);
     const [loadingNodeTree, setLoadingNodeTree] = useState(false);
     const [loadingDocument, setLoadingDocument] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -963,6 +964,7 @@ export default function App() {
     const loadDocuments = useCallback(async () => {
       if (!state.workspaceId) {
         setDocuments([]);
+        setDocumentsLoaded(false);
         return;
       }
       setLoadingList(true);
@@ -970,6 +972,7 @@ export default function App() {
       try {
         const response = await api.request<DocumentListResponse>("/documents?page=0&size=200", {}, true);
         setDocuments(response.items);
+        setDocumentsLoaded(true);
       } catch (e) {
         setError(toUiError(e, "문서 목록을 불러오지 못했습니다"));
       } finally {
@@ -1001,6 +1004,7 @@ export default function App() {
       setCollapsedNodeIds([]);
       setSidebarMode("DOCUMENT");
       setOpenMenuDocId(null);
+      setDocumentsLoaded(false);
       setNodeTreeResponse(null);
       setNodeTreeError(null);
     }, [state.workspaceId]);
@@ -1012,12 +1016,14 @@ export default function App() {
     useEffect(() => {
       if (!state.workspaceId) {
         setDocuments([]);
+        setDocumentsLoaded(false);
         setSelectedDocumentId(null);
         setSelectedDocument(null);
         setDraftTitle("");
         setDraftBody("");
         return;
       }
+      setDocumentsLoaded(false);
       void loadDocuments();
     }, [loadDocuments, state.workspaceId]);
 
@@ -1032,11 +1038,14 @@ export default function App() {
     }, [loadNodeTree, sidebarMode, state.workspaceId]);
 
     useEffect(() => {
+      if (!documentsLoaded) {
+        return;
+      }
       setSidebarState((previous) => {
         const sanitized = sanitizeEditorSidebarState(previous, documents);
         return isEditorSidebarStateEqual(previous, sanitized) ? previous : sanitized;
       });
-    }, [documents]);
+    }, [documents, documentsLoaded]);
 
     const favoriteSet = useMemo(() => new Set(sidebarState.favorites), [sidebarState.favorites]);
     const collapsedSet = useMemo(() => new Set(collapsedIds), [collapsedIds]);
@@ -1071,7 +1080,7 @@ export default function App() {
         if (!node) {
           continue;
         }
-        const parentId = sidebarState.parents[document.id];
+        const parentId = document.parent_document_id ?? sidebarState.parents[document.id];
         const parentNode = parentId ? nodeById.get(parentId) : undefined;
         if (parentNode && parentId !== document.id) {
           parentNode.children.push(node);
@@ -1309,14 +1318,15 @@ export default function App() {
             "/documents",
             {
               method: "POST",
-              body: JSON.stringify({
-                title: newTitle,
-                body_markdown: "",
-                source_type: "EDITOR"
-              })
-            },
-            true
-          );
+                  body: JSON.stringify({
+                    title: newTitle,
+                    body_markdown: "",
+                    source_type: "EDITOR",
+                    parent_document_id: parentId
+                  })
+                },
+                true
+              );
 
           setSidebarState((previous) => {
             const parents = { ...previous.parents };
@@ -1387,6 +1397,7 @@ export default function App() {
                   status: refreshed.status,
                   pipeline_status: refreshed.pipeline_status,
                   attachments: refreshed.attachments,
+                  parent_document_id: refreshed.parent_document_id,
                   updated_at: refreshed.updated_at,
                   version: refreshed.version
                 }
@@ -1622,7 +1633,8 @@ export default function App() {
       if (!selectedDocumentId) {
         return null;
       }
-      const parentId = sidebarState.parents[selectedDocumentId];
+      const document = documentById.get(selectedDocumentId);
+      const parentId = document?.parent_document_id ?? sidebarState.parents[selectedDocumentId];
       if (!parentId) {
         return "상위: 루트 페이지";
       }

@@ -59,7 +59,8 @@ data class DocumentRow(
     val templateScore: Double? = null,
     val templateBoilerplateRatio: Double? = null,
     val templateNgramRepeatRatio: Double? = null,
-    val templateDetectedAt: LocalDateTime? = null
+    val templateDetectedAt: LocalDateTime? = null,
+    val parentDocumentId: String? = null
 )
 
 data class PipelineStatusRow(
@@ -455,6 +456,7 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             title = rs.getString("title"),
             bodyMarkdown = rs.getString("body_markdown"),
             bodyText = rs.getString("body_text"),
+            parentDocumentId = rs.getString("parent_document_id"),
             sourceType = rs.getString("source_type"),
             status = rs.getString("status"),
             version = rs.getLong("version"),
@@ -475,22 +477,24 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
         bodyMarkdown: String?,
         bodyText: String?,
         sourceType: String,
-        createdBy: String
+        createdBy: String,
+        parentDocumentId: String? = null
     ): DocumentRow {
         val id = UUID.randomUUID().toString()
         val now = LocalDateTime.now()
         jdbcTemplate.update(
             """
             INSERT INTO documents(
-                id, workspace_id, title, body_markdown, body_text, source_type,
+                id, workspace_id, title, body_markdown, body_text, parent_document_id, source_type,
                 status, version, deleted, created_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, false, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, false, ?, ?, ?)
             """.trimIndent(),
             id,
             workspaceId,
             title,
             bodyMarkdown,
             bodyText,
+            parentDocumentId,
             sourceType,
             "PROCESSING",
             createdBy,
@@ -503,6 +507,7 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             title = title,
             bodyMarkdown = bodyMarkdown,
             bodyText = bodyText,
+            parentDocumentId = parentDocumentId,
             sourceType = sourceType,
             status = "PROCESSING",
             version = 0,
@@ -593,7 +598,17 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
 
     fun softDelete(workspaceId: String, documentId: String) {
         jdbcTemplate.update(
-            "UPDATE documents SET deleted = true, status = ?, updated_at = ? WHERE workspace_id = ? AND id = ?",
+            """
+            UPDATE documents
+            SET parent_document_id = NULL, updated_at = ?
+            WHERE workspace_id = ? AND parent_document_id = ? AND deleted = false
+            """.trimIndent(),
+            LocalDateTime.now(),
+            workspaceId,
+            documentId
+        )
+        jdbcTemplate.update(
+            "UPDATE documents SET deleted = true, status = ?, parent_document_id = NULL, updated_at = ? WHERE workspace_id = ? AND id = ?",
             "DELETED",
             LocalDateTime.now(),
             workspaceId,
@@ -734,6 +749,65 @@ class PipelineStatusRepository(private val jdbcTemplate: JdbcTemplate) {
             workspaceId,
             documentId
         )
+    }
+
+    fun markRetryPendingFromStage(workspaceId: String, documentId: String, stage: Stage) {
+        val now = LocalDateTime.now()
+        when (stage) {
+            Stage.INGEST -> jdbcTemplate.update(
+                """
+                UPDATE pipeline_status
+                SET ingest_status = ?, embed_status = ?, index_status = ?, tree_status = ?, failure_reason = NULL, updated_at = ?
+                WHERE workspace_id = ? AND document_id = ?
+                """.trimIndent(),
+                StageStatus.PENDING.name,
+                StageStatus.PENDING.name,
+                StageStatus.PENDING.name,
+                StageStatus.PENDING.name,
+                now,
+                workspaceId,
+                documentId
+            )
+
+            Stage.EMBED -> jdbcTemplate.update(
+                """
+                UPDATE pipeline_status
+                SET embed_status = ?, index_status = ?, tree_status = ?, failure_reason = NULL, updated_at = ?
+                WHERE workspace_id = ? AND document_id = ?
+                """.trimIndent(),
+                StageStatus.PENDING.name,
+                StageStatus.PENDING.name,
+                StageStatus.PENDING.name,
+                now,
+                workspaceId,
+                documentId
+            )
+
+            Stage.INDEX -> jdbcTemplate.update(
+                """
+                UPDATE pipeline_status
+                SET index_status = ?, tree_status = ?, failure_reason = NULL, updated_at = ?
+                WHERE workspace_id = ? AND document_id = ?
+                """.trimIndent(),
+                StageStatus.PENDING.name,
+                StageStatus.PENDING.name,
+                now,
+                workspaceId,
+                documentId
+            )
+
+            Stage.TREE -> jdbcTemplate.update(
+                """
+                UPDATE pipeline_status
+                SET tree_status = ?, failure_reason = NULL, updated_at = ?
+                WHERE workspace_id = ? AND document_id = ?
+                """.trimIndent(),
+                StageStatus.PENDING.name,
+                now,
+                workspaceId,
+                documentId
+            )
+        }
     }
 }
 
@@ -1148,8 +1222,16 @@ class StageExecutionRepository(private val jdbcTemplate: JdbcTemplate) {
         )
     }
 
-    fun tryStart(workspaceId: String, documentId: String, stage: Stage, inputHash: String, modelVersion: String): Boolean {
+    fun tryStart(
+        workspaceId: String,
+        documentId: String,
+        stage: Stage,
+        inputHash: String,
+        modelVersion: String,
+        allowReopenDone: Boolean = false
+    ): Boolean {
         val now = LocalDateTime.now()
+        val staleRunningCutoff = now.minusMinutes(10)
         return try {
             jdbcTemplate.update(
                 """
@@ -1170,24 +1252,64 @@ class StageExecutionRepository(private val jdbcTemplate: JdbcTemplate) {
             )
             true
         } catch (_: DuplicateKeyException) {
-            val reopened = jdbcTemplate.update(
-                """
-                UPDATE stage_execution
-                SET status = ?, message = NULL, updated_at = ?
-                WHERE workspace_id = ? AND document_id = ? AND stage = ? AND input_hash = ? AND model_version = ? AND status = ?
-                """.trimIndent(),
-                StageStatus.RUNNING.name,
-                now,
-                workspaceId,
-                documentId,
-                stage.name,
-                inputHash,
-                modelVersion,
-                StageStatus.FAILED.name
-            )
+            val reopened = if (allowReopenDone) {
+                jdbcTemplate.update(
+                    """
+                    UPDATE stage_execution
+                    SET status = ?, message = NULL, updated_at = ?
+                    WHERE workspace_id = ? AND document_id = ? AND stage = ? AND input_hash = ? AND model_version = ?
+                      AND (status IN (?, ?) OR (status = ? AND updated_at < ?))
+                    """.trimIndent(),
+                    StageStatus.RUNNING.name,
+                    now,
+                    workspaceId,
+                    documentId,
+                    stage.name,
+                    inputHash,
+                    modelVersion,
+                    StageStatus.FAILED.name,
+                    StageStatus.DONE.name,
+                    StageStatus.RUNNING.name,
+                    staleRunningCutoff
+                )
+            } else {
+                jdbcTemplate.update(
+                    """
+                    UPDATE stage_execution
+                    SET status = ?, message = NULL, updated_at = ?
+                    WHERE workspace_id = ? AND document_id = ? AND stage = ? AND input_hash = ? AND model_version = ?
+                      AND (status = ? OR (status = ? AND updated_at < ?))
+                    """.trimIndent(),
+                    StageStatus.RUNNING.name,
+                    now,
+                    workspaceId,
+                    documentId,
+                    stage.name,
+                    inputHash,
+                    modelVersion,
+                    StageStatus.FAILED.name,
+                    StageStatus.RUNNING.name,
+                    staleRunningCutoff
+                )
+            }
             reopened > 0
         }
     }
+
+    fun findByKey(workspaceId: String, documentId: String, stage: Stage, inputHash: String, modelVersion: String): StageExecutionRow? =
+        jdbcTemplate.queryOneOrNull(
+            """
+            SELECT * FROM stage_execution
+            WHERE workspace_id = ? AND document_id = ? AND stage = ? AND input_hash = ? AND model_version = ?
+            LIMIT 1
+            """.trimIndent(),
+            mapper,
+            workspaceId,
+            documentId,
+            stage.name,
+            inputHash,
+            modelVersion
+        )
 
     fun markDone(workspaceId: String, documentId: String, stage: Stage, inputHash: String, modelVersion: String) {
         jdbcTemplate.update(

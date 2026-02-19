@@ -65,16 +65,19 @@ class DocumentService(
         context: WorkspaceContext,
         title: String,
         bodyMarkdown: String?,
-        sourceType: String
+        sourceType: String,
+        parentDocumentId: String?
     ): Map<String, Any?> {
         requireEditor(context)
+        val resolvedParentDocumentId = resolveParentDocumentId(context, parentDocumentId)
         val document = documentRepository.create(
             workspaceId = context.workspaceId,
             title = title,
             bodyMarkdown = bodyMarkdown,
             bodyText = bodyMarkdown,
             sourceType = sourceType,
-            createdBy = context.userId
+            createdBy = context.userId,
+            parentDocumentId = resolvedParentDocumentId
         )
         pipelineStatusRepository.create(context.workspaceId, document.id)
         outboxService.enqueue(
@@ -83,7 +86,8 @@ class DocumentService(
             eventType = "DocumentSaved",
             payload = mapOf(
                 "document_id" to document.id,
-                "source_type" to sourceType
+                "source_type" to sourceType,
+                "parent_document_id" to resolvedParentDocumentId
             )
         )
         return mapOf("id" to document.id)
@@ -99,6 +103,7 @@ class DocumentService(
             "workspace_id" to document.workspaceId,
             "title" to document.title,
             "body_markdown" to (document.bodyMarkdown ?: ""),
+            "parent_document_id" to document.parentDocumentId,
             "status" to document.status,
             "version" to document.version,
             "updated_at" to document.updatedAt.toString(),
@@ -139,6 +144,7 @@ class DocumentService(
             mapOf(
                 "id" to document.id,
                 "title" to document.title,
+                "parent_document_id" to document.parentDocumentId,
                 "status" to document.status,
                 "updated_at" to document.updatedAt.toString(),
                 "pipeline_status" to mapOf(
@@ -214,6 +220,8 @@ class DocumentService(
         if (stageStatus(pipeline, parsedStage) != StageStatus.FAILED) {
             throw BadRequestException("stage must be FAILED to retry")
         }
+        pipelineStatusRepository.markRetryPendingFromStage(context.workspaceId, documentId, parsedStage)
+        documentRepository.updateStatus(context.workspaceId, documentId, "PROCESSING")
         val payload = mapOf(
             "document_id" to documentId,
             "stage" to parsedStage.name
@@ -238,6 +246,13 @@ class DocumentService(
         } catch (_: IllegalArgumentException) {
             throw BadRequestException("unsupported stage")
         }
+    }
+
+    private fun resolveParentDocumentId(context: WorkspaceContext, parentDocumentId: String?): String? {
+        val normalized = parentDocumentId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val parent = documentRepository.findByWorkspaceAndId(context.workspaceId, normalized)
+            ?: throw BadRequestException("parent document not found")
+        return parent.id
     }
 
     private fun stageStatus(pipeline: PipelineStatusRow, stage: Stage): StageStatus {
