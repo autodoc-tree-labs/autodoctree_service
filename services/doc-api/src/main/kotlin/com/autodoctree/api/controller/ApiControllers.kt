@@ -142,6 +142,22 @@ class WorkspaceController(
         workspaceService.removeMember(context, workspaceId, userId)
         return ResponseEntity.noContent().build()
     }
+
+    @PostMapping("/{workspaceId}/invites")
+    fun createInvite(
+        request: HttpServletRequest,
+        @PathVariable workspaceId: String,
+        @Valid @RequestBody body: CreateWorkspaceInviteRequest
+    ): Map<String, String> {
+        val context = workspaceContextResolver.resolve(request)
+        return workspaceService.createInvite(context, workspaceId, body.email, body.role)
+    }
+
+    @PostMapping("/invites/accept")
+    fun acceptInvite(@Valid @RequestBody body: AcceptWorkspaceInviteRequest): Map<String, String> {
+        val user = currentUserProvider.currentUser()
+        return workspaceService.acceptInvite(user.id, body.token)
+    }
 }
 
 @RestController
@@ -269,10 +285,47 @@ class SearchController(
         @RequestParam q: String,
         @RequestParam(defaultValue = "bm25") mode: String,
         @RequestParam(defaultValue = "0") page: Int,
-        @RequestParam(defaultValue = "20") size: Int
+        @RequestParam(defaultValue = "20") size: Int,
+        @RequestParam(defaultValue = "relevance") sort: String,
+        @RequestParam(defaultValue = "false") titleOnly: Boolean,
+        @RequestParam(required = false) createdBy: String?,
+        @RequestParam(required = false) updatedBy: String?,
+        @RequestParam(required = false) fromDate: String?,
+        @RequestParam(required = false) toDate: String?,
+        @RequestParam(defaultValue = "workspace") scope: String,
+        @RequestParam(required = false) scopePageId: String?,
+        @RequestParam(defaultValue = "false") debug: Boolean
     ): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)
-        return searchService.search(context, q, page, size)
+        return searchService.search(
+            context = context,
+            q = q,
+            page = page,
+            size = size,
+            mode = mode,
+            sort = sort,
+            titleOnly = titleOnly,
+            createdBy = createdBy,
+            updatedBy = updatedBy,
+            fromDate = fromDate,
+            toDate = toDate,
+            scope = scope,
+            scopePageId = scopePageId,
+            debug = debug
+        )
+    }
+
+    @GetMapping("/history")
+    fun searchHistory(request: HttpServletRequest, @RequestParam(defaultValue = "30") limit: Int): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return searchService.listHistory(context, limit)
+    }
+
+    @PostMapping("/history")
+    fun saveSearchHistory(request: HttpServletRequest, @Valid @RequestBody body: SearchHistoryRequest): ResponseEntity<Void> {
+        val context = workspaceContextResolver.resolve(request)
+        searchService.recordHistory(context, body.eventType, body.queryText, body.documentId, body.commandKey)
+        return ResponseEntity.status(HttpStatus.CREATED).build()
     }
 }
 
@@ -628,6 +681,17 @@ data class UpdateMemberRoleRequest(
     @field:NotBlank val role: String
 )
 
+
+
+data class CreateWorkspaceInviteRequest(
+    @field:Email val email: String,
+    @field:NotBlank val role: String
+)
+
+data class AcceptWorkspaceInviteRequest(
+    @field:NotBlank val token: String
+)
+
 data class CreateDocumentRequest(
     @field:NotBlank val title: String,
     val bodyMarkdown: String?,
@@ -651,6 +715,15 @@ data class PresignRequest(
 
 data class CompleteAttachmentRequest(
     @field:NotBlank val attachmentId: String
+)
+
+
+
+data class SearchHistoryRequest(
+    @field:NotBlank val eventType: String,
+    val queryText: String? = null,
+    val documentId: String? = null,
+    val commandKey: String? = null
 )
 
 data class RebuildRequest(

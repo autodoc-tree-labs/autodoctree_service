@@ -127,3 +127,7 @@ pnpm test:e2e
 - `I-xxxx` Infra/Platform
 
 > 모든 구현은 `tasks/backlog/*.md` 티켓에서 시작합니다.
+
+- Added Command Palette (Cmd/Ctrl+K) in web-user with unified command + document search, local filter persistence, and palette history endpoints.
+- Extended `/api/v1/search` for advanced filters (`titleOnly`, creator/updater/date/scope/sort/mode/debug) and added `/api/v1/search/history`.
+- Added invite + ACL/history schema in Flyway V13 and workspace invite APIs (`POST /workspaces/{id}/invites`, `POST /workspaces/invites/accept`).
