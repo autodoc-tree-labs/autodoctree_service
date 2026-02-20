@@ -54,6 +54,7 @@ data class DocumentRow(
     val version: Long,
     val deleted: Boolean,
     val createdBy: String,
+    val updatedBy: String,
     val createdAt: LocalDateTime,
     val updatedAt: LocalDateTime,
     val templateScore: Double? = null,
@@ -344,6 +345,7 @@ class WorkspaceRepository(private val jdbcTemplate: JdbcTemplate) {
             id = rs.getString("id"),
             name = rs.getString("name"),
             createdBy = rs.getString("created_by"),
+            updatedBy = rs.getString("updated_by"),
             createdAt = rs.getTimestamp("created_at").toLocalDateTime()
         )
     }
@@ -462,6 +464,7 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             version = rs.getLong("version"),
             deleted = rs.getBoolean("deleted"),
             createdBy = rs.getString("created_by"),
+            updatedBy = rs.getString("updated_by"),
             createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
             updatedAt = rs.getTimestamp("updated_at").toLocalDateTime(),
             templateScore = rs.getNullableDouble("template_score"),
@@ -486,8 +489,8 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             """
             INSERT INTO documents(
                 id, workspace_id, title, body_markdown, body_text, parent_document_id, source_type,
-                status, version, deleted, created_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, false, ?, ?, ?)
+                status, version, deleted, created_by, updated_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, false, ?, ?, ?, ?)
             """.trimIndent(),
             id,
             workspaceId,
@@ -497,6 +500,7 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             parentDocumentId,
             sourceType,
             "PROCESSING",
+            createdBy,
             createdBy,
             now,
             now
@@ -513,6 +517,7 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             version = 0,
             deleted = false,
             createdBy = createdBy,
+            updatedBy = createdBy,
             createdAt = now,
             updatedAt = now,
             templateScore = null,
@@ -575,18 +580,20 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
         documentId: String,
         expectedVersion: Long,
         title: String,
-        bodyMarkdown: String?
+        bodyMarkdown: String?,
+        updatedBy: String
     ) {
         val updated = jdbcTemplate.update(
             """
             UPDATE documents
-            SET title = ?, body_markdown = ?, body_text = ?, version = version + 1, updated_at = ?
+            SET title = ?, body_markdown = ?, body_text = ?, version = version + 1, updated_at = ?, updated_by = ?
             WHERE workspace_id = ? AND id = ? AND version = ? AND deleted = false
             """.trimIndent(),
             title,
             bodyMarkdown,
             bodyMarkdown,
             LocalDateTime.now(),
+            updatedBy,
             workspaceId,
             documentId,
             expectedVersion
@@ -2208,6 +2215,258 @@ class AuditLogRepository(private val jdbcTemplate: JdbcTemplate) {
         val sortDirection = if (sort.equals("asc", ignoreCase = true)) "ASC" else "DESC"
         sql.append(" ORDER BY created_at $sortDirection, id $sortDirection LIMIT ?")
         args.add(limit.coerceIn(1, 500))
+        return jdbcTemplate.query(sql.toString(), mapper, *args.toTypedArray())
+    }
+}
+
+data class PaletteHistoryRow(
+    val id: String,
+    val workspaceId: String,
+    val userId: String,
+    val eventType: String,
+    val queryText: String?,
+    val documentId: String?,
+    val commandKey: String?,
+    val createdAt: LocalDateTime
+)
+
+@Repository
+class PaletteHistoryRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<PaletteHistoryRow> { rs: ResultSet, _: Int ->
+        PaletteHistoryRow(
+            id = rs.getString("id"),
+            workspaceId = rs.getString("workspace_id"),
+            userId = rs.getString("user_id"),
+            eventType = rs.getString("event_type"),
+            queryText = rs.getString("query_text"),
+            documentId = rs.getString("document_id"),
+            commandKey = rs.getString("command_key"),
+            createdAt = rs.getTimestamp("created_at").toLocalDateTime()
+        )
+    }
+
+    fun insert(workspaceId: String, userId: String, eventType: String, queryText: String?, documentId: String?, commandKey: String?) {
+        jdbcTemplate.update(
+            """
+            INSERT INTO palette_history(id, workspace_id, user_id, event_type, query_text, document_id, command_key, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+            UUID.randomUUID().toString(),
+            workspaceId,
+            userId,
+            eventType,
+            queryText,
+            documentId,
+            commandKey,
+            LocalDateTime.now()
+        )
+    }
+
+    fun list(workspaceId: String, userId: String, limit: Int): List<PaletteHistoryRow> = jdbcTemplate.query(
+        """
+        SELECT *
+        FROM palette_history
+        WHERE workspace_id = ? AND user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """.trimIndent(),
+        mapper,
+        workspaceId,
+        userId,
+        limit.coerceIn(1, 200)
+    )
+}
+
+@Repository
+class DocumentAclRepository(private val jdbcTemplate: JdbcTemplate) {
+    fun upsert(workspaceId: String, documentId: String, principalUserId: String, permission: String, grantedBy: String) {
+        jdbcTemplate.update(
+            """
+            INSERT INTO document_acl(id, workspace_id, document_id, principal_user_id, permission, granted_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (workspace_id, document_id, principal_user_id)
+            DO UPDATE SET permission = EXCLUDED.permission, granted_by = EXCLUDED.granted_by
+            """.trimIndent(),
+            UUID.randomUUID().toString(),
+            workspaceId,
+            documentId,
+            principalUserId,
+            permission,
+            grantedBy,
+            LocalDateTime.now()
+        )
+    }
+
+    fun canAccess(workspaceId: String, documentId: String, userId: String): Boolean {
+        val count = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM document_acl
+            WHERE workspace_id = ? AND document_id = ? AND principal_user_id = ?
+            """.trimIndent(),
+            Long::class.java,
+            workspaceId,
+            documentId,
+            userId
+        ) ?: 0
+        return count > 0
+    }
+}
+
+@Repository
+class WorkspaceInviteRepository(private val jdbcTemplate: JdbcTemplate) {
+    fun create(workspaceId: String, email: String, role: String, tokenHash: String, invitedBy: String, expiresAt: LocalDateTime): String {
+        val id = UUID.randomUUID().toString()
+        jdbcTemplate.update(
+            """
+            INSERT INTO workspace_invites(id, workspace_id, email, role, token_hash, invited_by, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+            id,
+            workspaceId,
+            email,
+            role,
+            tokenHash,
+            invitedBy,
+            expiresAt,
+            LocalDateTime.now()
+        )
+        return id
+    }
+
+    fun findActiveByTokenHash(tokenHash: String): Map<String, Any?>? {
+        val rows = jdbcTemplate.queryForList(
+            """
+            SELECT *
+            FROM workspace_invites
+            WHERE token_hash = ?
+              AND accepted_at IS NULL
+              AND expires_at > ?
+            """.trimIndent(),
+            tokenHash,
+            LocalDateTime.now()
+        )
+        return rows.firstOrNull()
+    }
+
+    fun markAccepted(id: String, userId: String) {
+        jdbcTemplate.update(
+            "UPDATE workspace_invites SET accepted_at = ?, accepted_by = ? WHERE id = ?",
+            LocalDateTime.now(),
+            userId,
+            id
+        )
+    }
+}
+
+data class SearchDocumentRow(
+    val id: String,
+    val title: String,
+    val updatedAt: LocalDateTime,
+    val createdAt: LocalDateTime,
+    val createdBy: String,
+    val updatedBy: String,
+    val parentDocumentId: String?
+)
+
+@Repository
+class SearchDocumentRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<SearchDocumentRow> { rs: ResultSet, _: Int ->
+        SearchDocumentRow(
+            id = rs.getString("id"),
+            title = rs.getString("title"),
+            updatedAt = rs.getTimestamp("updated_at").toLocalDateTime(),
+            createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
+            createdBy = rs.getString("created_by"),
+            updatedBy = rs.getString("updated_by"),
+            parentDocumentId = rs.getString("parent_document_id")
+        )
+    }
+
+    fun search(
+        workspaceId: String,
+        userId: String,
+        query: String,
+        titleOnly: Boolean,
+        createdBy: String?,
+        updatedBy: String?,
+        fromDate: LocalDateTime?,
+        toDate: LocalDateTime?,
+        scopePageId: String?,
+        sortSql: String,
+        size: Int,
+        offset: Int
+    ): List<SearchDocumentRow> {
+        val args = mutableListOf<Any>(workspaceId, userId, userId)
+        val sql = StringBuilder(
+            """
+            SELECT d.*
+            FROM documents d
+            WHERE d.workspace_id = ?
+              AND d.deleted = false
+              AND (
+                EXISTS (SELECT 1 FROM memberships m WHERE m.workspace_id = d.workspace_id AND m.user_id = ?)
+                OR EXISTS (
+                  SELECT 1 FROM document_acl acl
+                  WHERE acl.workspace_id = d.workspace_id
+                    AND acl.document_id = d.id
+                    AND acl.principal_user_id = ?
+                )
+              )
+            """.trimIndent()
+        )
+
+        val pattern = "%${query.lowercase()}%"
+        if (titleOnly) {
+            sql.append(" AND LOWER(d.title) LIKE ?")
+            args.add(pattern)
+        } else {
+            sql.append(" AND (LOWER(d.title) LIKE ? OR LOWER(COALESCE(d.body_text, '')) LIKE ?)")
+            args.add(pattern)
+            args.add(pattern)
+        }
+
+        if (!createdBy.isNullOrBlank()) {
+            sql.append(" AND d.created_by = ?")
+            args.add(createdBy)
+        }
+        if (!updatedBy.isNullOrBlank()) {
+            sql.append(" AND d.updated_by = ?")
+            args.add(updatedBy)
+        }
+        if (fromDate != null) {
+            sql.append(" AND d.updated_at >= ?")
+            args.add(fromDate)
+        }
+        if (toDate != null) {
+            sql.append(" AND d.updated_at <= ?")
+            args.add(toDate)
+        }
+        if (!scopePageId.isNullOrBlank()) {
+            sql.append(
+                """
+                AND d.id IN (
+                  WITH RECURSIVE subtree AS (
+                    SELECT id FROM documents WHERE workspace_id = ? AND id = ? AND deleted = false
+                    UNION ALL
+                    SELECT child.id
+                    FROM documents child
+                    JOIN subtree s ON child.parent_document_id = s.id
+                    WHERE child.workspace_id = ? AND child.deleted = false
+                  )
+                  SELECT id FROM subtree
+                )
+                """.trimIndent()
+            )
+            args.add(workspaceId)
+            args.add(scopePageId)
+            args.add(workspaceId)
+        }
+
+        sql.append(" ORDER BY $sortSql LIMIT ? OFFSET ?")
+        args.add(size)
+        args.add(offset)
+
         return jdbcTemplate.query(sql.toString(), mapper, *args.toTypedArray())
     }
 }

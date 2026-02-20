@@ -263,3 +263,11 @@ docker compose --profile ml up -d reranker-api
 - Do not log document body, extracted text, chunk text, or presigned URLs.
 - Tenant-scoped endpoints require `X-Workspace-Id`.
 - `SECURITY_LOG_SANITIZER_ENABLED=true` / `SECURITY_LOG_MAX_STRING_LENGTH=240`로 감사 로그 payload sanitization을 기본 강제한다.
+
+## Command Palette / Advanced Search (new)
+- Open palette: `Cmd+K` (mac) / `Ctrl+K` (win/linux).
+- API: `GET /api/v1/search` now supports advanced params and optional debug metadata.
+- History API: `GET/POST /api/v1/search/history`.
+- Workspace invites (dev mock token flow):
+  - create invite `POST /api/v1/workspaces/{workspaceId}/invites`
+  - accept invite `POST /api/v1/workspaces/invites/accept`
