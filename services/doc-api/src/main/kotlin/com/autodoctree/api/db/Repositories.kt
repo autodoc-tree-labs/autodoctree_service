@@ -64,6 +64,13 @@ data class DocumentRow(
     val parentDocumentId: String? = null
 )
 
+data class DocumentFavoriteRow(
+    val workspaceId: String,
+    val userId: String,
+    val documentId: String,
+    val createdAt: LocalDateTime
+)
+
 data class PipelineStatusRow(
     val workspaceId: String,
     val documentId: String,
@@ -345,7 +352,6 @@ class WorkspaceRepository(private val jdbcTemplate: JdbcTemplate) {
             id = rs.getString("id"),
             name = rs.getString("name"),
             createdBy = rs.getString("created_by"),
-            updatedBy = rs.getString("updated_by"),
             createdAt = rs.getTimestamp("created_at").toLocalDateTime()
         )
     }
@@ -534,6 +540,13 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
         documentId
     )
 
+    fun findDeletedByWorkspaceAndId(workspaceId: String, documentId: String): DocumentRow? = jdbcTemplate.queryOneOrNull(
+        "SELECT * FROM documents WHERE workspace_id = ? AND id = ? AND deleted = true",
+        mapper,
+        workspaceId,
+        documentId
+    )
+
     fun listByWorkspace(
         workspaceId: String,
         status: String?,
@@ -696,6 +709,134 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
         mapper,
         workspaceId
     )
+
+    fun listDeletedByWorkspace(
+        workspaceId: String,
+        query: String?,
+        page: Int,
+        size: Int
+    ): List<DocumentRow> {
+        val sql = StringBuilder("SELECT * FROM documents WHERE workspace_id = ? AND deleted = true")
+        val args = mutableListOf<Any>(workspaceId)
+        if (!query.isNullOrBlank()) {
+            sql.append(" AND (LOWER(title) LIKE ? OR LOWER(COALESCE(body_text, '')) LIKE ?)")
+            val pattern = "%${query.lowercase()}%"
+            args.add(pattern)
+            args.add(pattern)
+        }
+        sql.append(" ORDER BY updated_at DESC LIMIT ? OFFSET ?")
+        args.add(size)
+        args.add(page * size)
+        return jdbcTemplate.query(sql.toString(), mapper, *args.toTypedArray())
+    }
+
+    fun countDeletedByWorkspace(workspaceId: String, query: String?): Long {
+        val sql = StringBuilder("SELECT COUNT(*) FROM documents WHERE workspace_id = ? AND deleted = true")
+        val args = mutableListOf<Any>(workspaceId)
+        if (!query.isNullOrBlank()) {
+            sql.append(" AND (LOWER(title) LIKE ? OR LOWER(COALESCE(body_text, '')) LIKE ?)")
+            val pattern = "%${query.lowercase()}%"
+            args.add(pattern)
+            args.add(pattern)
+        }
+        return jdbcTemplate.queryForObject(sql.toString(), Long::class.java, *args.toTypedArray()) ?: 0
+    }
+
+    fun restore(workspaceId: String, documentId: String, status: String = "PROCESSING") {
+        jdbcTemplate.update(
+            """
+            UPDATE documents
+            SET deleted = false, status = ?, parent_document_id = NULL, updated_at = ?
+            WHERE workspace_id = ? AND id = ? AND deleted = true
+            """.trimIndent(),
+            status,
+            LocalDateTime.now(),
+            workspaceId,
+            documentId
+        )
+    }
+
+    fun moveParent(workspaceId: String, documentId: String, parentDocumentId: String?) {
+        jdbcTemplate.update(
+            """
+            UPDATE documents
+            SET parent_document_id = ?, updated_at = ?
+            WHERE workspace_id = ? AND id = ? AND deleted = false
+            """.trimIndent(),
+            parentDocumentId,
+            LocalDateTime.now(),
+            workspaceId,
+            documentId
+        )
+    }
+}
+
+@Repository
+class DocumentFavoriteRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<DocumentFavoriteRow> { rs: ResultSet, _: Int ->
+        DocumentFavoriteRow(
+            workspaceId = rs.getString("workspace_id"),
+            userId = rs.getString("user_id"),
+            documentId = rs.getString("document_id"),
+            createdAt = rs.getTimestamp("created_at").toLocalDateTime()
+        )
+    }
+
+    fun listByWorkspaceAndUser(workspaceId: String, userId: String): List<DocumentFavoriteRow> = jdbcTemplate.query(
+        """
+        SELECT f.workspace_id, f.user_id, f.document_id, f.created_at
+        FROM document_favorite f
+        JOIN documents d ON d.id = f.document_id
+        WHERE f.workspace_id = ?
+          AND f.user_id = ?
+          AND d.workspace_id = f.workspace_id
+          AND d.deleted = false
+        ORDER BY f.created_at DESC
+        """.trimIndent(),
+        mapper,
+        workspaceId,
+        userId
+    )
+
+    fun add(workspaceId: String, userId: String, documentId: String) {
+        try {
+            jdbcTemplate.update(
+                """
+                INSERT INTO document_favorite(workspace_id, user_id, document_id, created_at)
+                VALUES (?, ?, ?, ?)
+                """.trimIndent(),
+                workspaceId,
+                userId,
+                documentId,
+                LocalDateTime.now()
+            )
+        } catch (_: DuplicateKeyException) {
+            // idempotent add
+        }
+    }
+
+    fun remove(workspaceId: String, userId: String, documentId: String) {
+        jdbcTemplate.update(
+            """
+            DELETE FROM document_favorite
+            WHERE workspace_id = ? AND user_id = ? AND document_id = ?
+            """.trimIndent(),
+            workspaceId,
+            userId,
+            documentId
+        )
+    }
+
+    fun removeByDocument(workspaceId: String, documentId: String) {
+        jdbcTemplate.update(
+            """
+            DELETE FROM document_favorite
+            WHERE workspace_id = ? AND document_id = ?
+            """.trimIndent(),
+            workspaceId,
+            documentId
+        )
+    }
 }
 
 @Repository
@@ -1082,6 +1223,31 @@ class EmbeddingRepository(private val jdbcTemplate: JdbcTemplate) {
         """.trimIndent(),
         mapper,
         workspaceId,
+        modelVersion
+    )
+
+    fun listByWorkspaceAndDocumentAndModel(
+        workspaceId: String,
+        documentId: String,
+        modelVersion: String
+    ): List<EmbeddingRow> = jdbcTemplate.query(
+        """
+        SELECT id, workspace_id, document_id, target_type, target_id, input_hash, vector_json, model_version, created_at
+        FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY workspace_id, document_id, target_type, target_id, model_version
+                       ORDER BY created_at DESC
+                   ) AS rn
+            FROM embeddings
+            WHERE workspace_id = ? AND document_id = ? AND model_version = ?
+        ) latest
+        WHERE latest.rn = 1
+        ORDER BY target_type, target_id
+        """.trimIndent(),
+        mapper,
+        workspaceId,
+        documentId,
         modelVersion
     )
 }

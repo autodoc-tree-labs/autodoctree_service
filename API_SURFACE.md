@@ -101,6 +101,26 @@ Response (example):
 ## GET /documents
 Query: `status`, `q`, `page`, `size`, `sort`
 
+## GET /documents/trash
+Query: `q`, `page`, `size`
+
+## GET /documents/favorites
+Response:
+```json
+{
+  "items": [
+    { "document_id": "doc_1", "created_at": "2026-02-20T10:12:03" }
+  ],
+  "total": 1
+}
+```
+
+## POST /documents/{documentId}/favorite
+- 현재 사용자 기준으로 문서를 즐겨찾기에 추가 (멱등)
+
+## DELETE /documents/{documentId}/favorite
+- 현재 사용자 기준으로 문서를 즐겨찾기에서 제거 (멱등)
+
 ## PATCH /documents/{documentId}
 - title/body updates (optimistic locking recommended)
 ```json
@@ -111,6 +131,13 @@ Query: `status`, `q`, `page`, `size`, `sort`
 }
 ```
 
+## POST /documents/{documentId}/move
+```json
+{ "parent_document_id": "doc_parent_id_or_null" }
+```
+- `parent_document_id`가 `null`이면 루트로 이동
+- 자기 자신/자식 하위로 이동하려 하면 `400`
+
 ## POST /documents/{documentId}/pipeline/retry
 ```json
 { "stage": "EMBED" }
@@ -118,9 +145,16 @@ Query: `status`, `q`, `page`, `size`, `sort`
 - `OWNER|MEMBER` only
 - 해당 stage 상태가 `FAILED`일 때만 허용
 - outbox `StageRetry` 이벤트를 enqueue
+- 요청 즉시 선택 stage부터 downstream stage 상태를 `PENDING`으로 리셋하고 문서 상태를 `PROCESSING`으로 전환
+- 워커는 선택한 stage부터 downstream stage까지 연쇄 실행
+  - 예: `stage=EMBED` -> `EMBED -> INDEX -> TREE`
+  - 동일 input hash의 stage execution이 이미 `DONE`이면 해당 pipeline stage를 `DONE`으로 동기화하여 상태 불일치를 정리
 
 ## DELETE /documents/{documentId}
 - soft delete
+
+## POST /documents/{documentId}/restore
+- 휴지통 문서를 복원하고 pipeline을 다시 enqueue
 
 ---
 
@@ -149,14 +183,46 @@ Response:
 
 # 5) Search
 ## GET /search
-Query: `q` (required), `mode=bm25|vector|hybrid`, `page`, `size`, `sort`
+Query:
+- `q` (required)
+- `mode=bm25|hybrid` (default `bm25`)
+- `debug=true|false` (default `false`)
+- `page`, `size`
+
+Notes:
+- workspace scope는 `X-Workspace-Id` + membership 검증으로 강제됩니다.
+- lexical(BM25)과 vector(kNN) 모두 동일한 `workspace_id` filter를 적용합니다.
+- hybrid는 BM25 + vector 결과를 RRF로 결합하며, vector 경로 실패 시 BM25로 fail-soft 합니다.
 
 Response:
 ```json
 {
   "items": [
     { "document_id": "doc_1", "title": "Locking strategy", "score": 12.3 }
-  ]
+  ],
+  "debug": {
+    "workspace_id": "ws_1",
+    "index_alias": "docs-active",
+    "resolved_index_name": ["docs-v2-20260219010101"],
+    "workspace_indexed_doc_count": 42,
+    "search_backend": "hybrid",
+    "lang_detected": "ko",
+    "vector_used": true,
+    "vector_reason": "ok",
+    "bm25_operator": "and",
+    "bm25_minimum_should_match": null,
+    "bm25_legacy_fallback": false,
+    "bm25_recall_fallback_applied": false,
+    "top_ranks": [
+      {
+        "document_id": "doc_1",
+        "bm25_rank": 1,
+        "knn_rank": 2,
+        "rrf_score": 0.0325,
+        "score": 0.0325
+      }
+    ]
+  }
 }
 ```
 

@@ -33,6 +33,7 @@
 | B-0901 | User Rule Engine v1 (조건→노드 라우팅 hardsoft) | `tasks/backlog/B-0901 — User Rule Engine v1 (조건노드 라우팅 hardsoft).md` |
 | B-0902 | Active Learning Queue v1 (관계 질문 생성소비) | `tasks/backlog/B-0902 — Active Learning Queue v1 (관계 질문 생성소비).md` |
 | B-1101 | Multi-Tenancy Hardening v2 (DBSearchCacheObjectStorage leak tests) | `tasks/backlog/B-1101 — Multi-Tenancy Hardening v2 (DBSearchCacheObjectStorage leak tests).md` |
+| B-1207 | Search v2 Multilingual Hybrid BM25+Vector | `tasks/backlog/B-1207 — Search v2 Multilingual Hybrid BM25+Vector.md` |
 | I-0101 | Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards | `tasks/backlog/I-0101 — Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards.md` |
 | I-0201 | Ollama Embedding Setup (bge-m3) — Offline Bootstrap & Healthchecks | `tasks/backlog/I-0201 — Ollama Embedding Setup (bge-m3) — Offline Bootstrap  Healthchecks.md` |
 | I-0301 | OpenSearch Korean Analyzer (nori) for Search Index + Field Mapping | `tasks/backlog/I-0301 — OpenSearch Korean Analyzer (nori) for Search Index  Field Mapping.md` |
@@ -40,8 +41,11 @@
 | I-0602 | Optional: hSBM Worker (Python) — Offline Hierarchical Structure Inference | `tasks/backlog/I-0602 — Optional hSBM Worker (Python) — Offline Hierarchical Structure Inference.md` |
 | I-1001 | Offline Model Packaging & Bootstrap (bge-m3 llama3.1 reranker clip) | `tasks/backlog/I-1001 — Offline Model Packaging  Bootstrap (bge-m3 llama3.1 reranker clip).md` |
 | I-1101 | Security Baseline for Local (secretsenv PII logging policy enforcement) | `tasks/backlog/I-1101 — Security Baseline for Local (secretsenv PII logging policy enforcement).md` |
+| I-1211 | Test workspace SQL seed bootstrap for document and node classification | `tasks/backlog/I-1211 — Test workspace SQL seed bootstrap for document and node classification.md` |
 | U-0302 | User UI: Template Bin & Unsorted Inbox (격리유보 영역 UX) | `tasks/backlog/U-0302 — User UI Template Bin  Unsorted Inbox (격리유보 영역 UX).md` |
 | U-0402 | User UI: Confidence-aware Placement (후보 폴더 Top-3 제안 + 원클릭 확정) | `tasks/backlog/U-0402 — User UI Confidence-aware Placement (후보 폴더 Top-3 제안  원클릭 확정).md` |
 | U-0801 | User UI: Multi-View Navigator (TopicProjectTimelineVersion) | `tasks/backlog/U-0801 — User UI Multi-View Navigator (TopicProjectTimelineVersion).md` |
 | U-0802 | User UI: Explain Drawer v2 (근거이웃사유) + 수용되돌림 | `tasks/backlog/U-0802 — User UI Explain Drawer v2 (근거이웃사유)  수용되돌림.md` |
 | U-0902 | User UI: Smart Questions Inbox (2지선다쌍비교) | `tasks/backlog/U-0902 — User UI Smart Questions Inbox (2지선다쌍비교).md` |
+| U-1209 | Persist login session across refresh in web-user | `tasks/backlog/U-1209 — Persist login session across refresh in web-user.md` |
+| U-1210 | Workspace IA refactor for web-user app shell and workspace routing | `tasks/backlog/U-1210 — Workspace IA refactor for web-user app shell and workspace routing.md` |

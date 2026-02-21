@@ -47,6 +47,42 @@ docker compose --profile llm --profile llm-init up ollama-init
 ```
 임베딩은 `TITLE`, `BODY_SUMMARY`, `SECTION`, `SECTION_CENTROID` 채널로 저장되고 트리 리빌드 시 가중 결합됩니다.
 
+### Search v2 (Multilingual + Hybrid)
+- 기본 lexical 검색은 `multi_match` + workspace filter(`workspace_id`) 강제 적용입니다.
+- v2 템플릿은 `title/body`에 `ko/std/edge` 멀티필드를 사용합니다.
+- 한국어는 nori, 다국어는 ICU(미설치 시 standard+asciifolding fallback)로 분석합니다.
+- Hybrid는 BM25 + vector(kNN) 결과를 RRF(`k=60`)로 결합합니다.
+- `GET /api/v1/search?...&debug=true`에서 아래 운영 진단이 가능합니다.
+  - `workspace_id`, `index_alias`, `resolved_index_name`
+  - `workspace_indexed_doc_count`
+  - `search_backend`, `lang_detected`, `vector_used`, `vector_reason`
+  - `top_ranks[].bm25_rank|knn_rank|rrf_score`
+
+권장 환경값:
+- `FEATURE_HYBRID_SEARCH=true`
+- `OPENSEARCH_TEMPLATE_NAME=docs-template-v2`
+- `OPENSEARCH_INDEX_PREFIX=docs`
+- `OPENSEARCH_INDEX_VERSION=v2`
+- `OPENSEARCH_VECTOR_FIELD=doc_embedding`
+- `SEARCH_HYBRID_RRF_K=60`
+- `SEARCH_HYBRID_CANDIDATE_SIZE=100`
+- `SEARCH_HYBRID_KNN_TOP_K=100`
+
+Blue/Green 마이그레이션:
+```bash
+WS_ID=<workspace-id> ./scripts/opensearch/diagnose-v2.sh
+./scripts/opensearch/create-template-v2.sh
+TARGET_INDEX="$(./scripts/opensearch/create-index-v2.sh | awk -F= '/^\[create-index-v2\] index=/{print $2}')"
+./scripts/opensearch/reindex-to-v2.sh docs-active "$TARGET_INDEX"
+./scripts/opensearch/validate-counts.sh docs-active "$TARGET_INDEX"
+./scripts/opensearch/alias-swap.sh docs-active "$TARGET_INDEX"
+```
+
+검색 스모크:
+```bash
+WS_ID=<workspace-id> ./scripts/search-smoke.sh
+```
+
 ### Tree Rebuild Quality (defaults)
 - `neighbor-normalize=true`인 경우 무관 문서 cosine도 정규화 후 `0.5` 근처가 될 수 있으므로, 낮은 임계값(`0.25`)은 과연결을 유발할 수 있습니다.
 - normalize 환경에서는 `minSimilarity`를 보통 `0.6~0.8` 범위로 두고 시작하는 것이 안전합니다.
@@ -82,11 +118,6 @@ docker compose --profile observability up -d prometheus grafana
 - Prometheus: `http://localhost:59090`
 - Grafana: `http://localhost:53000` (`admin` / `admin`)
 
-OpenSearch reindex + alias swap helper:
-```bash
-./scripts/opensearch_reindex_alias_swap.sh docs-active docs-v1-000002
-```
-
 Offline model manifest workflow:
 ```bash
 python3 scripts/model_manifest_lock.py --manifest models/manifest.json
@@ -97,12 +128,53 @@ python3 scripts/model_manifest_verify.py --manifest models/manifest.json
 - `services/doc-api` Run Config (`com.autodoctree.api.DocApiApplicationKt`)
 - 기본 포트 기준 추가 env 없이 실행 가능
 
+### Seed: `Test` workspace + diverse documents (SQL + shell)
+`Test` 워크스페이스와 문서/하위 문서(문서 분류용), 다양한 주제 문서(노드 분류용)를 SQL로 주입합니다.
+
+```bash
+# doc-api를 먼저 1회 실행해 owner@autodoc.local 시드 계정을 생성
+./scripts/seed_test_workspace.sh
+```
+
+- SQL 원본: `scripts/sql/seed_test_workspace.sql`
+- 스크립트는 idempotent이며 재실행해도 중복 삽입을 방지합니다.
+- `DocumentSaved` outbox 이벤트도 함께 enqueue되어 worker가 ingest→embed→index→tree를 이어서 처리할 수 있습니다.
+
 3) front
 ```bash
 pnpm -w install
 pnpm -C web-user dev --port 5174
 pnpm -C web-admin dev --port 5173
 ```
+
+### web-user IA v2 (Workspace-first)
+- `web-user`는 상단 탭 대신 `Sidebar + Main + Thin Header` 구조를 사용합니다.
+- Sidebar 구성:
+  - Workspace switcher
+  - Quick actions (`새 페이지`, `검색/Cmd+K`)
+  - `Favorites` (사용자별 즐겨찾기 문서, `...` 메뉴에서 토글)
+  - `Pages` 문서 트리(부모-자식, 드래그로 하위/루트 이동)
+  - `Views` (`Documents`, `Tree`, `Questions`, `Trash`)
+- Main은 문서 중심 흐름입니다:
+  - 문서 클릭 시 `/w/:workspaceId/doc/:docId` 편집 화면
+  - 문서함/트리/질문함은 Sidebar View 전환으로 접근
+
+주요 라우트:
+- `/w/:workspaceId` : 기본 Documents view
+- `/w/:workspaceId/doc/:docId` : 문서 에디터
+- `/w/:workspaceId/doc/:docId/details` : 파이프라인/첨부/설명 상세
+- `/w/:workspaceId/view/documents`
+- `/w/:workspaceId/view/tree`
+- `/w/:workspaceId/view/questions`
+- `/w/:workspaceId/view/trash`
+
+단축키:
+- `Cmd/Ctrl + K`: Command Palette(문서 열기/새 페이지/뷰 이동)
+- 에디터에서 `Cmd/Ctrl + S`: 문서 저장
+
+워크스페이스 컨텍스트:
+- 로그인 후 마지막 워크스페이스(`localStorage`)를 우선 복원합니다.
+- 없으면 첫 번째 워크스페이스를 자동 선택합니다.
 
 4) tests/build
 ```bash

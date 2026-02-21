@@ -184,7 +184,8 @@ class OutboxWorker(
                     documentId = documentId,
                     attachmentObjectKey = null,
                     attachmentContentType = null,
-                    onlyStage = stage
+                    onlyStage = stage,
+                    cascadeFromStage = true
                 )
             }
         }
@@ -203,18 +204,37 @@ class OutboxWorker(
         documentId: String,
         attachmentObjectKey: String?,
         attachmentContentType: String?,
-        onlyStage: Stage?
+        onlyStage: Stage?,
+        cascadeFromStage: Boolean = false
     ) {
         val document = documentRepository.findByWorkspaceAndId(workspaceId, documentId) ?: return
 
-        val runIngest = onlyStage == null || onlyStage == Stage.INGEST
-        val runEmbed = onlyStage == null || onlyStage == Stage.EMBED
-        val runIndex = onlyStage == null || onlyStage == Stage.INDEX
-        val runTree = onlyStage == null || onlyStage == Stage.TREE
+        fun shouldRun(stage: Stage): Boolean {
+            if (onlyStage == null) {
+                return true
+            }
+            if (!cascadeFromStage) {
+                return stage == onlyStage
+            }
+            return stage.ordinal >= onlyStage.ordinal
+        }
+
+        val runIngest = shouldRun(Stage.INGEST)
+        val runEmbed = shouldRun(Stage.EMBED)
+        val runIndex = shouldRun(Stage.INDEX)
+        val runTree = shouldRun(Stage.TREE)
+        val allowReopenDone = onlyStage != null
 
         if (runIngest) {
             val inputHash = sha256((document.updatedAt.toString() + (attachmentObjectKey ?: "") + Stage.INGEST.name))
-            executeStage(workspaceId, documentId, Stage.INGEST, inputHash, "tika-v1") {
+            val ingestStatus = executeStage(
+                workspaceId = workspaceId,
+                documentId = documentId,
+                stage = Stage.INGEST,
+                inputHash = inputHash,
+                modelVersion = "tika-v1",
+                allowReopenDone = allowReopenDone
+            ) {
                 val text: String
                 val qualityFlags: Set<String>
                 if (!attachmentObjectKey.isNullOrBlank()) {
@@ -237,6 +257,9 @@ class OutboxWorker(
                 )
                 documentSectionRepository.replaceSections(workspaceId, documentId, sections)
                 documentRepository.updateBodyText(workspaceId, documentId, text, "PROCESSING")
+            }
+            if (ingestStatus != StageStatus.DONE) {
+                return
             }
         }
 
@@ -263,7 +286,14 @@ class OutboxWorker(
             val stageInputHash = sha256(
                 payloadHashes.values.sorted().joinToString("|") + "|" + modelVersion + "|" + Stage.EMBED.name
             )
-            executeStage(workspaceId, documentId, Stage.EMBED, stageInputHash, modelVersion) {
+            val embedStatus = executeStage(
+                workspaceId = workspaceId,
+                documentId = documentId,
+                stage = Stage.EMBED,
+                inputHash = stageInputHash,
+                modelVersion = modelVersion,
+                allowReopenDone = allowReopenDone
+            ) {
                 val misses = mutableListOf<Pair<EmbeddingPayload, String>>()
                 payloadHashes.forEach { (payload, inputHash) ->
                     val cached = embeddingRepository.findByInputHash(
@@ -340,27 +370,50 @@ class OutboxWorker(
                     payloads.size
                 )
             }
+            if (embedStatus != StageStatus.DONE) {
+                return
+            }
         }
 
         if (runIndex) {
             val inputHash = sha256(document.updatedAt.toString() + Stage.INDEX.name)
-            executeStage(workspaceId, documentId, Stage.INDEX, inputHash, "bm25-v1") {
+            val indexStatus = executeStage(
+                workspaceId = workspaceId,
+                documentId = documentId,
+                stage = Stage.INDEX,
+                inputHash = inputHash,
+                modelVersion = "bm25-v1",
+                allowReopenDone = allowReopenDone
+            ) {
                 tenantSearchClient.upsert(workspaceId, documentId)
+            }
+            if (indexStatus != StageStatus.DONE) {
+                return
             }
         }
 
         if (runTree) {
             val inputHash = sha256(document.updatedAt.toString() + Stage.TREE.name)
-            executeStage(workspaceId, documentId, Stage.TREE, inputHash, "tree-v1") {
+            val treeStatus = executeStage(
+                workspaceId = workspaceId,
+                documentId = documentId,
+                stage = Stage.TREE,
+                inputHash = inputHash,
+                modelVersion = "tree-v1",
+                allowReopenDone = allowReopenDone
+            ) {
                 if (onlyStage == null) {
                     rebuildDebounceQueue.request(workspaceId, "PIPELINE_STAGE_TREE")
                 } else {
                     treeService.rebuildWorkspace(workspaceId)
                 }
             }
+            if (treeStatus != StageStatus.DONE) {
+                return
+            }
         }
 
-        if (onlyStage == null) {
+        if (onlyStage == null || (cascadeFromStage && runTree)) {
             documentRepository.updateStatus(workspaceId, documentId, "READY")
         }
     }
@@ -371,11 +424,46 @@ class OutboxWorker(
         stage: Stage,
         inputHash: String,
         modelVersion: String,
+        allowReopenDone: Boolean = false,
         block: () -> Unit
-    ) {
-        val started = stageExecutionRepository.tryStart(workspaceId, documentId, stage, inputHash, modelVersion)
+    ): StageStatus {
+        val started = stageExecutionRepository.tryStart(
+            workspaceId = workspaceId,
+            documentId = documentId,
+            stage = stage,
+            inputHash = inputHash,
+            modelVersion = modelVersion,
+            allowReopenDone = allowReopenDone
+        )
         if (!started) {
-            return
+            val existing = stageExecutionRepository.findByKey(
+                workspaceId = workspaceId,
+                documentId = documentId,
+                stage = stage,
+                inputHash = inputHash,
+                modelVersion = modelVersion
+            )
+            val currentStatus = existing?.status ?: StageStatus.RUNNING
+            when (currentStatus) {
+                StageStatus.DONE -> pipelineStatusRepository.updateStage(workspaceId, documentId, stage, StageStatus.DONE, null)
+                StageStatus.RUNNING -> pipelineStatusRepository.updateStage(workspaceId, documentId, stage, StageStatus.RUNNING, null)
+                StageStatus.FAILED -> pipelineStatusRepository.updateStage(
+                    workspaceId,
+                    documentId,
+                    stage,
+                    StageStatus.FAILED,
+                    existing?.message ?: "failed"
+                )
+                StageStatus.PENDING -> pipelineStatusRepository.updateStage(workspaceId, documentId, stage, StageStatus.PENDING, null)
+            }
+            logger.info(
+                "stage_execution_reused workspace_id={} document_id={} stage={} status={}",
+                workspaceId,
+                documentId,
+                stage.name,
+                currentStatus.name
+            )
+            return currentStatus
         }
 
         val timerSample = Timer.start(meterRegistry)
@@ -385,6 +473,7 @@ class OutboxWorker(
             pipelineStatusRepository.updateStage(workspaceId, documentId, stage, StageStatus.DONE)
             stageExecutionRepository.markDone(workspaceId, documentId, stage, inputHash, modelVersion)
             stageSuccessCounters[stage]?.increment()
+            return StageStatus.DONE
         } catch (ex: Exception) {
             pipelineStatusRepository.updateStage(
                 workspaceId,

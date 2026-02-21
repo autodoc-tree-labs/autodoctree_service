@@ -144,6 +144,44 @@ class TenantIsolationIntegrationTest {
             .andExpect(jsonPath("$.items[?(@.id == '$wsADocId')]").isEmpty)
 
         mockMvc.perform(
+            get("/api/v1/documents/favorites")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsBId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.items[?(@.document_id == '$wsADocId')]").isEmpty)
+
+        mockMvc.perform(
+            post("/api/v1/documents/$wsADocId/favorite")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsBId)
+        ).andExpect(status().isNotFound)
+
+        mockMvc.perform(
+            get("/api/v1/documents/trash")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsBId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.items[?(@.id == '$wsADocId')]").isEmpty)
+
+        mockMvc.perform(
+            post("/api/v1/documents/$wsADocId/restore")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsBId)
+        ).andExpect(status().isNotFound)
+
+        mockMvc.perform(
+            post("/api/v1/documents/$wsADocId/move")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsBId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf("parent_document_id" to null)
+                    )
+                )
+        ).andExpect(status().isNotFound)
+
+        mockMvc.perform(
             get("/api/v1/search")
                 .param("q", "Tenant A Secret")
                 .header("Authorization", "Bearer $tokenB")

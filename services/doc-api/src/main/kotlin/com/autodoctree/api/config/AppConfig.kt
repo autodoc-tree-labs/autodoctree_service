@@ -46,7 +46,15 @@ data class SearchProperties(
     val username: String?,
     val password: String?,
     val indexAlias: String,
-    val templateName: String
+    val templateName: String,
+    val indexPrefix: String = "",
+    val indexVersion: String = "v2",
+    val vectorField: String = "doc_embedding",
+    val hybridRrfK: Int = 60,
+    val hybridCandidateSize: Int = 100,
+    val hybridKnnTopK: Int = 100,
+    val hybridOperatorFallbackMinimumShouldMatch: String = "60%",
+    val indexSyncSampleRate: Double = 0.05
 )
 
 @ConfigurationProperties(prefix = "feature")
