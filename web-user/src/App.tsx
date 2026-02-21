@@ -13,7 +13,8 @@ type AuthResponse = {
 type WorkspaceListResponse = { items: Workspace[] };
 type DocumentListResponse = { items: DocumentItem[]; page: number; size: number; total: number };
 type FavoriteDocumentListResponse = { items: Array<{ document_id: string; created_at?: string }>; total: number };
-type SearchResponse = { items: Array<{ document_id: string; title: string; score: number }> };
+type SearchResponse = { items: Array<{ document_id: string; title: string; score: number; breadcrumb?: string[] }>; debug?: Record<string, unknown> };
+type PaletteHistoryResponse = { items: Array<{ id: string; event_type: string; query_text?: string; document_id?: string; command_key?: string; created_at: string }> };
 type TreeNodeDocumentSummary = {
   id: string;
   title: string;
@@ -2202,6 +2203,143 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+
+
+function CommandPalette({ workspaceId, accessToken }: { workspaceId: string | null; accessToken: string | null }) {
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResponse["items"]>([]);
+  const [history, setHistory] = useState<PaletteHistoryResponse["items"]>([]);
+  const [selected, setSelected] = useState(0);
+  const [mode, setMode] = useState<"bm25" | "hybrid">((localStorage.getItem("palette_mode") as "bm25" | "hybrid") || "bm25");
+  const [titleOnly, setTitleOnly] = useState(localStorage.getItem("palette_title_only") === "1");
+
+  const commands = useMemo(() => [
+    { key: "new_page", label: "새 페이지", run: () => navigate("/editor") },
+    { key: "inbox", label: "문서함", run: () => navigate("/inbox") },
+    { key: "tree", label: "트리", run: () => navigate("/tree") },
+    { key: "questions", label: "질문함", run: () => navigate("/questions") },
+    { key: "workspace", label: "워크스페이스", run: () => navigate("/workspace") }
+  ], [navigate]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setOpen((v) => !v);
+      }
+      if (open && e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  useEffect(() => {
+    localStorage.setItem("palette_mode", mode);
+    localStorage.setItem("palette_title_only", titleOnly ? "1" : "0");
+  }, [mode, titleOnly]);
+
+  useEffect(() => {
+    if (!open || !workspaceId || !accessToken) return;
+    fetch(`/api/v1/search/history?limit=40`, { headers: { Authorization: `Bearer ${accessToken}`, "X-Workspace-Id": workspaceId } })
+      .then((r) => r.json())
+      .then((data: PaletteHistoryResponse) => setHistory(data.items ?? []))
+      .catch(() => setHistory([]));
+  }, [open, workspaceId, accessToken]);
+
+  useEffect(() => {
+    if (!open || !workspaceId || !accessToken || !query.trim()) {
+      setResults([]);
+      return;
+    }
+    const params = new URLSearchParams({ q: query, mode, titleOnly: String(titleOnly), sort: "relevance" });
+    fetch(`/api/v1/search?${params.toString()}`, { headers: { Authorization: `Bearer ${accessToken}`, "X-Workspace-Id": workspaceId } })
+      .then((r) => r.json())
+      .then((data: SearchResponse) => setResults(data.items ?? []))
+      .catch(() => setResults([]));
+  }, [open, query, workspaceId, accessToken, mode, titleOnly]);
+
+  const historyGroups = useMemo(() => {
+    const now = new Date();
+    const buckets: Record<string, PaletteHistoryResponse["items"]> = { "오늘": [], "어제": [], "지난 7일": [] };
+    history.forEach((item) => {
+      const d = new Date(item.created_at);
+      const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+      if (diffDays <= 0) buckets["오늘"].push(item);
+      else if (diffDays === 1) buckets["어제"].push(item);
+      else if (diffDays <= 7) buckets["지난 7일"].push(item);
+    });
+    return buckets;
+  }, [history]);
+
+  const items = query.trim()
+    ? [...commands.filter((c) => c.label.toLowerCase().includes(query.toLowerCase())).map((c) => ({ kind: "command" as const, c })), ...results.map((r) => ({ kind: "doc" as const, r }))]
+    : commands.map((c) => ({ kind: "command" as const, c }));
+
+  const executeHistory = (payload: Record<string, unknown>) => {
+    if (!workspaceId || !accessToken) return;
+    void fetch(`/api/v1/search/history`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "X-Workspace-Id": workspaceId, "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  };
+
+  const onEnter = () => {
+    const picked = items[selected];
+    if (!picked) return;
+    if (picked.kind === "command") {
+      picked.c.run();
+      executeHistory({ eventType: "COMMAND", commandKey: picked.c.key, queryText: query || null });
+    } else {
+      navigate(`/documents/${picked.r.document_id}`);
+      executeHistory({ eventType: "OPEN_DOCUMENT", documentId: picked.r.document_id, queryText: query || null });
+    }
+    setOpen(false);
+  };
+
+  if (!open) return <button className="btn btn-secondary" type="button" onClick={() => setOpen(true)}>⌘K</button>;
+
+  return (
+    <div className="palette-overlay" onClick={() => setOpen(false)}>
+      <div className="palette-modal" onClick={(e) => e.stopPropagation()}>
+        <input
+          autoFocus
+          className="field-input"
+          placeholder="문서 검색 또는 명령 입력…"
+          value={query}
+          onChange={(e) => { setQuery(e.target.value); setSelected(0); }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") { e.preventDefault(); setSelected((v) => Math.min(items.length - 1, v + 1)); }
+            if (e.key === "ArrowUp") { e.preventDefault(); setSelected((v) => Math.max(0, v - 1)); }
+            if (e.key === "Enter") { e.preventDefault(); onEnter(); }
+          }}
+        />
+        <div className="palette-filters">
+          <label><input type="checkbox" checked={titleOnly} onChange={(e) => setTitleOnly(e.target.checked)} /> 제목만</label>
+          <label>모드 <select value={mode} onChange={(e) => setMode(e.target.value as "bm25" | "hybrid")}><option value="bm25">bm25</option><option value="hybrid">hybrid</option></select></label>
+        </div>
+        {!query.trim() ? (
+          <div className="palette-history">
+            {Object.entries(historyGroups).map(([group, items]) => (
+              <div key={group}><strong>{group}</strong><ul>{items.map((h) => <li key={h.id}>{h.query_text || h.command_key || h.document_id}</li>)}</ul></div>
+            ))}
+          </div>
+        ) : (
+          <ul className="search-results">
+            {items.map((item, idx) => (
+              <li className={`search-result-item ${idx === selected ? "is-selected" : ""}`} key={item.kind === "command" ? item.c.key : item.r.document_id}>
+                {item.kind === "command" ? `⌘ ${item.c.label}` : `${item.r.title} · ${(item.r.breadcrumb || []).join(" / ")}`}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

@@ -4,6 +4,7 @@ import com.autodoctree.api.config.AuthProperties
 import com.autodoctree.api.db.MembershipRepository
 import com.autodoctree.api.db.RefreshTokenRepository
 import com.autodoctree.api.db.UserRepository
+import com.autodoctree.api.db.WorkspaceInviteRepository
 import com.autodoctree.api.db.WorkspaceRepository
 import com.autodoctree.api.infra.NotFoundException
 import com.autodoctree.api.infra.ForbiddenException
@@ -106,7 +107,8 @@ class WorkspaceService(
     private val membershipRepository: MembershipRepository,
     private val userRepository: UserRepository,
     private val passwordEncoder: PasswordEncoder,
-    private val auditService: AuditService
+    private val auditService: AuditService,
+    private val workspaceInviteRepository: WorkspaceInviteRepository
 ) {
     @Transactional
     fun createWorkspace(userId: String, name: String): Map<String, String> {
@@ -176,6 +178,38 @@ class WorkspaceService(
         )
     }
 
+
+
+    @Transactional
+    fun createInvite(context: WorkspaceContext, workspaceId: String, email: String, role: String): Map<String, String> {
+        if (context.workspaceId != workspaceId) throw ForbiddenException()
+        requireOwner(context)
+        val token = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "")
+        val tokenHash = sha256(token)
+        workspaceInviteRepository.create(
+            workspaceId = workspaceId,
+            email = email,
+            role = role,
+            tokenHash = tokenHash,
+            invitedBy = context.userId,
+            expiresAt = LocalDateTime.now().plusDays(7)
+        )
+        auditService.write(workspaceId, context.userId, "workspace.invite.created", mapOf("email" to email, "role" to role))
+        return mapOf("invite_token" to token)
+    }
+
+    @Transactional
+    fun acceptInvite(userId: String, token: String): Map<String, String> {
+        val invite = workspaceInviteRepository.findActiveByTokenHash(sha256(token)) ?: throw NotFoundException()
+        val workspaceId = invite["workspace_id"] as String
+        val role = invite["role"] as String
+        if (membershipRepository.findRoleByWorkspaceAndUser(workspaceId, userId) == null) {
+            membershipRepository.create(workspaceId, userId, role)
+        }
+        workspaceInviteRepository.markAccepted(invite["id"] as String, userId)
+        auditService.write(workspaceId, userId, "workspace.invite.accepted", mapOf("role" to role))
+        return mapOf("workspace_id" to workspaceId, "role" to role)
+    }
     @Transactional
     fun updateMemberRole(context: WorkspaceContext, workspaceId: String, userId: String, role: String) {
         if (context.workspaceId != workspaceId) {

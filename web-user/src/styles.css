@@ -2269,3 +2269,35 @@ code {
     font-size: 1.55rem;
   }
 }
+
+.palette-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.35);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+  z-index: 1000;
+}
+
+.palette-modal {
+  width: min(760px, 92vw);
+  background: #fff;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.2);
+}
+
+.palette-filters {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin: 10px 0;
+}
+
+.search-result-item.is-selected {
+  background: #f1f5ff;
+}
+
+.palette-history ul { margin: 6px 0 12px; }
