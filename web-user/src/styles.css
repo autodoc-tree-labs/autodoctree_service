@@ -4217,6 +4217,14 @@ body {
   pointer-events: none;
   margin: 0;
   z-index: 6;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 120ms ease;
+}
+
+.editor-v2-drop-hint.is-visible {
+  opacity: 1;
+  visibility: visible;
 }
 
 .editor-v2-prosemirror {

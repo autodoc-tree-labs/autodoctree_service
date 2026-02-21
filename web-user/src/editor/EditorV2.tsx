@@ -62,6 +62,16 @@ const RECENT_SLASH_KEY = "autodoc.editor.v2.recentSlash.v1";
 const MIN_IMAGE_WIDTH_PERCENT = 20;
 const MAX_IMAGE_WIDTH_PERCENT = 100;
 const detectUploadKind = (file: File): UploadKind => (file.type.toLowerCase().startsWith("image/") ? "image" : "file");
+const hasDraggedFiles = (dataTransfer: DataTransfer | null | undefined): boolean => {
+  if (!dataTransfer) {
+    return false;
+  }
+  const items = dataTransfer.items;
+  if (items && items.length > 0) {
+    return Array.from(items).some((item) => item.kind === "file");
+  }
+  return dataTransfer.files.length > 0;
+};
 
 const buildUploadInsertContent = (uploaded: UploadAttachmentResult, kind: UploadKind): Record<string, unknown> =>
   kind === "image"
@@ -623,6 +633,7 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
   const [selectedImageWidth, setSelectedImageWidth] = useState<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const editorSurfaceRef = useRef<HTMLDivElement | null>(null);
   const slashMenuRef = useRef<HTMLDivElement | null>(null);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const pendingUploadKindRef = useRef<"image" | "file" | null>(null);
@@ -874,16 +885,8 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
     }
 
     const editorDom = editor.view.dom;
-    const isFileDragEvent = (event: DragEvent): boolean => {
-      if (!event.dataTransfer) {
-        return false;
-      }
-      const items = event.dataTransfer.items;
-      if (items && items.length > 0) {
-        return Array.from(items).some((item) => item.kind === "file");
-      }
-      return event.dataTransfer.files.length > 0;
-    };
+    const surfaceDom = editorSurfaceRef.current ?? editorDom;
+    const isFileDragEvent = (event: DragEvent): boolean => hasDraggedFiles(event.dataTransfer);
 
     const handleDragEnter = (event: DragEvent) => {
       if (!isFileDragEvent(event)) {
@@ -908,7 +911,7 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
 
     const handleDragLeave = (event: DragEvent) => {
       const nextTarget = event.relatedTarget;
-      if (nextTarget instanceof globalThis.Node && editorDom.contains(nextTarget)) {
+      if (nextTarget instanceof globalThis.Node && surfaceDom.contains(nextTarget)) {
         return;
       }
       setIsDragOver(false);
@@ -928,24 +931,48 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
       }
 
       const rawDropPos = editor.view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
-      const dropPos = typeof rawDropPos === "number" ? Math.max(1, Math.min(rawDropPos, editor.state.doc.content.size)) : undefined;
+      const fallbackPos = editor.state.selection.to;
+      const dropPos = typeof rawDropPos === "number" ? Math.max(1, Math.min(rawDropPos, editor.state.doc.content.size)) : fallbackPos;
       void uploadAndInsertEntries(
         droppedFiles.map((file) => ({ file, kind: detectUploadKind(file) })),
-        typeof dropPos === "number" ? { insertPos: dropPos } : undefined
+        { insertPos: dropPos }
       );
     };
 
-    editorDom.addEventListener("dragenter", handleDragEnter, true);
-    editorDom.addEventListener("dragover", handleDragOver, true);
-    editorDom.addEventListener("dragleave", handleDragLeave, true);
-    editorDom.addEventListener("drop", handleDrop, true);
+    const preventWindowFileOpen = (event: DragEvent) => {
+      if (!isFileDragEvent(event)) {
+        return;
+      }
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "copy";
+      }
+    };
+
+    const clearDragHintOnWindowDrop = (event: DragEvent) => {
+      if (!isFileDragEvent(event)) {
+        return;
+      }
+      setIsDragOver(false);
+    };
+
+    surfaceDom.addEventListener("dragenter", handleDragEnter, true);
+    surfaceDom.addEventListener("dragover", handleDragOver, true);
+    surfaceDom.addEventListener("dragleave", handleDragLeave, true);
+    surfaceDom.addEventListener("drop", handleDrop, true);
+    window.addEventListener("dragover", preventWindowFileOpen, true);
+    window.addEventListener("drop", preventWindowFileOpen, true);
+    window.addEventListener("drop", clearDragHintOnWindowDrop, true);
 
     return () => {
       setIsDragOver(false);
-      editorDom.removeEventListener("dragenter", handleDragEnter, true);
-      editorDom.removeEventListener("dragover", handleDragOver, true);
-      editorDom.removeEventListener("dragleave", handleDragLeave, true);
-      editorDom.removeEventListener("drop", handleDrop, true);
+      surfaceDom.removeEventListener("dragenter", handleDragEnter, true);
+      surfaceDom.removeEventListener("dragover", handleDragOver, true);
+      surfaceDom.removeEventListener("dragleave", handleDragLeave, true);
+      surfaceDom.removeEventListener("drop", handleDrop, true);
+      window.removeEventListener("dragover", preventWindowFileOpen, true);
+      window.removeEventListener("drop", preventWindowFileOpen, true);
+      window.removeEventListener("drop", clearDragHintOnWindowDrop, true);
     };
   }, [disabled, editor, uploadAndInsertEntries]);
 
@@ -1557,8 +1584,10 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
         </button>
       </div>
 
-      <div className={`editor-v2-surface${isDragOver ? " is-drag-over" : ""}`}>
-        {isDragOver ? <p className="editor-v2-drop-hint">파일을 놓으면 첨부됩니다.</p> : null}
+      <div className={`editor-v2-surface${isDragOver ? " is-drag-over" : ""}`} ref={editorSurfaceRef}>
+        <p aria-hidden={!isDragOver} className={`editor-v2-drop-hint${isDragOver ? " is-visible" : ""}`}>
+          파일을 놓으면 첨부됩니다.
+        </p>
         {editor ? (
           <DragHandle editor={editor} className="editor-v2-drag-handle" onNodeChange={() => undefined}>
             <button className="editor-v2-handle-btn" type="button" tabIndex={-1}>

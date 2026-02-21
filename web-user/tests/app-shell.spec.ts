@@ -556,6 +556,31 @@ test("drag and drop upload inserts file block without upload button click", asyn
   await dataTransfer.dispose();
 });
 
+test("drag and drop upload on editor surface keeps app stable and inserts attachment", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => {
+    pageErrors.push(error.message);
+  });
+
+  await page.goto("/w/ws-1/doc/doc-1");
+  await expect(page.getByLabel("제목")).toHaveValue("코난 전기");
+
+  const dataTransfer = await page.evaluateHandle(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(["drag-drop payload"], "drag-surface.txt", { type: "text/plain" }));
+    return dt;
+  });
+
+  const editorSurface = page.locator(".editor-v2-surface");
+  await editorSurface.dispatchEvent("dragenter", { dataTransfer });
+  await editorSurface.dispatchEvent("dragover", { dataTransfer });
+  await editorSurface.dispatchEvent("drop", { dataTransfer });
+
+  await expect(page.locator(".editor-v2-file a").first()).toHaveText("drag-surface.txt");
+  expect(pageErrors).toEqual([]);
+  await dataTransfer.dispose();
+});
+
 test("slash menu arrow navigation auto-scrolls to keep active item visible", async ({ page }) => {
   await page.goto("/w/ws-1/doc/doc-1");
 
