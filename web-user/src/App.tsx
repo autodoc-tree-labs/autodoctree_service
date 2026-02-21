@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiError, type Workspace } from "@autodoctree/api-client";
+import { CircleHelp, FileText, GitBranch, Plus, Search, Trash2, type LucideIcon } from "lucide-react";
 import { createApiClient } from "./api";
 import { useSession } from "./session";
 import type { DocumentItem } from "./types";
@@ -175,6 +176,11 @@ const TREE_VIEW_OPTIONS: Array<{ value: TreeView; label: string }> = [
 ];
 const REBUILD_REQUEST_TIMEOUT_MS = 15_000;
 const LAST_WORKSPACE_ID_KEY = "autodoc.user.last-workspace.v1";
+const SIDEBAR_WIDTH_PREFERENCE_KEY = "autodoc.workspace.sidebar-width.by-workspace.v1";
+const SIDEBAR_WIDTH_DEFAULT = 272;
+const SIDEBAR_WIDTH_MIN = 220;
+const SIDEBAR_WIDTH_MAX = 520;
+const SIDEBAR_WIDTH_STEP = 12;
 const COMMAND_PALETTE_MAX_RESULTS = 8;
 
 const REASON_TEXT: Record<string, string> = {
@@ -389,6 +395,43 @@ const saveLastWorkspaceId = (workspaceId: string | null) => {
   }
   try {
     window.localStorage.setItem(LAST_WORKSPACE_ID_KEY, workspaceId);
+  } catch {
+    // Ignore localStorage write failures in local/dev environments.
+  }
+};
+
+const clampSidebarWidth = (value: number): number =>
+  Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, Math.round(value)));
+
+const loadSidebarWidthPreference = (workspaceId: string | null): number => {
+  if (!workspaceId || typeof window === "undefined") {
+    return SIDEBAR_WIDTH_DEFAULT;
+  }
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_PREFERENCE_KEY);
+    if (!raw) {
+      return SIDEBAR_WIDTH_DEFAULT;
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const saved = parsed[workspaceId];
+    if (typeof saved !== "number" || !Number.isFinite(saved)) {
+      return SIDEBAR_WIDTH_DEFAULT;
+    }
+    return clampSidebarWidth(saved);
+  } catch {
+    return SIDEBAR_WIDTH_DEFAULT;
+  }
+};
+
+const saveSidebarWidthPreference = (workspaceId: string | null, width: number) => {
+  if (!workspaceId || typeof window === "undefined") {
+    return;
+  }
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_PREFERENCE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    parsed[workspaceId] = clampSidebarWidth(width);
+    window.localStorage.setItem(SIDEBAR_WIDTH_PREFERENCE_KEY, JSON.stringify(parsed));
   } catch {
     // Ignore localStorage write failures in local/dev environments.
   }
@@ -712,6 +755,27 @@ function NoticePanel({ notice }: { notice: UiNotice | null }) {
   );
 }
 
+type SidebarMenuIconName = "plus" | "search" | "document" | "tree" | "question" | "trash";
+
+const SIDEBAR_MENU_ICONS: Record<SidebarMenuIconName, LucideIcon> = {
+  plus: Plus,
+  search: Search,
+  document: FileText,
+  tree: GitBranch,
+  question: CircleHelp,
+  trash: Trash2
+};
+
+function SidebarMenuIcon({ name, className }: { name: SidebarMenuIconName; className?: string }) {
+  const Icon = SIDEBAR_MENU_ICONS[name];
+
+  return (
+    <span aria-hidden className={className ?? "sidebar-menu-item-icon"}>
+      <Icon className="sidebar-menu-item-icon-svg" strokeWidth={1.7} />
+    </span>
+  );
+}
+
 const moveDocumentInTree = (tree: TreeActiveResponse, documentId: string, fromNodeId: string | null, toNodeId: string): TreeActiveResponse => {
   const movedSummary =
     tree.nodes
@@ -774,6 +838,8 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   const [sidebarActionError, setSidebarActionError] = useState<UiError | null>(null);
   const [sidebarActionNotice, setSidebarActionNotice] = useState<UiNotice | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_WIDTH_DEFAULT);
+  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [creatingRootPage, setCreatingRootPage] = useState(false);
@@ -783,6 +849,17 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   const routeWorkspaceId = routeWorkspaceMatch?.[1] ? decodeURIComponent(routeWorkspaceMatch[1]) : null;
   const activeWorkspaceId = routeWorkspaceId ?? state.workspaceId;
   const activeView = detectSidebarView(location.pathname);
+  const applySidebarWidth = useCallback((nextWidth: number) => {
+    setSidebarWidth(clampSidebarWidth(nextWidth));
+  }, []);
+
+  useEffect(() => {
+    setSidebarWidth(loadSidebarWidthPreference(activeWorkspaceId));
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    saveSidebarWidthPreference(activeWorkspaceId, sidebarWidth);
+  }, [activeWorkspaceId, sidebarWidth]);
 
   useEffect(() => {
     setIsSidebarOpen(false);
@@ -1536,7 +1613,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       const isChildDropTarget = sidebarDropTarget?.mode === "CHILD" && sidebarDropTarget.targetDocumentId === node.doc.id;
       const isSiblingDropTarget = sidebarDropTarget?.mode === "SIBLING" && sidebarDropTarget.targetDocumentId === node.doc.id;
       return (
-        <li className="sidebar-page-item" key={node.doc.id}>
+        <li className={`sidebar-page-item${menuOpen ? " is-menu-open" : ""}`} key={node.doc.id}>
           <div
             aria-hidden="true"
             className={`sidebar-drop-zone sidebar-drop-zone-sibling${isSiblingDropTarget ? " is-active" : ""}`}
@@ -1558,7 +1635,9 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
           />
 
           <div
-            className={`sidebar-page-row${isActive ? " is-active" : ""}${isDragged ? " is-dragging" : ""}${isChildDropTarget ? " is-drop-child" : ""}`}
+            className={`sidebar-page-row${isActive ? " is-active" : ""}${isDragged ? " is-dragging" : ""}${isChildDropTarget ? " is-drop-child" : ""}${
+              menuOpen ? " is-menu-open" : ""
+            }`}
             data-sidebar-menu-root={node.doc.id}
             onDragOver={(event) => {
               if (!sidebarDraggingDocumentId || sidebarDraggingDocumentId === node.doc.id) {
@@ -1603,7 +1682,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
               {isFavorite ? <span className="sidebar-page-favorite" title="즐겨찾기">★</span> : null}
               <span className="sidebar-page-title">{node.doc.title}</span>
             </button>
-            <div className="sidebar-page-row-actions">
+            <div className={`sidebar-page-row-actions${menuOpen ? " is-menu-open" : ""}`}>
               <button
                 aria-label="하위 페이지 추가"
                 className="sidebar-page-action"
@@ -1814,8 +1893,46 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       );
     });
 
+  const beginSidebarResize = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (typeof window === "undefined" || window.matchMedia("(max-width: 1080px)").matches) {
+        return;
+      }
+      event.preventDefault();
+
+      const startX = event.clientX;
+      const startWidth = sidebarWidth;
+      setIsSidebarResizing(true);
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        const delta = moveEvent.clientX - startX;
+        applySidebarWidth(startWidth + delta);
+      };
+
+      const onPointerEnd = () => {
+        setIsSidebarResizing(false);
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerEnd);
+        window.removeEventListener("pointercancel", onPointerEnd);
+      };
+
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerEnd);
+      window.addEventListener("pointercancel", onPointerEnd);
+    },
+    [applySidebarWidth, sidebarWidth]
+  );
+
+  const workspaceLayoutStyle = useMemo(
+    () =>
+      ({
+        "--workspace-sidebar-width": `${clampSidebarWidth(sidebarWidth)}px`
+      }) as React.CSSProperties,
+    [sidebarWidth]
+  );
+
   return (
-    <div className="workspace-layout">
+    <div className={`workspace-layout${isSidebarResizing ? " is-resizing" : ""}`} style={workspaceLayoutStyle}>
       <div className={`workspace-sidebar-backdrop${isSidebarOpen ? " is-open" : ""}`} onClick={() => setIsSidebarOpen(false)} role="presentation" />
       <aside className={`workspace-sidebar${isSidebarOpen ? " is-open" : ""}`}>
         <div className="workspace-sidebar-header">
@@ -1852,7 +1969,8 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
           <p className="sidebar-section-label">Quick Actions</p>
           <div className="sidebar-quick-actions">
             <button className="btn btn-secondary btn-small" disabled={!activeWorkspaceId || creatingRootPage} onClick={() => void createRootPage()} type="button">
-              {creatingRootPage ? "생성 중..." : "새 페이지"}
+              <SidebarMenuIcon name="plus" />
+              <span className="sidebar-menu-item-label">{creatingRootPage ? "생성 중..." : "새 페이지"}</span>
             </button>
             <button
               className="btn btn-ghost btn-small"
@@ -1861,7 +1979,8 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
               }}
               type="button"
             >
-              검색 / Cmd+K
+              <SidebarMenuIcon name="search" />
+              <span className="sidebar-menu-item-label">검색 / Cmd+K</span>
             </button>
           </div>
         </div>
@@ -2005,28 +2124,32 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
               onClick={() => goToView("documents")}
               type="button"
             >
-              Documents
+              <SidebarMenuIcon className="sidebar-menu-item-icon sidebar-menu-item-icon-view" name="document" />
+              <span className="sidebar-menu-item-label">Documents</span>
             </button>
             <button
               className={`sidebar-view-button${activeView === "tree" ? " is-active" : ""}`}
               onClick={() => goToView("tree")}
               type="button"
             >
-              Tree
+              <SidebarMenuIcon className="sidebar-menu-item-icon sidebar-menu-item-icon-view" name="tree" />
+              <span className="sidebar-menu-item-label">Tree</span>
             </button>
             <button
               className={`sidebar-view-button${activeView === "questions" ? " is-active" : ""}`}
               onClick={() => goToView("questions")}
               type="button"
             >
-              Questions
+              <SidebarMenuIcon className="sidebar-menu-item-icon sidebar-menu-item-icon-view" name="question" />
+              <span className="sidebar-menu-item-label">Questions</span>
             </button>
             <button
               className={`sidebar-view-button${activeView === "trash" ? " is-active" : ""}`}
               onClick={() => goToView("trash")}
               type="button"
             >
-              Trash
+              <SidebarMenuIcon className="sidebar-menu-item-icon sidebar-menu-item-icon-view" name="trash" />
+              <span className="sidebar-menu-item-label">Trash</span>
             </button>
           </div>
         </div>
@@ -2048,6 +2171,39 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
           </button>
         </div>
       </aside>
+
+      <div
+        aria-label="사이드바 폭 조절"
+        aria-orientation="vertical"
+        aria-valuemax={SIDEBAR_WIDTH_MAX}
+        aria-valuemin={SIDEBAR_WIDTH_MIN}
+        aria-valuenow={sidebarWidth}
+        className="workspace-sidebar-resizer"
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            applySidebarWidth(sidebarWidth - SIDEBAR_WIDTH_STEP);
+            return;
+          }
+          if (event.key === "ArrowRight") {
+            event.preventDefault();
+            applySidebarWidth(sidebarWidth + SIDEBAR_WIDTH_STEP);
+            return;
+          }
+          if (event.key === "Home") {
+            event.preventDefault();
+            applySidebarWidth(SIDEBAR_WIDTH_MIN);
+            return;
+          }
+          if (event.key === "End") {
+            event.preventDefault();
+            applySidebarWidth(SIDEBAR_WIDTH_MAX);
+          }
+        }}
+        onPointerDown={beginSidebarResize}
+        role="separator"
+        tabIndex={0}
+      />
 
       <div className="workspace-main">
         <header className="workspace-header panel panel-compact">

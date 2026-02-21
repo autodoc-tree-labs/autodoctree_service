@@ -47,5 +47,7 @@
 | U-0801 | User UI: Multi-View Navigator (TopicProjectTimelineVersion) | `tasks/backlog/U-0801 — User UI Multi-View Navigator (TopicProjectTimelineVersion).md` |
 | U-0802 | User UI: Explain Drawer v2 (근거이웃사유) + 수용되돌림 | `tasks/backlog/U-0802 — User UI Explain Drawer v2 (근거이웃사유)  수용되돌림.md` |
 | U-0902 | User UI: Smart Questions Inbox (2지선다쌍비교) | `tasks/backlog/U-0902 — User UI Smart Questions Inbox (2지선다쌍비교).md` |
+| U-1301 | User UI: Notion-style minimal workspace shell | `tasks/backlog/U-1301 — User UI Notion-style minimal workspace shell.md` |
+| U-1302 | User UI: Resizable sidebar and fluid main content width | `tasks/backlog/U-1302 — User UI resizable sidebar and fluid main content width.md` |
 | U-1209 | Persist login session across refresh in web-user | `tasks/backlog/U-1209 — Persist login session across refresh in web-user.md` |
 | U-1210 | Workspace IA refactor for web-user app shell and workspace routing | `tasks/backlog/U-1210 — Workspace IA refactor for web-user app shell and workspace routing.md` |
