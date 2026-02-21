@@ -34,6 +34,8 @@
 | B-0902 | Active Learning Queue v1 (관계 질문 생성소비) | `tasks/backlog/B-0902 — Active Learning Queue v1 (관계 질문 생성소비).md` |
 | B-1101 | Multi-Tenancy Hardening v2 (DBSearchCacheObjectStorage leak tests) | `tasks/backlog/B-1101 — Multi-Tenancy Hardening v2 (DBSearchCacheObjectStorage leak tests).md` |
 | B-1207 | Search v2 Multilingual Hybrid BM25+Vector | `tasks/backlog/B-1207 — Search v2 Multilingual Hybrid BM25+Vector.md` |
+| B-1400 | Block editor v1 backend model and sync pipeline | `tasks/backlog/B-1400 - Block editor v1 backend model and sync pipeline.md` |
+| B-1401 | Cascading soft delete for document hierarchy | `tasks/backlog/B-1401 - Cascading soft delete for document hierarchy.md` |
 | I-0101 | Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards | `tasks/backlog/I-0101 — Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards.md` |
 | I-0201 | Ollama Embedding Setup (bge-m3) — Offline Bootstrap & Healthchecks | `tasks/backlog/I-0201 — Ollama Embedding Setup (bge-m3) — Offline Bootstrap  Healthchecks.md` |
 | I-0301 | OpenSearch Korean Analyzer (nori) for Search Index + Field Mapping | `tasks/backlog/I-0301 — OpenSearch Korean Analyzer (nori) for Search Index  Field Mapping.md` |
@@ -49,5 +51,13 @@
 | U-0902 | User UI: Smart Questions Inbox (2지선다쌍비교) | `tasks/backlog/U-0902 — User UI Smart Questions Inbox (2지선다쌍비교).md` |
 | U-1301 | User UI: Notion-style minimal workspace shell | `tasks/backlog/U-1301 — User UI Notion-style minimal workspace shell.md` |
 | U-1302 | User UI: Resizable sidebar and fluid main content width | `tasks/backlog/U-1302 — User UI resizable sidebar and fluid main content width.md` |
+| U-1303 | Persist tree rebuild status across refresh | `tasks/backlog/U-1303 — Persist tree rebuild status across refresh.md` |
+| U-1304 | Sync sidebar title after editor save | `tasks/backlog/U-1304 - Sync sidebar title after editor save.md` |
 | U-1209 | Persist login session across refresh in web-user | `tasks/backlog/U-1209 — Persist login session across refresh in web-user.md` |
 | U-1210 | Workspace IA refactor for web-user app shell and workspace routing | `tasks/backlog/U-1210 — Workspace IA refactor for web-user app shell and workspace routing.md` |
+| U-1400 | Block editor v1 TipTap UI and feature flag rollout | `tasks/backlog/U-1400 - Block editor v1 TipTap UI and feature flag rollout.md` |
+| U-1401 | Block editor slash command palette expansion | `tasks/backlog/U-1401 — Block editor slash command palette expansion.md` |
+| U-1402 | Image block mouse drag resize handle | `tasks/backlog/U-1402 — Image block mouse drag resize handle.md` |
+| U-1403 | Hide deleted subtree docs in node view and editor selection | `tasks/backlog/U-1403 - Hide deleted subtree docs in node view and editor selection.md` |
+| U-1404 | Sidebar workspace launcher popover and member invite | `tasks/backlog/U-1404 - Sidebar workspace launcher popover and member invite.md` |
+| U-1405 | Drag and drop attachment upload in EditorV2 | `tasks/backlog/U-1405 - Drag and drop attachment upload in EditorV2.md` |

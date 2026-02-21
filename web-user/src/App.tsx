@@ -3,6 +3,8 @@ import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, usePa
 import { ApiError, type Workspace } from "@autodoctree/api-client";
 import { CircleHelp, FileText, GitBranch, Plus, Search, Trash2, type LucideIcon } from "lucide-react";
 import { createApiClient } from "./api";
+import { EditorV2 } from "./editor/EditorV2";
+import { blockDocToMarkdown, normalizeBlockDoc, type BlockDoc } from "./editor/blockContent";
 import { useSession } from "./session";
 import type { DocumentItem } from "./types";
 
@@ -12,6 +14,9 @@ type AuthResponse = {
 };
 
 type WorkspaceListResponse = { items: Workspace[] };
+type WorkspaceMember = { user_id: string; email: string; role: string };
+type WorkspaceMemberListResponse = { items: WorkspaceMember[] };
+type WorkspaceInviteResponse = { invite_token: string };
 type DocumentListResponse = { items: DocumentItem[]; page: number; size: number; total: number };
 type FavoriteDocumentListResponse = { items: Array<{ document_id: string; created_at?: string }>; total: number };
 type SearchResponse = { items: Array<{ document_id: string; title: string; score: number; breadcrumb?: string[] }>; debug?: Record<string, unknown> };
@@ -41,6 +46,15 @@ type TreeActiveResponse = {
   status: string;
   view_type?: string;
   nodes: TreeNode[];
+};
+type TreeRebuildStatusResponse = {
+  status: string;
+  pending_count?: number;
+  running_since?: string | null;
+  view_type?: string;
+};
+type CachedTreeRebuildStatus = TreeRebuildStatusResponse & {
+  cached_at: string;
 };
 
 type TreeView = "topic" | "project" | "timeline" | "version" | "template";
@@ -86,6 +100,7 @@ type SidebarPageNode = {
 
 type SidebarViewKey = "documents" | "tree" | "questions" | "trash" | "workspace";
 type AppApiClient = ReturnType<typeof createApiClient>;
+type SidebarDocumentsSyncEventDetail = { workspaceId: string | null };
 
 type QuestionItem = {
   id: string;
@@ -166,6 +181,7 @@ const ROLE_TEXT: Record<string, string> = {
 const TREE_INBOX_NODE_ID = "__virtual_inbox__";
 const TREE_TEMPLATES_NODE_ID = "__virtual_templates__";
 const TREE_VIEW_PREFERENCE_KEY = "autodoc.tree.view.by_workspace.v1";
+const TREE_REBUILD_STATUS_PREFERENCE_KEY = "autodoc.tree.rebuild-status.by_workspace.v1";
 const EDITOR_SIDEBAR_STATE_KEY = "autodoc.editor.sidebar.by_workspace.v1";
 const TREE_VIEW_OPTIONS: Array<{ value: TreeView; label: string }> = [
   { value: "topic", label: "Topic" },
@@ -175,13 +191,17 @@ const TREE_VIEW_OPTIONS: Array<{ value: TreeView; label: string }> = [
   { value: "template", label: "Template" }
 ];
 const REBUILD_REQUEST_TIMEOUT_MS = 15_000;
+const TREE_REBUILD_STATUS_POLL_MS = 2_500;
+const TREE_REBUILD_STATUS_CACHE_TTL_MS = 15 * 60 * 1000;
 const LAST_WORKSPACE_ID_KEY = "autodoc.user.last-workspace.v1";
 const SIDEBAR_WIDTH_PREFERENCE_KEY = "autodoc.workspace.sidebar-width.by-workspace.v1";
+const SIDEBAR_DOCUMENTS_SYNC_EVENT = "autodoc.sidebar.documents.sync";
 const SIDEBAR_WIDTH_DEFAULT = 272;
 const SIDEBAR_WIDTH_MIN = 220;
 const SIDEBAR_WIDTH_MAX = 520;
 const SIDEBAR_WIDTH_STEP = 12;
 const COMMAND_PALETTE_MAX_RESULTS = 8;
+const FEATURE_BLOCK_EDITOR = String(import.meta.env.VITE_FEATURE_BLOCK_EDITOR ?? "true").toLowerCase() === "true";
 
 const REASON_TEXT: Record<string, string> = {
   LOW_CONFIDENCE: "신뢰도 낮음",
@@ -203,6 +223,32 @@ const ERROR_MESSAGE_TEXT: Array<[string, string]> = [
 ];
 
 const hasHangul = (value: string): boolean => /[가-힣]/.test(value);
+
+type ParsedJwtClaims = {
+  sub?: string;
+  email?: string;
+};
+
+const parseJwtClaims = (token: string | null): ParsedJwtClaims => {
+  if (!token) {
+    return {};
+  }
+  const segments = token.split(".");
+  if (segments.length < 2) {
+    return {};
+  }
+  try {
+    const base64 = segments[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+    const decoded = atob(padded);
+    const claims = JSON.parse(decoded) as Record<string, unknown>;
+    const sub = typeof claims.sub === "string" ? claims.sub : undefined;
+    const email = typeof claims.email === "string" ? claims.email : undefined;
+    return { sub, email };
+  } catch {
+    return {};
+  }
+};
 
 const localizeErrorMessage = (message: string, fallback: string): string => {
   const trimmed = message.trim();
@@ -361,6 +407,64 @@ const buildSidebarPageTree = (documents: DocumentItem[]): SidebarPageNode[] => {
   return roots;
 };
 
+const parseWorkspaceDocumentIdFromPathname = (pathname: string): string | null => {
+  const match = pathname.match(/\/w\/[^/]+\/doc\/([^/?#]+)/);
+  if (!match) {
+    return null;
+  }
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+};
+
+const collectDocumentSubtreeIds = (
+  documents: DocumentItem[],
+  rootDocumentId: string,
+  parentOverrides?: Record<string, string | null>
+): Set<string> => {
+  const parentByDocumentId = new Map<string, string | null>();
+  for (const document of documents) {
+    parentByDocumentId.set(document.id, document.parent_document_id ?? null);
+  }
+  if (parentOverrides) {
+    for (const [documentId, parentId] of Object.entries(parentOverrides)) {
+      if (!parentByDocumentId.has(documentId)) {
+        continue;
+      }
+      parentByDocumentId.set(documentId, typeof parentId === "string" ? parentId : null);
+    }
+  }
+  if (!parentByDocumentId.has(rootDocumentId)) {
+    return new Set();
+  }
+
+  const childrenByParentId = new Map<string, string[]>();
+  for (const [documentId, parentId] of parentByDocumentId.entries()) {
+    if (!parentId || parentId === documentId) {
+      continue;
+    }
+    const children = childrenByParentId.get(parentId) ?? [];
+    children.push(documentId);
+    childrenByParentId.set(parentId, children);
+  }
+
+  const result = new Set<string>();
+  const queue: string[] = [rootDocumentId];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || result.has(current)) {
+      continue;
+    }
+    result.add(current);
+    for (const childId of childrenByParentId.get(current) ?? []) {
+      queue.push(childId);
+    }
+  }
+  return result;
+};
+
 const filterSidebarPageTree = (nodes: SidebarPageNode[], query: string): SidebarPageNode[] => {
   const normalized = query.trim().toLowerCase();
   if (!normalized) {
@@ -505,6 +609,64 @@ const saveTreeViewPreference = (workspaceId: string | null, view: TreeView) => {
   }
 };
 
+const isRebuildStatusActive = (value: string | undefined | null): boolean => {
+  const normalized = value?.trim().toUpperCase() ?? "IDLE";
+  return normalized === "QUEUED" || normalized === "RUNNING";
+};
+
+const loadTreeRebuildStatusPreference = (workspaceId: string | null): TreeRebuildStatusResponse | null => {
+  if (!workspaceId || typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(TREE_REBUILD_STATUS_PREFERENCE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Record<string, CachedTreeRebuildStatus | undefined>;
+    const saved = parsed[workspaceId];
+    if (!saved || typeof saved !== "object" || !isRebuildStatusActive(saved.status)) {
+      return null;
+    }
+    const cachedAt = Date.parse(saved.cached_at);
+    if (!Number.isFinite(cachedAt) || Date.now() - cachedAt > TREE_REBUILD_STATUS_CACHE_TTL_MS) {
+      return null;
+    }
+    return {
+      status: saved.status,
+      pending_count: typeof saved.pending_count === "number" ? saved.pending_count : undefined,
+      running_since: typeof saved.running_since === "string" || saved.running_since === null ? saved.running_since : undefined,
+      view_type: typeof saved.view_type === "string" ? saved.view_type : undefined
+    };
+  } catch {
+    return null;
+  }
+};
+
+const saveTreeRebuildStatusPreference = (workspaceId: string | null, status: TreeRebuildStatusResponse | null) => {
+  if (!workspaceId || typeof window === "undefined") {
+    return;
+  }
+  try {
+    const raw = window.localStorage.getItem(TREE_REBUILD_STATUS_PREFERENCE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, CachedTreeRebuildStatus | undefined>) : {};
+    if (!status || !isRebuildStatusActive(status.status)) {
+      delete parsed[workspaceId];
+    } else {
+      parsed[workspaceId] = {
+        status: status.status,
+        pending_count: status.pending_count,
+        running_since: status.running_since,
+        view_type: status.view_type,
+        cached_at: new Date().toISOString()
+      };
+    }
+    window.localStorage.setItem(TREE_REBUILD_STATUS_PREFERENCE_KEY, JSON.stringify(parsed));
+  } catch {
+    // Ignore preference write failures in local environments.
+  }
+};
+
 const toTreeDocumentView = (node: TreeNode, summary: TreeNodeDocumentSummary): TreeDocumentView => ({
   id: summary.id,
   title: summary.title || summary.id,
@@ -598,6 +760,17 @@ const saveEditorSidebarState = (workspaceId: string | null, state: EditorSidebar
   } catch {
     // Ignore localStorage errors in local environments.
   }
+};
+
+const emitSidebarDocumentsSync = (workspaceId: string | null) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.dispatchEvent(
+    new CustomEvent<SidebarDocumentsSyncEventDetail>(SIDEBAR_DOCUMENTS_SYNC_EVENT, {
+      detail: { workspaceId }
+    })
+  );
 };
 
 const sanitizeEditorSidebarState = (state: EditorSidebarWorkspaceState, documents: DocumentItem[]): EditorSidebarWorkspaceState => {
@@ -838,16 +1011,27 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   const [sidebarActionError, setSidebarActionError] = useState<UiError | null>(null);
   const [sidebarActionNotice, setSidebarActionNotice] = useState<UiNotice | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isWorkspaceLauncherOpen, setIsWorkspaceLauncherOpen] = useState(false);
+  const [isInviteFormOpen, setIsInviteFormOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<Workspace["role"]>("MEMBER");
+  const [inviteSubmitting, setInviteSubmitting] = useState(false);
+  const [inviteToken, setInviteToken] = useState<string | null>(null);
+  const [inviteError, setInviteError] = useState<UiError | null>(null);
+  const [inviteNotice, setInviteNotice] = useState<UiNotice | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_WIDTH_DEFAULT);
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [creatingRootPage, setCreatingRootPage] = useState(false);
   const paletteInputRef = useRef<HTMLInputElement | null>(null);
+  const workspaceLauncherRef = useRef<HTMLDivElement | null>(null);
 
   const routeWorkspaceMatch = useMemo(() => location.pathname.match(/^\/w\/([^/]+)/), [location.pathname]);
   const routeWorkspaceId = routeWorkspaceMatch?.[1] ? decodeURIComponent(routeWorkspaceMatch[1]) : null;
   const activeWorkspaceId = routeWorkspaceId ?? state.workspaceId;
+  const activeWorkspace = useMemo(() => workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null, [activeWorkspaceId, workspaces]);
+  const canInviteMembers = activeWorkspace?.role === "OWNER";
   const activeView = detectSidebarView(location.pathname);
   const applySidebarWidth = useCallback((nextWidth: number) => {
     setSidebarWidth(clampSidebarWidth(nextWidth));
@@ -863,6 +1047,8 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
 
   useEffect(() => {
     setIsSidebarOpen(false);
+    setIsWorkspaceLauncherOpen(false);
+    setIsInviteFormOpen(false);
     setSidebarPageMenuDocId(null);
   }, [location.pathname]);
 
@@ -876,6 +1062,14 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   useEffect(() => {
     setSidebarActionError(null);
     setSidebarActionNotice(null);
+    setInviteError(null);
+    setInviteNotice(null);
+    setInviteToken(null);
+    setInviteSubmitting(false);
+    setInviteEmail("");
+    setInviteRole("MEMBER");
+    setIsInviteFormOpen(false);
+    setIsWorkspaceLauncherOpen(false);
     setSidebarPageMenuDocId(null);
     setSidebarRenamingDocumentId(null);
     setSidebarRenameDraft("");
@@ -889,6 +1083,24 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     setSidebarFavoriteDocumentIds([]);
     setSidebarFavoriteError(null);
   }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    if (!isWorkspaceLauncherOpen) {
+      return;
+    }
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (workspaceLauncherRef.current?.contains(target ?? null)) {
+        return;
+      }
+      setIsWorkspaceLauncherOpen(false);
+      setIsInviteFormOpen(false);
+    };
+    window.addEventListener("mousedown", closeOnOutsideClick);
+    return () => {
+      window.removeEventListener("mousedown", closeOnOutsideClick);
+    };
+  }, [isWorkspaceLauncherOpen]);
 
   useEffect(() => {
     if (!state.accessToken) {
@@ -1019,6 +1231,28 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   }, [loadSidebarNodeTree, pagesBrowseMode]);
 
   useEffect(() => {
+    const syncSidebarDocuments = (event: Event) => {
+      const detail = (event as CustomEvent<SidebarDocumentsSyncEventDetail>).detail;
+      const eventWorkspaceId = detail?.workspaceId ?? null;
+      if (!activeWorkspaceId) {
+        return;
+      }
+      if (eventWorkspaceId && eventWorkspaceId !== activeWorkspaceId) {
+        return;
+      }
+      void loadSidebarDocuments();
+      void loadSidebarFavorites();
+      if (pagesBrowseMode === "NODE") {
+        void loadSidebarNodeTree();
+      }
+    };
+    window.addEventListener(SIDEBAR_DOCUMENTS_SYNC_EVENT, syncSidebarDocuments);
+    return () => {
+      window.removeEventListener(SIDEBAR_DOCUMENTS_SYNC_EVENT, syncSidebarDocuments);
+    };
+  }, [activeWorkspaceId, loadSidebarDocuments, loadSidebarFavorites, loadSidebarNodeTree, pagesBrowseMode]);
+
+  useEffect(() => {
     const openPalette = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -1027,6 +1261,8 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       }
       if (event.key === "Escape") {
         setIsPaletteOpen(false);
+        setIsWorkspaceLauncherOpen(false);
+        setIsInviteFormOpen(false);
       }
     };
     window.addEventListener("keydown", openPalette);
@@ -1128,10 +1364,13 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         label: node.label,
         locked: node.locked,
         documents: nodeDocumentIds
-          .map((documentId) => ({
-            id: documentId,
-            title: summaryTitleById.get(documentId) || documentById.get(documentId)?.title || documentId
-          }))
+          .flatMap((documentId) => {
+            const document = documentById.get(documentId);
+            if (!document) {
+              return [];
+            }
+            return [{ id: documentId, title: summaryTitleById.get(documentId) || document.title }];
+          })
           .sort((left, right) => left.title.localeCompare(right.title, "ko")),
         children: []
       });
@@ -1348,6 +1587,8 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       setSidebarDeletingDocumentId(document.id);
       setSidebarActionError(null);
       setSidebarActionNotice(null);
+      const subtreeDocumentIds = collectDocumentSubtreeIds(sidebarDocuments, document.id);
+      const deletedDocumentIds = subtreeDocumentIds.size > 0 ? subtreeDocumentIds : new Set([document.id]);
 
       try {
         await api.request<void>(
@@ -1360,7 +1601,11 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         setSidebarPageMenuDocId(null);
         await loadSidebarDocuments();
         await loadSidebarFavorites();
-        if (location.pathname.includes(`/doc/${document.id}`)) {
+        if (pagesBrowseMode === "NODE") {
+          await loadSidebarNodeTree();
+        }
+        const routeDocumentId = parseWorkspaceDocumentIdFromPathname(location.pathname);
+        if (routeDocumentId && deletedDocumentIds.has(routeDocumentId)) {
           navigate(workspaceRootPath(activeWorkspaceId));
         }
         setSidebarActionNotice({ tone: "success", message: "페이지를 삭제했습니다." });
@@ -1375,8 +1620,11 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       api,
       loadSidebarDocuments,
       loadSidebarFavorites,
+      loadSidebarNodeTree,
       location.pathname,
       navigate,
+      pagesBrowseMode,
+      sidebarDocuments,
       sidebarCreatingParentId,
       sidebarDeletingDocumentId,
       sidebarFavoritePendingId
@@ -1503,15 +1751,78 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       saveLastWorkspaceId(nextWorkspace.id);
       navigate(workspaceRootPath(nextWorkspace.id));
       setIsPaletteOpen(false);
+      setIsWorkspaceLauncherOpen(false);
+      setIsInviteFormOpen(false);
+      setSidebarPageMenuDocId(null);
+      setIsSidebarOpen(false);
     },
     [navigate, setWorkspace, workspaces]
   );
 
-  const goToWorkspaceHome = useCallback(() => {
+  const goToWorkspaceSettings = useCallback(() => {
     navigate("/workspace");
     setIsPaletteOpen(false);
+    setIsWorkspaceLauncherOpen(false);
+    setIsInviteFormOpen(false);
     setIsSidebarOpen(false);
   }, [navigate]);
+
+  const logoutFromWorkspace = useCallback(() => {
+    clearTokens();
+    setIsPaletteOpen(false);
+    setIsWorkspaceLauncherOpen(false);
+    setIsInviteFormOpen(false);
+    setIsSidebarOpen(false);
+    navigate("/login");
+  }, [clearTokens, navigate]);
+
+  const createWorkspaceInvite = useCallback(async () => {
+    if (!activeWorkspaceId) {
+      return;
+    }
+    const normalizedEmail = inviteEmail.trim();
+    if (!normalizedEmail) {
+      setInviteError({ message: "초대할 이메일을 입력하세요.", status: null });
+      return;
+    }
+    setInviteSubmitting(true);
+    setInviteError(null);
+    setInviteNotice(null);
+    try {
+      const payload = await api.request<WorkspaceInviteResponse>(
+        `/workspaces/${encodeURIComponent(activeWorkspaceId)}/invites`,
+        {
+          method: "POST",
+          body: JSON.stringify({ email: normalizedEmail, role: inviteRole })
+        },
+        true
+      );
+      setInviteToken(payload.invite_token);
+      setInviteNotice({ tone: "success", message: "멤버 초대 토큰을 생성했습니다." });
+    } catch (error) {
+      setInviteToken(null);
+      setInviteError(toUiError(error, "멤버 초대에 실패했습니다"));
+    } finally {
+      setInviteSubmitting(false);
+    }
+  }, [activeWorkspaceId, api, inviteEmail, inviteRole]);
+
+  const copyInviteToken = useCallback(async () => {
+    if (!inviteToken) {
+      return;
+    }
+    if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+      setInviteError({ message: "클립보드 복사를 지원하지 않는 환경입니다.", status: null });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(inviteToken);
+      setInviteError(null);
+      setInviteNotice({ tone: "success", message: "초대 토큰을 클립보드에 복사했습니다." });
+    } catch {
+      setInviteError({ message: "초대 토큰 복사에 실패했습니다. 직접 복사해 주세요.", status: null });
+    }
+  }, [inviteToken]);
 
   const commandActions = useMemo(
     () => [
@@ -1933,36 +2244,132 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
 
   return (
     <div className={`workspace-layout${isSidebarResizing ? " is-resizing" : ""}`} style={workspaceLayoutStyle}>
-      <div className={`workspace-sidebar-backdrop${isSidebarOpen ? " is-open" : ""}`} onClick={() => setIsSidebarOpen(false)} role="presentation" />
+      <div
+        className={`workspace-sidebar-backdrop${isSidebarOpen ? " is-open" : ""}`}
+        onClick={() => {
+          setIsSidebarOpen(false);
+          setIsWorkspaceLauncherOpen(false);
+          setIsInviteFormOpen(false);
+        }}
+        role="presentation"
+      />
       <aside className={`workspace-sidebar${isSidebarOpen ? " is-open" : ""}`}>
         <div className="workspace-sidebar-header">
-          <button
-            aria-label="워크스페이스 홈으로 이동"
-            className="brand brand-link"
-            onClick={goToWorkspaceHome}
-            type="button"
-          >
-            <span className="brand-mark">오</span>
-            <div className="brand-text">
-              <strong>오토독 트리</strong>
-              <span>문서 워크스페이스</span>
-            </div>
-          </button>
-          <label className="sidebar-workspace-switcher" htmlFor="workspace-switcher">
-            <span>WORKSPACE</span>
-            <select
-              className="field-input"
-              id="workspace-switcher"
-              onChange={(event) => handleWorkspaceChange(event.target.value)}
-              value={activeWorkspaceId ?? ""}
+          <div className="workspace-launcher" ref={workspaceLauncherRef}>
+            <button
+              aria-controls="workspace-launcher-popover"
+              aria-expanded={isWorkspaceLauncherOpen}
+              aria-haspopup="dialog"
+              aria-label="워크스페이스 메뉴 열기"
+              className={`brand brand-link workspace-launcher-trigger${isWorkspaceLauncherOpen ? " is-open" : ""}`}
+              onClick={() => {
+                setIsWorkspaceLauncherOpen((previous) => !previous);
+                setSidebarPageMenuDocId(null);
+              }}
+              type="button"
             >
-              {workspaces.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </option>
-              ))}
-            </select>
-          </label>
+              <span className="brand-mark">오</span>
+              <div className="brand-text">
+                <strong>{activeWorkspace?.name ?? state.workspaceName ?? "오토독 트리"}</strong>
+                <span>{activeWorkspace ? `${roleText(activeWorkspace.role)} 워크스페이스` : "문서 워크스페이스"}</span>
+              </div>
+            </button>
+            {isWorkspaceLauncherOpen ? (
+              <div aria-label="워크스페이스 메뉴" className="workspace-launcher-popover" id="workspace-launcher-popover" role="dialog">
+                <ErrorPanel error={workspaceError} />
+                <div className="workspace-launcher-current">
+                  <strong>{activeWorkspace?.name ?? state.workspaceName ?? "워크스페이스"}</strong>
+                  <span>{activeWorkspace ? `${roleText(activeWorkspace.role)} · ${workspaces.length}개 워크스페이스` : "활성 워크스페이스를 선택해 주세요."}</span>
+                </div>
+                <div className="workspace-launcher-top-actions">
+                  <button className="btn btn-ghost btn-small" onClick={goToWorkspaceSettings} type="button">
+                    설정
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-small"
+                    disabled={!activeWorkspaceId || !canInviteMembers}
+                    onClick={() => {
+                      setIsInviteFormOpen((previous) => !previous);
+                      setInviteError(null);
+                      setInviteNotice(null);
+                    }}
+                    type="button"
+                  >
+                    멤버 초대
+                  </button>
+                </div>
+                {!canInviteMembers && activeWorkspaceId ? <p className="workspace-launcher-hint">소유자 권한에서만 멤버를 초대할 수 있습니다.</p> : null}
+                {isInviteFormOpen ? (
+                  <div className="workspace-launcher-invite">
+                    <label className="field-label" htmlFor="workspace-invite-email">
+                      초대 이메일
+                    </label>
+                    <input
+                      className="field-input"
+                      id="workspace-invite-email"
+                      onChange={(event) => setInviteEmail(event.target.value)}
+                      placeholder="member@example.com"
+                      value={inviteEmail}
+                    />
+                    <label className="field-label" htmlFor="workspace-invite-role">
+                      권한
+                    </label>
+                    <select
+                      className="field-input"
+                      id="workspace-invite-role"
+                      onChange={(event) => setInviteRole(event.target.value as Workspace["role"])}
+                      value={inviteRole}
+                    >
+                      <option value="MEMBER">멤버</option>
+                      <option value="VIEWER">조회자</option>
+                    </select>
+                    <button className="btn btn-primary btn-small" disabled={inviteSubmitting || !canInviteMembers} onClick={() => void createWorkspaceInvite()} type="button">
+                      {inviteSubmitting ? "생성 중..." : "초대 링크 생성"}
+                    </button>
+                    <ErrorPanel error={inviteError} />
+                    <NoticePanel notice={inviteNotice} />
+                    {inviteToken ? (
+                      <div className="workspace-launcher-token">
+                        <code>{inviteToken}</code>
+                        <button className="btn btn-ghost btn-small" onClick={() => void copyInviteToken()} type="button">
+                          복사
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                <div className="workspace-launcher-divider" />
+                <p className="workspace-launcher-list-title">워크스페이스 목록</p>
+                <ul className="workspace-launcher-list">
+                  {workspaces.map((workspace) => {
+                    const isActiveWorkspace = workspace.id === activeWorkspaceId;
+                    return (
+                      <li key={workspace.id}>
+                        <button
+                          aria-label={`워크스페이스 전환 ${workspace.name}`}
+                          className={`workspace-launcher-item${isActiveWorkspace ? " is-active" : ""}`}
+                          onClick={() => handleWorkspaceChange(workspace.id)}
+                          type="button"
+                        >
+                          <span className="workspace-launcher-item-check" aria-hidden>
+                            {isActiveWorkspace ? "✓" : ""}
+                          </span>
+                          <span className="workspace-launcher-item-main">
+                            <strong>{workspace.name}</strong>
+                            <span>{roleText(workspace.role)}</span>
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+                <div className="workspace-launcher-divider" />
+                <button className="workspace-launcher-logout" onClick={logoutFromWorkspace} type="button">
+                  로그아웃
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <div className="sidebar-section">
@@ -2154,22 +2561,6 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
           </div>
         </div>
 
-        <div className="sidebar-footer">
-          <ErrorPanel error={workspaceError} />
-          <button className="btn btn-ghost btn-small" onClick={() => navigate("/workspace")} type="button">
-            워크스페이스 설정
-          </button>
-          <button
-            className="btn btn-secondary btn-small"
-            onClick={() => {
-              clearTokens();
-              navigate("/login");
-            }}
-            type="button"
-          >
-            로그아웃
-          </button>
-        </div>
       </aside>
 
       <div
@@ -2260,27 +2651,6 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
                   type="button"
                 >
                   Trash
-                </button>
-                <button
-                  className="header-menu-item"
-                  onClick={() => {
-                    navigate("/workspace");
-                    setIsSidebarOpen(false);
-                  }}
-                  type="button"
-                >
-                  워크스페이스 설정
-                </button>
-                <button
-                  className="header-menu-item"
-                  onClick={() => {
-                    clearTokens();
-                    navigate("/login");
-                    setIsSidebarOpen(false);
-                  }}
-                  type="button"
-                >
-                  로그아웃
                 </button>
               </div>
             ) : null}
@@ -2734,6 +3104,8 @@ export default function App() {
     );
   }
 
+  void CommandPalette;
+
   function InboxPage() {
     const [documents, setDocuments] = useState<DocumentItem[]>([]);
     const [error, setError] = useState<UiError | null>(null);
@@ -3173,10 +3545,13 @@ export default function App() {
           label: node.label,
           locked: node.locked,
           documents: nodeDocumentIds
-            .map((documentId) => ({
-              id: documentId,
-              title: summaryTitleById.get(documentId) || documentById.get(documentId)?.title || documentId
-            }))
+            .flatMap((documentId) => {
+              const document = documentById.get(documentId);
+              if (!document) {
+                return [];
+              }
+              return [{ id: documentId, title: summaryTitleById.get(documentId) || document.title }];
+            })
             .sort((left, right) => left.title.localeCompare(right.title, "ko")),
           children: []
         });
@@ -3279,7 +3654,19 @@ export default function App() {
           if (!active || selectedRequestSequence.current !== sequence) {
             return;
           }
-          setError(toUiError(e, "문서를 불러오지 못했습니다"));
+          const uiError = toUiError(e, "문서를 불러오지 못했습니다");
+          if (uiError.status === 404) {
+            setSelectedDocument(null);
+            setDraftTitle("");
+            setDraftBody("");
+            setSelectedDocumentId(null);
+            void loadDocuments();
+            if (sidebarMode === "NODE") {
+              void loadNodeTree();
+            }
+            return;
+          }
+          setError(uiError);
         } finally {
           if (active && selectedRequestSequence.current === sequence) {
             setLoadingDocument(false);
@@ -3290,7 +3677,7 @@ export default function App() {
       return () => {
         active = false;
       };
-    }, [api, selectedDocumentId, state.workspaceId]);
+    }, [api, loadDocuments, loadNodeTree, selectedDocumentId, sidebarMode, state.workspaceId]);
 
     useEffect(() => {
       if (!openMenuDocId) {
@@ -3573,6 +3960,8 @@ export default function App() {
         setOpenMenuDocId(null);
         setError(null);
         setNotice(null);
+        const subtreeDocumentIds = collectDocumentSubtreeIds(documents, documentId, sidebarState.parents);
+        const deletedDocumentIds = subtreeDocumentIds.size > 0 ? subtreeDocumentIds : new Set([documentId]);
 
         try {
           await api.request<void>(
@@ -3584,28 +3973,34 @@ export default function App() {
           );
 
           setSidebarState((previous) => {
-            const parents = { ...previous.parents };
-            const deletedParentId = parents[documentId] ?? null;
-            delete parents[documentId];
-            for (const [childId, parentId] of Object.entries(parents)) {
-              if (parentId === documentId) {
-                parents[childId] = deletedParentId;
+            const nextParents: Record<string, string | null> = {};
+            for (const [docId, parentId] of Object.entries(previous.parents)) {
+              if (deletedDocumentIds.has(docId)) {
+                continue;
               }
+              if (typeof parentId === "string" && deletedDocumentIds.has(parentId)) {
+                nextParents[docId] = null;
+                continue;
+              }
+              nextParents[docId] = parentId;
             }
             return normalizeEditorSidebarState({
-              parents,
-              favorites: previous.favorites.filter((favoriteId) => favoriteId !== documentId)
+              parents: nextParents,
+              favorites: previous.favorites.filter((favoriteId) => !deletedDocumentIds.has(favoriteId))
             });
           });
 
-          if (selectedDocumentId === documentId) {
+          if (selectedDocumentId && deletedDocumentIds.has(selectedDocumentId)) {
             setSelectedDocumentId(null);
             setSelectedDocument(null);
             setDraftTitle("");
             setDraftBody("");
           }
-          setDocuments((previous) => previous.filter((document) => document.id !== documentId));
+          setDocuments((previous) => previous.filter((document) => !deletedDocumentIds.has(document.id)));
           await loadDocuments();
+          if (sidebarMode === "NODE") {
+            await loadNodeTree();
+          }
           setNotice({ tone: "success", message: "페이지를 삭제했습니다." });
         } catch (e) {
           setError(toUiError(e, "페이지 삭제에 실패했습니다"));
@@ -3613,7 +4008,7 @@ export default function App() {
           setDeletingDocumentId(null);
         }
       },
-      [api, documentById, loadDocuments, selectedDocumentId, state.workspaceId]
+      [api, documentById, documents, loadDocuments, loadNodeTree, selectedDocumentId, sidebarMode, sidebarState.parents, state.workspaceId]
     );
 
     const copyDocumentLink = useCallback(async (documentId: string) => {
@@ -4184,73 +4579,145 @@ export default function App() {
     const [doc, setDoc] = useState<DocumentItem | null>(null);
     const [draftTitle, setDraftTitle] = useState("");
     const [draftBody, setDraftBody] = useState("");
+    const [draftBlocks, setDraftBlocks] = useState<BlockDoc>(() => normalizeBlockDoc(null, ""));
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
     const [creatingChild, setCreatingChild] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const [error, setError] = useState<UiError | null>(null);
     const [notice, setNotice] = useState<UiNotice | null>(null);
+    const [memberEmailById, setMemberEmailById] = useState<Record<string, string>>({});
+
+    const currentUserClaims = useMemo(() => parseJwtClaims(state.accessToken), [state.accessToken]);
+
+    const formatActorLabel = useCallback(
+      (actorId?: string) => {
+        if (!actorId) {
+          return "-";
+        }
+        if (currentUserClaims.sub && actorId === currentUserClaims.sub) {
+          return currentUserClaims.email ? `${currentUserClaims.email} (나)` : "나";
+        }
+        const memberEmail = memberEmailById[actorId];
+        if (memberEmail) {
+          return memberEmail;
+        }
+        return actorId.length > 12 ? `${actorId.slice(0, 8)}...` : actorId;
+      },
+      [currentUserClaims.email, currentUserClaims.sub, memberEmailById]
+    );
+
+    useEffect(() => {
+      if (!workspaceId || !state.workspaceId) {
+        setMemberEmailById({});
+        return;
+      }
+      let active = true;
+      void (async () => {
+        try {
+          const payload = await api.request<WorkspaceMemberListResponse>(`/workspaces/${workspaceId}/members`, {}, true);
+          if (!active) {
+            return;
+          }
+          const next = payload.items.reduce<Record<string, string>>((acc, item) => {
+            if (item.user_id && item.email) {
+              acc[item.user_id] = item.email;
+            }
+            return acc;
+          }, {});
+          setMemberEmailById(next);
+        } catch {
+          if (active) {
+            setMemberEmailById({});
+          }
+        }
+      })();
+      return () => {
+        active = false;
+      };
+    }, [api, state.workspaceId, workspaceId]);
 
     const loadDocument = useCallback(async () => {
       if (!documentId || !state.workspaceId) {
         setDoc(null);
         setDraftTitle("");
         setDraftBody("");
+        setDraftBlocks(normalizeBlockDoc(null, ""));
         return;
       }
       setLoading(true);
       setError(null);
       try {
         const payload = await api.request<DocumentItem>(`/documents/${documentId}`, {}, true);
+        const nextBlocks = normalizeBlockDoc(payload.blocks_json, payload.body_markdown ?? "");
         setDoc(payload);
         setDraftTitle(payload.title);
-        setDraftBody(payload.body_markdown ?? "");
+        setDraftBody(payload.body_markdown ?? blockDocToMarkdown(nextBlocks));
+        setDraftBlocks(nextBlocks);
       } catch (e) {
-        setError(toUiError(e, "문서를 불러오지 못했습니다"));
+        const uiError = toUiError(e, "문서를 불러오지 못했습니다");
+        if (uiError.status === 404 && workspaceId) {
+          emitSidebarDocumentsSync(workspaceId);
+          navigate(workspaceRootPath(workspaceId), { replace: true });
+          return;
+        }
+        setError(uiError);
       } finally {
         setLoading(false);
       }
-    }, [api, documentId, state.workspaceId]);
+    }, [api, documentId, navigate, state.workspaceId, workspaceId]);
 
     useEffect(() => {
       void loadDocument();
     }, [loadDocument]);
 
+    const baselineBlocks = useMemo(() => normalizeBlockDoc(doc?.blocks_json, doc?.body_markdown ?? ""), [doc?.blocks_json, doc?.body_markdown]);
+
     const isDirty = useMemo(() => {
       if (!doc) {
         return false;
       }
-      return draftTitle.trim() !== doc.title.trim() || draftBody !== (doc.body_markdown ?? "");
-    }, [doc, draftBody, draftTitle]);
+      const titleDirty = draftTitle.trim() !== doc.title.trim();
+      if (FEATURE_BLOCK_EDITOR) {
+        return titleDirty || JSON.stringify(draftBlocks) !== JSON.stringify(baselineBlocks);
+      }
+      return titleDirty || draftBody !== (doc.body_markdown ?? "");
+    }, [baselineBlocks, doc, draftBlocks, draftBody, draftTitle]);
 
     const saveDocument = useCallback(async () => {
       if (!documentId || !doc || !state.workspaceId || typeof doc.version !== "number") {
         return;
       }
+      const normalizedBody = FEATURE_BLOCK_EDITOR ? blockDocToMarkdown(draftBlocks) : draftBody;
       setSaving(true);
       setError(null);
       setNotice(null);
       try {
+        const requestBody: Record<string, unknown> = {
+          version: doc.version,
+          title: draftTitle.trim() || "제목 없음",
+          body_markdown: normalizedBody
+        };
+        if (FEATURE_BLOCK_EDITOR) {
+          requestBody.blocks_json = draftBlocks;
+        }
         await api.request<void>(
           `/documents/${documentId}`,
           {
             method: "PATCH",
-            body: JSON.stringify({
-              version: doc.version,
-              title: draftTitle.trim() || "제목 없음",
-              body_markdown: draftBody
-            })
+            body: JSON.stringify(requestBody)
           },
           true
         );
         await loadDocument();
+        emitSidebarDocumentsSync(workspaceId ?? state.workspaceId ?? null);
         setNotice({ tone: "success", message: "문서를 저장했습니다." });
       } catch (e) {
         setError(toUiError(e, "문서 저장에 실패했습니다"));
       } finally {
         setSaving(false);
       }
-    }, [api, doc, documentId, draftBody, draftTitle, loadDocument, state.workspaceId]);
+    }, [api, doc, documentId, draftBlocks, draftBody, draftTitle, loadDocument, state.workspaceId, workspaceId]);
 
     const createChildPage = useCallback(async () => {
       if (!state.workspaceId || !documentId || !workspaceId) {
@@ -4260,19 +4727,24 @@ export default function App() {
       setError(null);
       setNotice(null);
       try {
+        const requestBody: Record<string, unknown> = {
+          title: `${(draftTitle.trim() || doc?.title || "새 페이지")} 하위 페이지`,
+          body_markdown: "",
+          source_type: "EDITOR",
+          parent_document_id: documentId
+        };
+        if (FEATURE_BLOCK_EDITOR) {
+          requestBody.blocks_json = normalizeBlockDoc(null, "");
+        }
         const created = await api.request<{ id: string }>(
           "/documents",
           {
             method: "POST",
-            body: JSON.stringify({
-              title: `${(draftTitle.trim() || doc?.title || "새 페이지")} 하위 페이지`,
-              body_markdown: "",
-              source_type: "EDITOR",
-              parent_document_id: documentId
-            })
+            body: JSON.stringify(requestBody)
           },
           true
         );
+        emitSidebarDocumentsSync(workspaceId ?? state.workspaceId ?? null);
         navigate(workspaceDocumentPath(workspaceId, created.id));
       } catch (e) {
         setError(toUiError(e, "하위 페이지 생성에 실패했습니다"));
@@ -4299,6 +4771,7 @@ export default function App() {
           },
           true
         );
+        emitSidebarDocumentsSync(workspaceId ?? state.workspaceId ?? null);
         setNotice({ tone: "success", message: "페이지를 삭제했습니다." });
         navigate(workspaceRootPath(workspaceId));
       } catch (e) {
@@ -4307,6 +4780,72 @@ export default function App() {
         setDeleting(false);
       }
     }, [api, documentId, navigate, state.workspaceId, workspaceId]);
+
+    const uploadAttachmentForEditor = useCallback(
+      async (file: File, onProgress: (percent: number) => void) => {
+        if (!documentId || !state.workspaceId) {
+          throw new Error("문서 컨텍스트가 없습니다.");
+        }
+        const contentType = file.type || "application/octet-stream";
+        const presign = await api.request<{ attachment_id: string; upload_url: string }>(
+          "/attachments/presign",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              document_id: documentId,
+              filename: file.name,
+              content_type: contentType,
+              size: file.size
+            })
+          },
+          true
+        );
+
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.upload.addEventListener("progress", (event) => {
+            if (!event.lengthComputable) {
+              return;
+            }
+            onProgress((event.loaded / event.total) * 100);
+          });
+          xhr.addEventListener("error", () => reject(new Error("파일 업로드 중 네트워크 오류가 발생했습니다.")));
+          xhr.addEventListener("load", () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve();
+              return;
+            }
+            reject(new Error(`파일 업로드에 실패했습니다 (${xhr.status})`));
+          });
+          xhr.open("PUT", presign.upload_url);
+          xhr.setRequestHeader("Content-Type", contentType);
+          xhr.send(file);
+        });
+
+        await api.request<void>(
+          "/attachments/complete",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              attachment_id: presign.attachment_id
+            })
+          },
+          true
+        );
+
+        const refreshed = await api.request<DocumentItem>(`/documents/${documentId}`, {}, true);
+        setDoc(refreshed);
+        const found = refreshed.attachments.find((attachment) => attachment.id === presign.attachment_id);
+        return {
+          attachment_id: presign.attachment_id,
+          filename: found?.filename ?? file.name,
+          content_type: found?.content_type ?? contentType,
+          size: found?.size ?? file.size,
+          download_url: found?.download_url ?? null
+        };
+      },
+      [api, documentId, state.workspaceId]
+    );
 
     useEffect(() => {
       const onSaveShortcut = (event: KeyboardEvent) => {
@@ -4379,19 +4918,46 @@ export default function App() {
                     value={draftTitle}
                   />
 
-                  <label className="field-label" htmlFor="workspace-doc-body">
-                    본문 (Markdown)
-                  </label>
-                  <textarea
-                    className="field-textarea editor-page-textarea"
-                    id="workspace-doc-body"
-                    onChange={(event) => setDraftBody(event.target.value)}
-                    placeholder="여기에 내용을 입력하세요. Cmd/Ctrl + S로 저장할 수 있습니다."
-                    rows={22}
-                    value={draftBody}
-                  />
+                  <div className="editor-meta-row">
+                    <p className="muted">
+                      생성자 {formatActorLabel(doc.created_by)} · 생성시각 {doc.created_at ? new Date(doc.created_at).toLocaleString("ko-KR") : "-"}
+                    </p>
+                    <p className="muted">
+                      마지막 수정자 {formatActorLabel(doc.updated_by)} · 수정시각 {doc.updated_at ? new Date(doc.updated_at).toLocaleString("ko-KR") : "-"}
+                    </p>
+                  </div>
+
+                  {FEATURE_BLOCK_EDITOR ? (
+                    <EditorV2
+                      attachments={doc.attachments}
+                      disabled={loading || deleting || saving}
+                      docId={doc.id}
+                      onChange={(next) => {
+                        setDraftBlocks(next);
+                        setDraftBody(blockDocToMarkdown(next));
+                      }}
+                      onUploadAttachment={uploadAttachmentForEditor}
+                      value={draftBlocks}
+                    />
+                  ) : (
+                    <>
+                      <label className="field-label" htmlFor="workspace-doc-body">
+                        본문 (Markdown)
+                      </label>
+                      <textarea
+                        className="field-textarea editor-page-textarea"
+                        id="workspace-doc-body"
+                        onChange={(event) => setDraftBody(event.target.value)}
+                        placeholder="여기에 내용을 입력하세요. Cmd/Ctrl + S로 저장할 수 있습니다."
+                        rows={22}
+                        value={draftBody}
+                      />
+                    </>
+                  )}
                 </div>
-                <p className="muted">{isDirty ? "저장되지 않은 변경사항이 있습니다." : "모든 변경사항이 저장되었습니다."}</p>
+                <p className="muted">
+                  {saving ? "저장 중..." : isDirty ? "저장되지 않은 변경사항이 있습니다." : "모든 변경사항이 저장되었습니다."}
+                </p>
               </div>
 
               <aside className="editor-doc-side panel-soft">
@@ -5278,6 +5844,9 @@ export default function App() {
     const [dragSourceNodeId, setDragSourceNodeId] = useState<string | null>(null);
     const [treeError, setTreeError] = useState<UiError | null>(null);
     const [treeNotice, setTreeNotice] = useState<UiNotice | null>(null);
+    const [rebuildStatus, setRebuildStatus] = useState<TreeRebuildStatusResponse | null>(() =>
+      loadTreeRebuildStatusPreference(state.workspaceId)
+    );
     const [isRebuilding, setIsRebuilding] = useState(false);
     const [includeDescendants, setIncludeDescendants] = useState(false);
     const isTopicView = selectedView === "topic";
@@ -5286,11 +5855,16 @@ export default function App() {
       setSelectedView(loadTreeViewPreference(state.workspaceId));
       setSelectedNode(null);
       setIncludeDescendants(false);
+      setRebuildStatus(loadTreeRebuildStatusPreference(state.workspaceId));
     }, [state.workspaceId]);
 
     useEffect(() => {
       setIncludeDescendants(false);
     }, [selectedNode, selectedView]);
+
+    useEffect(() => {
+      saveTreeRebuildStatusPreference(state.workspaceId, rebuildStatus);
+    }, [rebuildStatus, state.workspaceId]);
 
     const refreshTree = useCallback(async () => {
       if (!state.workspaceId) {
@@ -5320,6 +5894,21 @@ export default function App() {
       } catch (e) {
         setTreeNotice(null);
         setTreeError(toUiError(e, "트리 로드에 실패했습니다"));
+      }
+    }, [api, selectedView, state.workspaceId]);
+
+    const refreshRebuildStatus = useCallback(async () => {
+      if (!state.workspaceId) {
+        setRebuildStatus(null);
+        return;
+      }
+
+      try {
+        const params = new URLSearchParams({ view: selectedView });
+        const payload = await api.request<TreeRebuildStatusResponse>(`/tree/rebuild/status?${params.toString()}`, {}, true);
+        setRebuildStatus(payload);
+      } catch (_error) {
+        return;
       }
     }, [api, selectedView, state.workspaceId]);
 
@@ -5362,7 +5951,60 @@ export default function App() {
     useEffect(() => {
       setTreeNotice(null);
       void refreshTree();
-    }, [refreshTree, state.workspaceId, selectedView]);
+      void refreshRebuildStatus();
+    }, [refreshRebuildStatus, refreshTree, state.workspaceId, selectedView]);
+
+    useEffect(() => {
+      if (!state.workspaceId) {
+        return;
+      }
+      const normalized = rebuildStatus?.status?.trim().toUpperCase() ?? "IDLE";
+      if (normalized !== "QUEUED" && normalized !== "RUNNING") {
+        return;
+      }
+      const intervalId = window.setInterval(() => {
+        void refreshRebuildStatus();
+      }, TREE_REBUILD_STATUS_POLL_MS);
+      return () => {
+        window.clearInterval(intervalId);
+      };
+    }, [rebuildStatus?.status, refreshRebuildStatus, state.workspaceId]);
+
+    const previousRebuildStatusRef = useRef<string>("IDLE");
+    useEffect(() => {
+      const next = rebuildStatus?.status?.trim().toUpperCase() ?? "IDLE";
+      const previous = previousRebuildStatusRef.current;
+      if ((previous === "QUEUED" || previous === "RUNNING") && next === "IDLE") {
+        void refreshTree();
+      }
+      previousRebuildStatusRef.current = next;
+    }, [rebuildStatus?.status, refreshTree]);
+
+    const rebuildStatusNotice = useMemo<UiNotice | null>(() => {
+      const status = rebuildStatus?.status?.trim().toUpperCase();
+      if (status === "QUEUED") {
+        const pendingCount = rebuildStatus?.pending_count ?? 0;
+        const pendingSuffix = pendingCount > 0 ? ` (대기 ${pendingCount}건)` : "";
+        return { tone: "info", message: `재빌드 요청이 처리 대기 중입니다${pendingSuffix}.` };
+      }
+      if (status === "RUNNING") {
+        const pendingCount = rebuildStatus?.pending_count ?? 0;
+        const pendingSuffix = pendingCount > 0 ? ` · 추가 대기 ${pendingCount}건` : "";
+        const runningSince = rebuildStatus?.running_since ? ` · 시작 ${new Date(rebuildStatus.running_since).toLocaleString("ko-KR")}` : "";
+        return { tone: "info", message: `재빌드가 실행 중입니다${runningSince}${pendingSuffix}.` };
+      }
+      return null;
+    }, [rebuildStatus]);
+    const normalizedRebuildStatus = rebuildStatus?.status?.trim().toUpperCase() ?? "IDLE";
+    const rebuildButtonLabel = isRebuilding
+      ? "재빌드 요청 중..."
+      : normalizedRebuildStatus === "RUNNING"
+        ? "재빌드 실행 중..."
+        : normalizedRebuildStatus === "QUEUED"
+          ? "재빌드 대기 중..."
+          : "재빌드";
+
+    const activeTreeNotice = treeNotice ?? rebuildStatusNotice;
 
     const allDocuments = useMemo<TreeDocumentView[]>(() => {
       if (!tree) {
@@ -5515,6 +6157,21 @@ export default function App() {
                       );
                       await refreshTree();
                       const normalized = rebuild.status.trim().toUpperCase();
+                      if (normalized === "QUEUED" || normalized === "RUNNING") {
+                        setRebuildStatus({
+                          status: normalized,
+                          pending_count: rebuild.pending_count,
+                          running_since: normalized === "RUNNING" ? new Date().toISOString() : null,
+                          view_type: selectedView
+                        });
+                      } else {
+                        setRebuildStatus({
+                          status: "IDLE",
+                          pending_count: 0,
+                          running_since: null,
+                          view_type: selectedView
+                        });
+                      }
                       if (normalized === "ACTIVE") {
                         setTreeNotice({ tone: "success", message: "재빌드가 완료되어 활성 트리를 갱신했습니다." });
                       } else if (normalized === "RECOMMENDED") {
@@ -5527,6 +6184,11 @@ export default function App() {
                       }
                     } catch (e) {
                       if (e instanceof RequestTimeoutError) {
+                        setRebuildStatus({
+                          status: "RUNNING",
+                          running_since: new Date().toISOString(),
+                          view_type: selectedView
+                        });
                         setTreeNotice({
                           tone: "info",
                           message: "요청이 길어지고 있습니다. 재빌드는 서버에서 계속 진행 중일 수 있습니다. 잠시 후 새로고침해 확인하세요."
@@ -5537,11 +6199,12 @@ export default function App() {
                       }
                     } finally {
                       setIsRebuilding(false);
+                      void refreshRebuildStatus();
                     }
                   }}
                   type="button"
                 >
-                  {isRebuilding ? "재빌드 요청 중..." : "재빌드"}
+                  {rebuildButtonLabel}
                 </button>
                 <button
                   className="btn btn-primary"
@@ -5583,7 +6246,7 @@ export default function App() {
               void refreshTree();
             }}
           />
-          <NoticePanel notice={treeNotice} />
+          <NoticePanel notice={activeTreeNotice} />
           {!isTopicView ? <p className="muted">현재 뷰는 탐색 전용입니다. 이동/이름변경 피드백은 Topic 뷰에서 지원됩니다.</p> : null}
 
           <div className="tree-layout">

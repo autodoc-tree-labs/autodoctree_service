@@ -8,8 +8,11 @@ export type PipelineStatus = {
 
 export type AttachmentSummary = {
   id: string;
+  filename?: string;
   content_type: string;
   size: number;
+  status?: string;
+  download_url?: string | null;
 };
 
 export type DocumentItem = {
@@ -20,7 +23,11 @@ export type DocumentItem = {
   pipeline_status: PipelineStatus;
   attachments: AttachmentSummary[];
   updated_at: string;
+  created_at?: string;
+  created_by?: string;
+  updated_by?: string;
   body_markdown?: string;
+  blocks_json?: unknown;
   workspace_id?: string;
   version?: number;
 };

@@ -83,10 +83,11 @@ const TREE_RESPONSE = {
       parent_id: null,
       label: "AutoDoc",
       locked: false,
-      documents: ["doc-1", "doc-2"],
+      documents: ["doc-1", "doc-2", "ghost-doc-uuid-1234"],
       document_summaries: [
         { id: "doc-1", title: "코난 전기" },
-        { id: "doc-2", title: "녹차의 효능" }
+        { id: "doc-2", title: "녹차의 효능" },
+        { id: "ghost-doc-uuid-1234", title: "ghost-doc-uuid-1234" }
       ]
     }
   ]
@@ -116,6 +117,46 @@ async function mockApi(page: Page) {
   const documentsByWorkspace = initialDocumentsByWorkspace();
   const trashByWorkspace = initialTrashByWorkspace();
   const favoritesByWorkspace = initialFavoritesByWorkspace();
+  const pendingUploadsByAttachmentId = new Map<
+    string,
+    { workspaceId: string; documentId: string; filename: string; contentType: string; size: number }
+  >();
+  let attachmentSequence = 1;
+
+  const collectSubtreeIds = (workspaceId: string, rootDocumentId: string): Set<string> => {
+    const docs = documentsByWorkspace[workspaceId] ?? [];
+    const childrenByParent = new Map<string, string[]>();
+    for (const doc of docs) {
+      const parentId = doc.parent_document_id;
+      if (!parentId) {
+        continue;
+      }
+      const children = childrenByParent.get(parentId) ?? [];
+      children.push(doc.id);
+      childrenByParent.set(parentId, children);
+    }
+    const ids = new Set<string>();
+    const queue = [rootDocumentId];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current || ids.has(current)) {
+        continue;
+      }
+      ids.add(current);
+      for (const childId of childrenByParent.get(current) ?? []) {
+        queue.push(childId);
+      }
+    }
+    return ids;
+  };
+
+  await page.route("**/mock-upload/**", async (route) => {
+    if (route.request().method() === "PUT") {
+      await route.fulfill({ status: 200, body: "" });
+      return;
+    }
+    await route.fallback();
+  });
 
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
@@ -126,6 +167,81 @@ async function mockApi(page: Page) {
 
     if (method === "GET" && path === "/workspaces") {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: WORKSPACES }) });
+      return;
+    }
+
+    if (method === "POST" && path === "/attachments/presign") {
+      const payload = JSON.parse(request.postData() ?? "{}") as {
+        document_id?: string;
+        filename?: string;
+        content_type?: string;
+        size?: number;
+      };
+      const documentId = payload.document_id ?? "";
+      if (!documentId) {
+        await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "document_id required" }) });
+        return;
+      }
+      const attachmentId = `att-upload-${attachmentSequence++}`;
+      pendingUploadsByAttachmentId.set(attachmentId, {
+        workspaceId,
+        documentId,
+        filename: payload.filename ?? "upload.bin",
+        contentType: payload.content_type ?? "application/octet-stream",
+        size: Number(payload.size ?? 0)
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          attachment_id: attachmentId,
+          upload_url: `http://localhost:4174/mock-upload/${attachmentId}`
+        })
+      });
+      return;
+    }
+
+    if (method === "POST" && path === "/attachments/complete") {
+      const payload = JSON.parse(request.postData() ?? "{}") as { attachment_id?: string };
+      const attachmentId = payload.attachment_id ?? "";
+      const pending = pendingUploadsByAttachmentId.get(attachmentId);
+      if (!attachmentId || !pending) {
+        await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ message: "not found" }) });
+        return;
+      }
+      const workspaceDocs = documentsByWorkspace[pending.workspaceId] ?? [];
+      const targetDocument = workspaceDocs.find((item) => item.id === pending.documentId);
+      if (!targetDocument) {
+        await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ message: "not found" }) });
+        return;
+      }
+      const encodedFilename = encodeURIComponent(pending.filename);
+      const nextAttachment = {
+        id: attachmentId,
+        filename: pending.filename,
+        content_type: pending.contentType,
+        size: pending.size,
+        status: "UPLOADED",
+        download_url: `http://localhost:59000/autodoc/workspaces/${pending.workspaceId}/attachments/${pending.documentId}/${encodedFilename}?X-Amz-Algorithm=AWS4-HMAC-SHA256`
+      };
+      targetDocument.attachments = [...targetDocument.attachments.filter((attachment) => attachment.id !== attachmentId), nextAttachment];
+      targetDocument.updated_at = "2026-02-19T10:03:00Z";
+      pendingUploadsByAttachmentId.delete(attachmentId);
+      await route.fulfill({ status: 204, body: "" });
+      return;
+    }
+
+    const invitePathMatch = path.match(/^\/workspaces\/([^/]+)\/invites$/);
+    if (invitePathMatch && method === "POST") {
+      const inviteWorkspaceId = invitePathMatch[1];
+      const payload = JSON.parse(request.postData() ?? "{}") as { email?: string; role?: string };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          invite_token: `invite-${inviteWorkspaceId}-${payload.role ?? "MEMBER"}-${(payload.email ?? "member").replace(/[^a-zA-Z0-9]/g, "")}`
+        })
+      });
       return;
     }
 
@@ -244,24 +360,41 @@ async function mockApi(page: Page) {
     if (method === "DELETE" && path.startsWith("/documents/")) {
       const documentId = path.split("/")[2] ?? "";
       const docs = documentsByWorkspace[workspaceId] ?? [];
-      const targetIndex = docs.findIndex((item) => item.id === documentId);
-      if (targetIndex < 0) {
+      if (!docs.some((item) => item.id === documentId)) {
         await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ message: "not found" }) });
         return;
       }
-      const [deleted] = docs.splice(targetIndex, 1);
-      deleted.status = "DELETED";
-      deleted.parent_document_id = null;
-      deleted.updated_at = "2026-02-19T10:01:00Z";
+      const subtreeIds = collectSubtreeIds(workspaceId, documentId);
+      const deleted: Array<(typeof docs)[number]> = [];
+      for (let index = docs.length - 1; index >= 0; index -= 1) {
+        const candidate = docs[index];
+        if (!subtreeIds.has(candidate.id)) {
+          continue;
+        }
+        const [removed] = docs.splice(index, 1);
+        removed.status = "DELETED";
+        removed.parent_document_id = null;
+        removed.updated_at = "2026-02-19T10:01:00Z";
+        deleted.unshift(removed);
+      }
       const trash = trashByWorkspace[workspaceId] ?? [];
-      trash.unshift(deleted);
-      favoritesByWorkspace[workspaceId] = (favoritesByWorkspace[workspaceId] ?? []).filter((value) => value !== documentId);
+      trash.unshift(...deleted);
+      favoritesByWorkspace[workspaceId] = (favoritesByWorkspace[workspaceId] ?? []).filter((value) => !subtreeIds.has(value));
       await route.fulfill({ status: 204, body: "" });
       return;
     }
 
     if (method === "GET" && path === "/trees") {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(TREE_RESPONSE) });
+      return;
+    }
+
+    if (method === "GET" && path === "/tree/rebuild/status") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "IDLE", pending_count: 0, view_type: "topic" })
+      });
       return;
     }
 
@@ -327,13 +460,178 @@ test("opens command palette and jumps to document editor", async ({ page }) => {
   await expect(page.getByText("모든 변경사항이 저장되었습니다.")).toBeVisible();
 });
 
+test("saving page title in editor updates sidebar page tree immediately", async ({ page }) => {
+  await page.goto("/w/ws-1/doc/doc-1");
+
+  const pagesSectionTitles = page.locator(".sidebar-section-pages .sidebar-page-title");
+  await expect(pagesSectionTitles.filter({ hasText: /^코난 전기$/ })).toHaveCount(1);
+
+  await page.getByLabel("제목").fill("코난 전기 개정판");
+  await page.getByRole("button", { name: "저장", exact: true }).click();
+
+  await expect(page.getByText("문서를 저장했습니다.")).toBeVisible();
+  await expect(pagesSectionTitles.filter({ hasText: /^코난 전기 개정판$/ })).toHaveCount(1);
+  await expect(pagesSectionTitles.filter({ hasText: /^코난 전기$/ })).toHaveCount(0);
+});
+
+test("opens image block document without tiptap mount crash", async ({ page }) => {
+  await page.route("**/api/v1/documents/doc-1", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "doc-1",
+        title: "코난 전기",
+        status: "READY",
+        parent_document_id: null,
+        pipeline_status: { ingest: "DONE", embed: "DONE", index: "DONE", tree: "DONE" },
+        attachments: [
+          {
+            id: "att-1",
+            filename: "sample.png",
+            content_type: "image/png",
+            size: 1234,
+            status: "UPLOADED",
+            download_url:
+              "http://localhost:59000/autodoc/workspaces/ws-1/attachments/doc-1/sample.png?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+          }
+        ],
+        updated_at: "2026-02-19T09:00:00Z",
+        body_markdown: "![sample](http://localhost:59000/autodoc/workspaces/ws-1/attachments/doc-1/sample.png)",
+        blocks_json: {
+          type: "doc",
+          content: [
+            {
+              type: "image",
+              attrs: {
+                src: "http://localhost:59000/autodoc/workspaces/ws-1/attachments/doc-1/sample.png",
+                alt: "sample.png",
+                width: "200%",
+                attachmentId: "att-1",
+                filename: "sample.png",
+                mimeType: "image/png",
+                size: 1234
+              }
+            },
+            {
+              type: "paragraph",
+              content: [{ type: "text", text: "이미지 테스트 문서" }]
+            }
+          ]
+        },
+        version: 1
+      })
+    });
+  });
+
+  await page.goto("/w/ws-1/doc/doc-1");
+  await expect(page.getByLabel("제목")).toHaveValue("코난 전기");
+  await expect(page.getByText("모든 변경사항이 저장되었습니다.")).toBeVisible();
+  await expect(page.locator(".error-panel")).toHaveCount(0);
+  await expect(page.locator(".editor-v2-image-node").first()).toHaveAttribute("style", /width:\s*100%/i);
+  await expect(page.locator(".editor-v2-image-node img").first()).toHaveAttribute(
+    "src",
+    /X-Amz-Algorithm=AWS4-HMAC-SHA256/
+  );
+});
+
+test("drag and drop upload inserts file block without upload button click", async ({ page }) => {
+  await page.goto("/w/ws-1/doc/doc-1");
+  await expect(page.getByLabel("제목")).toHaveValue("코난 전기");
+
+  const dataTransfer = await page.evaluateHandle(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(["drag-drop payload"], "drag-note.txt", { type: "text/plain" }));
+    return dt;
+  });
+
+  const editorSurface = page.locator(".editor-v2-prosemirror");
+  await editorSurface.dispatchEvent("drop", { dataTransfer });
+
+  await expect(page.locator(".editor-v2-file a").first()).toHaveText("drag-note.txt");
+  await dataTransfer.dispose();
+});
+
+test("slash menu arrow navigation auto-scrolls to keep active item visible", async ({ page }) => {
+  await page.goto("/w/ws-1/doc/doc-1");
+
+  const editorSurface = page.locator(".editor-v2-prosemirror");
+  await editorSurface.click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/");
+
+  const slashMenu = page.locator(".editor-v2-slash");
+  await expect(slashMenu).toBeVisible();
+  const initialScrollTop = await slashMenu.evaluate((element) => element.scrollTop);
+
+  for (let index = 0; index < 20; index += 1) {
+    await page.keyboard.press("ArrowDown");
+  }
+
+  await expect
+    .poll(async () => slashMenu.evaluate((element) => element.scrollTop), { timeout: 5000 })
+    .toBeGreaterThan(initialScrollTop);
+});
+
 test("switching workspace updates route and page tree", async ({ page }) => {
   await page.goto("/w/ws-1");
-  await expect(page.getByRole("button", { name: /코난 전기/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "• ★ 코난 전기", exact: true })).toBeVisible();
 
-  await page.selectOption("#workspace-switcher", "ws-2");
+  await page.getByRole("button", { name: "워크스페이스 메뉴 열기" }).click();
+  await page.getByRole("button", { name: "워크스페이스 전환 Research" }).click();
   await expect(page).toHaveURL(/\/w\/ws-2/);
   await expect(page.getByRole("button", { name: "• 도쿄 비즈니스 예절", exact: true })).toBeVisible();
+});
+
+test("workspace launcher shows settings, invite, and logout actions", async ({ page }) => {
+  await page.goto("/w/ws-1");
+
+  await page.getByRole("button", { name: "워크스페이스 메뉴 열기" }).click();
+  await expect(page.getByRole("button", { name: "설정" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "멤버 초대" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
+
+  await page.getByRole("button", { name: "멤버 초대" }).click();
+  await page.getByLabel("초대 이메일").fill("invitee@example.com");
+  await page.getByLabel("권한").selectOption("VIEWER");
+  await page.getByRole("button", { name: "초대 링크 생성" }).click();
+  await expect(page.getByText("멤버 초대 토큰을 생성했습니다.")).toBeVisible();
+  await expect(page.locator(".workspace-launcher-token code")).toContainText("invite-ws-1-VIEWER");
+});
+
+test("tree rebuild status notice remains visible after refresh from cached status", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "autodoc.tree.rebuild-status.by_workspace.v1",
+      JSON.stringify({
+        "ws-1": {
+          status: "QUEUED",
+          pending_count: 2,
+          view_type: "topic",
+          cached_at: new Date().toISOString()
+        }
+      })
+    );
+  });
+
+  await page.route("**/api/v1/tree/rebuild/status**", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "Unexpected error" } })
+    });
+  });
+
+  await page.goto("/w/ws-1/view/tree");
+  await expect(page.getByText("재빌드 요청이 처리 대기 중입니다 (대기 2건).")).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByText("재빌드 요청이 처리 대기 중입니다 (대기 2건).")).toBeVisible();
 });
 
 test("page row hover shows quick actions and context menu", async ({ page }) => {
@@ -384,6 +682,34 @@ test("favorite toggle from page menu updates favorites section", async ({ page }
   await targetRow.getByRole("menuitem", { name: "즐겨찾기에 추가" }).click();
 
   await expect(page.getByRole("button", { name: "★ 녹차의 효능", exact: true })).toBeVisible();
+});
+
+test("deleting parent page from sidebar also removes child pages", async ({ page }) => {
+  await page.goto("/w/ws-1");
+
+  const pagesTitles = page.locator(".sidebar-section-pages .sidebar-page-title");
+  await expect(pagesTitles.filter({ hasText: /^코난 전기$/ })).toHaveCount(1);
+  await expect(pagesTitles.filter({ hasText: /^코난 전기 하위$/ })).toHaveCount(1);
+
+  const parentRow = page.locator(".sidebar-page-row").filter({
+    has: page.locator(".sidebar-page-title", { hasText: /^코난 전기$/ })
+  });
+  await parentRow.first().hover();
+  await parentRow.first().getByRole("button", { name: "페이지 메뉴" }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await parentRow.first().getByRole("menuitem", { name: "휴지통으로 이동" }).click();
+
+  await expect(page.getByText("페이지를 삭제했습니다.")).toBeVisible();
+  await expect(pagesTitles.filter({ hasText: /^코난 전기$/ })).toHaveCount(0);
+  await expect(pagesTitles.filter({ hasText: /^코난 전기 하위$/ })).toHaveCount(0);
+});
+
+test("node browse mode hides stale tree memberships without live documents", async ({ page }) => {
+  await page.goto("/w/ws-1");
+  await page.getByRole("tab", { name: "노드로 분류" }).click();
+  await expect(page.locator(".sidebar-node-label", { hasText: "AutoDoc" })).toBeVisible();
+  await expect(page.locator(".sidebar-node-doc-title", { hasText: "코난 전기" })).toHaveCount(1);
+  await expect(page.locator(".sidebar-node-doc-title", { hasText: "ghost-doc-uuid-1234" })).toHaveCount(0);
 });
 
 test("drag and drop page row moves document under another document", async ({ page }) => {
