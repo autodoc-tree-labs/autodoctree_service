@@ -1,6 +1,7 @@
 package com.autodoctree.api.domain
 
 import com.autodoctree.api.db.AttachmentRepository
+import com.autodoctree.api.db.DocumentFavoriteRepository
 import com.autodoctree.api.db.DocumentRepository
 import com.autodoctree.api.db.PipelineStatusRow
 import com.autodoctree.api.db.PipelineStatusRepository
@@ -55,6 +56,7 @@ class OutboxService(
 @Service
 class DocumentService(
     private val documentRepository: DocumentRepository,
+    private val documentFavoriteRepository: DocumentFavoriteRepository,
     private val pipelineStatusRepository: PipelineStatusRepository,
     private val attachmentRepository: AttachmentRepository,
     private val outboxService: OutboxService,
@@ -171,6 +173,107 @@ class DocumentService(
         )
     }
 
+    fun listTrash(
+        context: WorkspaceContext,
+        query: String?,
+        page: Int,
+        size: Int
+    ): Map<String, Any?> {
+        val items = documentRepository.listDeletedByWorkspace(
+            workspaceId = context.workspaceId,
+            query = query,
+            page = page,
+            size = size
+        )
+        val total = documentRepository.countDeletedByWorkspace(context.workspaceId, query)
+        val payload = items.map { document ->
+            val pipeline = pipelineStatusRepository.findByWorkspaceAndDocument(context.workspaceId, document.id)
+            mapOf(
+                "id" to document.id,
+                "title" to document.title,
+                "parent_document_id" to document.parentDocumentId,
+                "status" to document.status,
+                "updated_at" to document.updatedAt.toString(),
+                "pipeline_status" to mapOf(
+                    "ingest" to (pipeline?.ingestStatus?.name ?: "PENDING"),
+                    "embed" to (pipeline?.embedStatus?.name ?: "PENDING"),
+                    "index" to (pipeline?.indexStatus?.name ?: "PENDING"),
+                    "tree" to (pipeline?.treeStatus?.name ?: "PENDING")
+                ),
+                "attachments" to attachmentRepository.listByWorkspaceAndDocument(context.workspaceId, document.id).map {
+                    mapOf(
+                        "id" to it.id,
+                        "content_type" to it.contentType,
+                        "size" to it.size
+                    )
+                }
+            )
+        }
+        return mapOf(
+            "items" to payload,
+            "page" to page,
+            "size" to size,
+            "total" to total
+        )
+    }
+
+    fun listFavorites(context: WorkspaceContext): Map<String, Any?> {
+        val favorites = documentFavoriteRepository.listByWorkspaceAndUser(context.workspaceId, context.userId)
+        return mapOf(
+            "items" to favorites.map { favorite ->
+                mapOf(
+                    "document_id" to favorite.documentId,
+                    "created_at" to favorite.createdAt.toString()
+                )
+            },
+            "total" to favorites.size
+        )
+    }
+
+    @Transactional
+    fun addFavorite(context: WorkspaceContext, documentId: String) {
+        documentRepository.findByWorkspaceAndId(context.workspaceId, documentId) ?: throw NotFoundException()
+        documentFavoriteRepository.add(context.workspaceId, context.userId, documentId)
+        auditService.write(
+            context.workspaceId,
+            context.userId,
+            "document.favorite.add",
+            mapOf("document_id" to documentId)
+        )
+    }
+
+    @Transactional
+    fun removeFavorite(context: WorkspaceContext, documentId: String) {
+        documentFavoriteRepository.remove(context.workspaceId, context.userId, documentId)
+        auditService.write(
+            context.workspaceId,
+            context.userId,
+            "document.favorite.remove",
+            mapOf("document_id" to documentId)
+        )
+    }
+
+    @Transactional
+    fun moveDocument(context: WorkspaceContext, documentId: String, parentDocumentId: String?) {
+        requireEditor(context)
+        val document = documentRepository.findByWorkspaceAndId(context.workspaceId, documentId) ?: throw NotFoundException()
+        val resolvedParentDocumentId = resolveMoveParentDocumentId(context, document.id, parentDocumentId)
+        if (document.parentDocumentId == resolvedParentDocumentId) {
+            return
+        }
+        documentRepository.moveParent(context.workspaceId, document.id, resolvedParentDocumentId)
+        auditService.write(
+            context.workspaceId,
+            context.userId,
+            "document.move",
+            mapOf(
+                "document_id" to document.id,
+                "from_parent_document_id" to document.parentDocumentId,
+                "to_parent_document_id" to resolvedParentDocumentId
+            )
+        )
+    }
+
     @Transactional
     fun patchDocument(
         context: WorkspaceContext,
@@ -202,12 +305,37 @@ class DocumentService(
     fun deleteDocument(context: WorkspaceContext, documentId: String) {
         requireEditor(context)
         documentRepository.findByWorkspaceAndId(context.workspaceId, documentId) ?: throw NotFoundException()
+        documentFavoriteRepository.removeByDocument(context.workspaceId, documentId)
         documentRepository.softDelete(context.workspaceId, documentId)
         outboxService.enqueue(
             workspaceId = context.workspaceId,
             documentId = documentId,
             eventType = "DocumentDeleted",
             payload = mapOf("document_id" to documentId)
+        )
+    }
+
+    @Transactional
+    fun restoreDocument(context: WorkspaceContext, documentId: String) {
+        requireEditor(context)
+        val deleted = documentRepository.findDeletedByWorkspaceAndId(context.workspaceId, documentId) ?: throw NotFoundException()
+        documentRepository.restore(context.workspaceId, documentId, status = "PROCESSING")
+        pipelineStatusRepository.markRetryPendingFromStage(context.workspaceId, documentId, Stage.INGEST)
+        outboxService.enqueue(
+            workspaceId = context.workspaceId,
+            documentId = documentId,
+            eventType = "DocumentSaved",
+            payload = mapOf(
+                "document_id" to documentId,
+                "source_type" to deleted.sourceType,
+                "restored" to true
+            )
+        )
+        auditService.write(
+            context.workspaceId,
+            context.userId,
+            "document.restore",
+            mapOf("document_id" to documentId)
         )
     }
 
@@ -253,6 +381,32 @@ class DocumentService(
         val normalized = parentDocumentId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         val parent = documentRepository.findByWorkspaceAndId(context.workspaceId, normalized)
             ?: throw BadRequestException("parent document not found")
+        return parent.id
+    }
+
+    private fun resolveMoveParentDocumentId(
+        context: WorkspaceContext,
+        documentId: String,
+        parentDocumentId: String?
+    ): String? {
+        val normalized = parentDocumentId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (normalized == documentId) {
+            throw BadRequestException("parent document cycle")
+        }
+        val parent = documentRepository.findByWorkspaceAndId(context.workspaceId, normalized)
+            ?: throw BadRequestException("parent document not found")
+        val documents = documentRepository.listWorkspaceDocuments(context.workspaceId).associateBy { it.id }
+        val seen = mutableSetOf<String>()
+        var cursor: String? = parent.id
+        while (cursor != null) {
+            if (!seen.add(cursor)) {
+                break
+            }
+            if (cursor == documentId) {
+                throw BadRequestException("parent document cycle")
+            }
+            cursor = documents[cursor]?.parentDocumentId
+        }
         return parent.id
     }
 

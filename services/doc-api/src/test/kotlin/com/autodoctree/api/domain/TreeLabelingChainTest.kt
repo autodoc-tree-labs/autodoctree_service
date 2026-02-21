@@ -75,6 +75,55 @@ class TreeLabelingChainTest {
         assertTrue(label.contains("사회") || label.contains("연구"))
     }
 
+    @Test
+    fun `singleton cluster keeps specific label without 기타 suffix`() {
+        val registry = SimpleMeterRegistry()
+        val featureFlags = featureFlags(llmLabeling = true, tfidfFallback = true)
+        val treeLabeler = TreeLabeler(FallbackTokenizer(), featureFlags, registry)
+        val llmLabeler = LlmLabeler(featureFlags, MutableFakeLlmGenerator("녹차"), PromptTemplateLoader(), registry)
+        val chain = LabelerChain(
+            featureFlags = featureFlags,
+            llmLabeler = llmLabeler,
+            titlePhraseLabeler = TitlePhraseLabeler(),
+            tfidfLabeler = TfidfLabeler(treeLabeler),
+            treeLabeler = treeLabeler,
+            meterRegistry = registry
+        )
+
+        val docs = listOf(doc("d1", "녹차의 효능", "카테킨과 항산화"))
+        val clusters = listOf(TreeCluster("c1", docs.map { it.id }, qualityScore = 0.95))
+
+        val result = chain.labelClusters(docs, clusters)
+
+        assertEquals("녹차", result.labelsByCluster.getValue("c1"))
+    }
+
+    @Test
+    fun `low quality cluster still falls back to 기타 suffix`() {
+        val registry = SimpleMeterRegistry()
+        val featureFlags = featureFlags(llmLabeling = true, tfidfFallback = true)
+        val treeLabeler = TreeLabeler(FallbackTokenizer(), featureFlags, registry)
+        val llmLabeler = LlmLabeler(featureFlags, MutableFakeLlmGenerator("녹차"), PromptTemplateLoader(), registry)
+        val chain = LabelerChain(
+            featureFlags = featureFlags,
+            llmLabeler = llmLabeler,
+            titlePhraseLabeler = TitlePhraseLabeler(),
+            tfidfLabeler = TfidfLabeler(treeLabeler),
+            treeLabeler = treeLabeler,
+            meterRegistry = registry
+        )
+
+        val docs = listOf(
+            doc("d1", "녹차 가이드", "카테킨"),
+            doc("d2", "녹차 추출", "폴리페놀")
+        )
+        val clusters = listOf(TreeCluster("c1", docs.map { it.id }, qualityScore = 0.1))
+
+        val result = chain.labelClusters(docs, clusters)
+
+        assertEquals("녹차-기타", result.labelsByCluster.getValue("c1"))
+    }
+
     private fun featureFlags(llmLabeling: Boolean, tfidfFallback: Boolean): FeatureFlags {
         return FeatureFlags(
             autoTree = true,

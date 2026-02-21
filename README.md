@@ -152,8 +152,9 @@ pnpm -C web-admin dev --port 5173
 - Sidebar 구성:
   - Workspace switcher
   - Quick actions (`새 페이지`, `검색/Cmd+K`)
-  - `Pages` 문서 트리(부모-자식)
-  - `Views` (`Documents`, `Tree`, `Questions`)
+  - `Favorites` (사용자별 즐겨찾기 문서, `...` 메뉴에서 토글)
+  - `Pages` 문서 트리(부모-자식, 드래그로 하위/루트 이동)
+  - `Views` (`Documents`, `Tree`, `Questions`, `Trash`)
 - Main은 문서 중심 흐름입니다:
   - 문서 클릭 시 `/w/:workspaceId/doc/:docId` 편집 화면
   - 문서함/트리/질문함은 Sidebar View 전환으로 접근
@@ -165,6 +166,7 @@ pnpm -C web-admin dev --port 5173
 - `/w/:workspaceId/view/documents`
 - `/w/:workspaceId/view/tree`
 - `/w/:workspaceId/view/questions`
+- `/w/:workspaceId/view/trash`
 
 단축키:
 - `Cmd/Ctrl + K`: Command Palette(문서 열기/새 페이지/뷰 이동)

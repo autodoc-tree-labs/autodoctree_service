@@ -1779,7 +1779,9 @@ class TreeLabeler(
         if (usedPhrase || label.contains('-')) {
             phraseLabelCounter.increment()
         }
-        val lowQualityCluster = clusterQualityScore < 0.32 || clusterSize < 2
+        val lowQualityByScore = clusterQualityScore < 0.32
+        val lowQualityBySize = clusterSize < 2 && isGenericLikeLabel(label)
+        val lowQualityCluster = lowQualityByScore || lowQualityBySize
         if (lowQualityCluster) {
             val topLevel = topLevelLabel(if (label == "기타") fallbackLabel else label)
             label = "$topLevel-기타"
@@ -1809,6 +1811,18 @@ class TreeLabeler(
             .trim('-')
             .ifBlank { "" }
             .take(20)
+    }
+
+    private fun isGenericLikeLabel(label: String): Boolean {
+        val normalized = label.trim().lowercase(Locale.ROOT)
+        if (normalized.isBlank() || genericTerms.contains(normalized)) {
+            return true
+        }
+        val tokens = normalized
+            .split('-')
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        return tokens.isEmpty() || tokens.all { genericTerms.contains(it) }
     }
 
     private fun selectLabelTerms(scoredTerms: List<ScoredLabelTerm>, clusterSize: Int): List<String> {

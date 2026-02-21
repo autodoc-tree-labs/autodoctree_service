@@ -12,6 +12,7 @@ type AuthResponse = {
 
 type WorkspaceListResponse = { items: Workspace[] };
 type DocumentListResponse = { items: DocumentItem[]; page: number; size: number; total: number };
+type FavoriteDocumentListResponse = { items: Array<{ document_id: string; created_at?: string }>; total: number };
 type SearchResponse = { items: Array<{ document_id: string; title: string; score: number }> };
 type TreeNodeDocumentSummary = {
   id: string;
@@ -81,7 +82,7 @@ type SidebarPageNode = {
   children: SidebarPageNode[];
 };
 
-type SidebarViewKey = "documents" | "tree" | "questions" | "workspace";
+type SidebarViewKey = "documents" | "tree" | "questions" | "trash" | "workspace";
 type AppApiClient = ReturnType<typeof createApiClient>;
 
 type QuestionItem = {
@@ -293,6 +294,9 @@ const detectSidebarView = (pathname: string): SidebarViewKey => {
   }
   if (pathname.includes("/view/questions") || pathname.endsWith("/questions")) {
     return "questions";
+  }
+  if (pathname.includes("/view/trash") || pathname.endsWith("/trash")) {
+    return "trash";
   }
   if (pathname === "/workspace" || pathname.startsWith("/workspace/")) {
     return "workspace";
@@ -748,12 +752,26 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceError, setWorkspaceError] = useState<UiError | null>(null);
   const [sidebarDocuments, setSidebarDocuments] = useState<DocumentItem[]>([]);
+  const [sidebarFavoriteDocumentIds, setSidebarFavoriteDocumentIds] = useState<string[]>([]);
   const [documentError, setDocumentError] = useState<UiError | null>(null);
+  const [sidebarFavoriteError, setSidebarFavoriteError] = useState<UiError | null>(null);
   const [sidebarNodeError, setSidebarNodeError] = useState<UiError | null>(null);
   const [sidebarNodeTreeResponse, setSidebarNodeTreeResponse] = useState<TreeActiveResponse | null>(null);
   const [loadingSidebarNodeTree, setLoadingSidebarNodeTree] = useState(false);
   const [pagesBrowseMode, setPagesBrowseMode] = useState<EditorSidebarMode>("DOCUMENT");
   const [sidebarQuery, setSidebarQuery] = useState("");
+  const [sidebarPageMenuDocId, setSidebarPageMenuDocId] = useState<string | null>(null);
+  const [sidebarRenamingDocumentId, setSidebarRenamingDocumentId] = useState<string | null>(null);
+  const [sidebarRenameDraft, setSidebarRenameDraft] = useState("");
+  const [sidebarRenamePendingDocumentId, setSidebarRenamePendingDocumentId] = useState<string | null>(null);
+  const [sidebarCreatingParentId, setSidebarCreatingParentId] = useState<string | null>(null);
+  const [sidebarDeletingDocumentId, setSidebarDeletingDocumentId] = useState<string | null>(null);
+  const [sidebarFavoritePendingId, setSidebarFavoritePendingId] = useState<string | null>(null);
+  const [sidebarDraggingDocumentId, setSidebarDraggingDocumentId] = useState<string | null>(null);
+  const [sidebarDropTarget, setSidebarDropTarget] = useState<{ targetDocumentId: string | null; mode: "CHILD" | "SIBLING" | "ROOT" } | null>(null);
+  const [sidebarMovePendingDocumentId, setSidebarMovePendingDocumentId] = useState<string | null>(null);
+  const [sidebarActionError, setSidebarActionError] = useState<UiError | null>(null);
+  const [sidebarActionNotice, setSidebarActionNotice] = useState<UiNotice | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
@@ -767,6 +785,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
 
   useEffect(() => {
     setIsSidebarOpen(false);
+    setSidebarPageMenuDocId(null);
   }, [location.pathname]);
 
   useEffect(() => {
@@ -775,6 +794,23 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     }
     saveLastWorkspaceId(state.workspaceId);
   }, [state.workspaceId]);
+
+  useEffect(() => {
+    setSidebarActionError(null);
+    setSidebarActionNotice(null);
+    setSidebarPageMenuDocId(null);
+    setSidebarRenamingDocumentId(null);
+    setSidebarRenameDraft("");
+    setSidebarRenamePendingDocumentId(null);
+    setSidebarCreatingParentId(null);
+    setSidebarDeletingDocumentId(null);
+    setSidebarFavoritePendingId(null);
+    setSidebarDraggingDocumentId(null);
+    setSidebarDropTarget(null);
+    setSidebarMovePendingDocumentId(null);
+    setSidebarFavoriteDocumentIds([]);
+    setSidebarFavoriteError(null);
+  }, [activeWorkspaceId]);
 
   useEffect(() => {
     if (!state.accessToken) {
@@ -830,33 +866,54 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     }
   }, [location.pathname, navigate, routeWorkspaceId, setWorkspace, state.accessToken, state.workspaceId, workspaces]);
 
-  useEffect(() => {
+  const loadSidebarDocuments = useCallback(async () => {
     if (!activeWorkspaceId) {
       setSidebarDocuments([]);
+      setSidebarFavoriteDocumentIds([]);
       setSidebarNodeTreeResponse(null);
       setSidebarNodeError(null);
       return;
     }
-    let active = true;
-    void (async () => {
-      try {
-        const response = await api.request<DocumentListResponse>("/documents?page=0&size=200", {}, true);
-        if (!active) {
-          return;
-        }
-        setSidebarDocuments(response.items);
-        setDocumentError(null);
-      } catch (error) {
-        if (!active) {
-          return;
-        }
-        setDocumentError(toUiError(error, "페이지 목록을 불러오지 못했습니다"));
-      }
-    })();
-    return () => {
-      active = false;
-    };
+    try {
+      const response = await api.request<DocumentListResponse>("/documents?page=0&size=200", {}, true);
+      setSidebarDocuments(response.items);
+      setDocumentError(null);
+    } catch (error) {
+      setDocumentError(toUiError(error, "페이지 목록을 불러오지 못했습니다"));
+    }
   }, [activeWorkspaceId, api]);
+
+  const loadSidebarFavorites = useCallback(async () => {
+    if (!activeWorkspaceId) {
+      setSidebarFavoriteDocumentIds([]);
+      setSidebarFavoriteError(null);
+      return;
+    }
+    try {
+      const response = await api.request<FavoriteDocumentListResponse>("/documents/favorites", {}, true);
+      const favoriteIds = Array.isArray(response.items)
+        ? response.items
+            .map((item) => item.document_id)
+            .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        : [];
+      setSidebarFavoriteDocumentIds(Array.from(new Set(favoriteIds)));
+      setSidebarFavoriteError(null);
+    } catch (error) {
+      setSidebarFavoriteError(toUiError(error, "즐겨찾기 목록을 불러오지 못했습니다"));
+    }
+  }, [activeWorkspaceId, api]);
+
+  useEffect(() => {
+    if (!activeWorkspaceId) {
+      setSidebarDocuments([]);
+      setSidebarFavoriteDocumentIds([]);
+      setSidebarNodeTreeResponse(null);
+      setSidebarNodeError(null);
+      return;
+    }
+    void loadSidebarDocuments();
+    void loadSidebarFavorites();
+  }, [activeWorkspaceId, loadSidebarDocuments, loadSidebarFavorites]);
 
   const loadSidebarNodeTree = useCallback(async () => {
     if (!activeWorkspaceId) {
@@ -913,8 +970,58 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     };
   }, [isPaletteOpen]);
 
+  useEffect(() => {
+    if (!sidebarPageMenuDocId) {
+      return;
+    }
+
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      let cursor = event.target as HTMLElement | null;
+      while (cursor) {
+        if (cursor.dataset.sidebarMenuRoot === sidebarPageMenuDocId) {
+          return;
+        }
+        cursor = cursor.parentElement;
+      }
+      setSidebarPageMenuDocId(null);
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSidebarPageMenuDocId(null);
+      }
+    };
+
+    window.addEventListener("mousedown", closeOnOutsideClick);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("mousedown", closeOnOutsideClick);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [sidebarPageMenuDocId]);
+
+  useEffect(() => {
+    if (sidebarRenamingDocumentId && sidebarRenamingDocumentId !== sidebarPageMenuDocId) {
+      setSidebarRenamingDocumentId(null);
+      setSidebarRenameDraft("");
+      setSidebarRenamePendingDocumentId(null);
+    }
+  }, [sidebarPageMenuDocId, sidebarRenamingDocumentId]);
+
   const pageTreeRoots = useMemo(() => buildSidebarPageTree(sidebarDocuments), [sidebarDocuments]);
   const filteredPageTreeRoots = useMemo(() => filterSidebarPageTree(pageTreeRoots, sidebarQuery), [pageTreeRoots, sidebarQuery]);
+  const sidebarFavoriteSet = useMemo(() => new Set(sidebarFavoriteDocumentIds), [sidebarFavoriteDocumentIds]);
+  const sidebarDocumentById = useMemo(() => new Map(sidebarDocuments.map((document) => [document.id, document])), [sidebarDocuments]);
+  const favoriteSidebarDocuments = useMemo(() => {
+    const matched = sidebarFavoriteDocumentIds
+      .map((documentId) => sidebarDocumentById.get(documentId))
+      .filter((document): document is DocumentItem => document !== undefined);
+    const normalizedQuery = sidebarQuery.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return matched;
+    }
+    return matched.filter((document) => document.title.toLowerCase().includes(normalizedQuery));
+  }, [sidebarDocumentById, sidebarFavoriteDocumentIds, sidebarQuery]);
 
   const sidebarNodeTrees = useMemo<EditorNodeTree[]>(() => {
     if (!sidebarNodeTreeResponse) {
@@ -1032,6 +1139,271 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     }
   }, [activeWorkspaceId, api, creatingRootPage, navigate]);
 
+  const createSidebarChildPage = useCallback(
+    async (parentDocument: DocumentItem) => {
+      if (!activeWorkspaceId || sidebarCreatingParentId || sidebarDeletingDocumentId) {
+        return;
+      }
+      setSidebarCreatingParentId(parentDocument.id);
+      setSidebarActionError(null);
+      setSidebarActionNotice(null);
+      try {
+        const parentTitle = parentDocument.title.trim();
+        const created = await api.request<{ id: string }>(
+          "/documents",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              title: parentTitle ? `${parentTitle} 하위 페이지` : "새 페이지",
+              body_markdown: "",
+              source_type: "EDITOR",
+              parent_document_id: parentDocument.id
+            })
+          },
+          true
+        );
+        setSidebarPageMenuDocId(null);
+        await loadSidebarDocuments();
+        await loadSidebarFavorites();
+        navigate(workspaceDocumentPath(activeWorkspaceId, created.id));
+        setSidebarActionNotice({ tone: "success", message: "하위 페이지를 생성했습니다." });
+      } catch (error) {
+        setSidebarActionError(toUiError(error, "하위 페이지 생성에 실패했습니다"));
+      } finally {
+        setSidebarCreatingParentId(null);
+      }
+    },
+    [activeWorkspaceId, api, loadSidebarDocuments, loadSidebarFavorites, navigate, sidebarCreatingParentId, sidebarDeletingDocumentId]
+  );
+
+  const copySidebarDocumentLink = useCallback(
+    async (documentId: string) => {
+      setSidebarActionError(null);
+      try {
+        const copiedUrl = activeWorkspaceId
+          ? `${window.location.origin}${workspaceDocumentPath(activeWorkspaceId, documentId)}`
+          : `${window.location.origin}/documents/${documentId}`;
+        await copyTextToClipboard(copiedUrl);
+        setSidebarActionNotice({ tone: "info", message: "문서 링크를 복사했습니다." });
+      } catch (error) {
+        setSidebarActionError(toUiError(error, "링크 복사에 실패했습니다"));
+      } finally {
+        setSidebarPageMenuDocId(null);
+      }
+    },
+    [activeWorkspaceId]
+  );
+
+  const beginSidebarDocumentRename = useCallback((document: DocumentItem) => {
+    setSidebarActionError(null);
+    setSidebarActionNotice(null);
+    setSidebarPageMenuDocId(document.id);
+    setSidebarRenamingDocumentId(document.id);
+    setSidebarRenameDraft(document.title);
+  }, []);
+
+  const cancelSidebarDocumentRename = useCallback(() => {
+    if (sidebarRenamePendingDocumentId) {
+      return;
+    }
+    setSidebarRenamingDocumentId(null);
+    setSidebarRenameDraft("");
+  }, [sidebarRenamePendingDocumentId]);
+
+  const renameSidebarDocument = useCallback(
+    async (document: DocumentItem) => {
+      if (sidebarRenamePendingDocumentId) {
+        return;
+      }
+      const nextTitle = sidebarRenameDraft.trim();
+      if (!nextTitle || nextTitle === document.title) {
+        setSidebarRenamingDocumentId(null);
+        setSidebarRenameDraft("");
+        return;
+      }
+
+      setSidebarActionError(null);
+      setSidebarActionNotice(null);
+      setSidebarRenamePendingDocumentId(document.id);
+
+      try {
+        const current = await api.request<DocumentItem>(`/documents/${document.id}`, {}, true);
+        if (typeof current.version !== "number") {
+          throw new Error("document_version_missing");
+        }
+        await api.request<void>(
+          `/documents/${document.id}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({
+              version: current.version,
+              title: nextTitle,
+              body_markdown: current.body_markdown ?? ""
+            })
+          },
+          true
+        );
+        setSidebarPageMenuDocId(null);
+        setSidebarRenamingDocumentId(null);
+        setSidebarRenameDraft("");
+        await loadSidebarDocuments();
+        setSidebarActionNotice({ tone: "success", message: "페이지 이름을 변경했습니다." });
+      } catch (error) {
+        setSidebarActionError(toUiError(error, "페이지 이름 변경에 실패했습니다"));
+      } finally {
+        setSidebarRenamePendingDocumentId(null);
+      }
+    },
+    [api, loadSidebarDocuments, sidebarRenameDraft, sidebarRenamePendingDocumentId]
+  );
+
+  const deleteSidebarDocument = useCallback(
+    async (document: DocumentItem) => {
+      if (!activeWorkspaceId || sidebarDeletingDocumentId || sidebarCreatingParentId || sidebarFavoritePendingId) {
+        return;
+      }
+      const confirmed = window.confirm(`"${document.title}" 페이지를 삭제하시겠습니까?`);
+      if (!confirmed) {
+        return;
+      }
+
+      setSidebarDeletingDocumentId(document.id);
+      setSidebarActionError(null);
+      setSidebarActionNotice(null);
+
+      try {
+        await api.request<void>(
+          `/documents/${document.id}`,
+          {
+            method: "DELETE"
+          },
+          true
+        );
+        setSidebarPageMenuDocId(null);
+        await loadSidebarDocuments();
+        await loadSidebarFavorites();
+        if (location.pathname.includes(`/doc/${document.id}`)) {
+          navigate(workspaceRootPath(activeWorkspaceId));
+        }
+        setSidebarActionNotice({ tone: "success", message: "페이지를 삭제했습니다." });
+      } catch (error) {
+        setSidebarActionError(toUiError(error, "페이지 삭제에 실패했습니다"));
+      } finally {
+        setSidebarDeletingDocumentId(null);
+      }
+    },
+    [
+      activeWorkspaceId,
+      api,
+      loadSidebarDocuments,
+      loadSidebarFavorites,
+      location.pathname,
+      navigate,
+      sidebarCreatingParentId,
+      sidebarDeletingDocumentId,
+      sidebarFavoritePendingId
+    ]
+  );
+
+  const toggleSidebarFavorite = useCallback(
+    async (documentId: string, shouldFavorite: boolean) => {
+      if (!activeWorkspaceId || sidebarFavoritePendingId || sidebarDeletingDocumentId || sidebarCreatingParentId) {
+        return;
+      }
+      setSidebarFavoritePendingId(documentId);
+      setSidebarActionError(null);
+      setSidebarActionNotice(null);
+      try {
+        await api.request<void>(
+          `/documents/${documentId}/favorite`,
+          {
+            method: shouldFavorite ? "POST" : "DELETE"
+          },
+          true
+        );
+        setSidebarFavoriteDocumentIds((previous) => {
+          if (shouldFavorite) {
+            return Array.from(new Set([documentId, ...previous]));
+          }
+          return previous.filter((value) => value !== documentId);
+        });
+        setSidebarActionNotice({
+          tone: "success",
+          message: shouldFavorite ? "즐겨찾기에 추가했습니다." : "즐겨찾기를 해제했습니다."
+        });
+      } catch (error) {
+        setSidebarActionError(toUiError(error, "즐겨찾기 변경에 실패했습니다"));
+      } finally {
+        setSidebarFavoritePendingId(null);
+        setSidebarPageMenuDocId(null);
+      }
+    },
+    [activeWorkspaceId, api, sidebarCreatingParentId, sidebarDeletingDocumentId, sidebarFavoritePendingId]
+  );
+
+  const moveSidebarDocument = useCallback(
+    async (documentId: string, parentDocumentId: string | null, mode: "CHILD" | "SIBLING" | "ROOT") => {
+      if (
+        !activeWorkspaceId ||
+        sidebarMovePendingDocumentId ||
+        sidebarDeletingDocumentId ||
+        sidebarCreatingParentId ||
+        sidebarFavoritePendingId
+      ) {
+        return;
+      }
+      const movingDocument = sidebarDocumentById.get(documentId);
+      if (!movingDocument) {
+        return;
+      }
+      if (movingDocument.parent_document_id === parentDocumentId) {
+        setSidebarDraggingDocumentId(null);
+        setSidebarDropTarget(null);
+        return;
+      }
+
+      setSidebarMovePendingDocumentId(documentId);
+      setSidebarActionError(null);
+      setSidebarActionNotice(null);
+      setSidebarPageMenuDocId(null);
+
+      try {
+        await api.request<void>(
+          `/documents/${documentId}/move`,
+          {
+            method: "POST",
+            body: JSON.stringify({ parent_document_id: parentDocumentId })
+          },
+          true
+        );
+        await loadSidebarDocuments();
+        const moveText =
+          mode === "CHILD"
+            ? "하위로 이동했습니다."
+            : mode === "SIBLING"
+              ? "같은 레벨로 이동했습니다."
+              : "루트 위치로 이동했습니다.";
+        setSidebarActionNotice({ tone: "success", message: moveText });
+      } catch (error) {
+        setSidebarActionError(toUiError(error, "문서 이동에 실패했습니다"));
+      } finally {
+        setSidebarMovePendingDocumentId(null);
+        setSidebarDraggingDocumentId(null);
+        setSidebarDropTarget(null);
+      }
+    },
+    [
+      activeWorkspaceId,
+      api,
+      loadSidebarDocuments,
+      sidebarCreatingParentId,
+      sidebarDeletingDocumentId,
+      sidebarDocumentById,
+      sidebarFavoritePendingId,
+      sidebarMovePendingDocumentId
+    ]
+  );
+
   const goToView = useCallback(
     (view: Exclude<SidebarViewKey, "workspace">) => {
       if (!activeWorkspaceId) {
@@ -1094,6 +1466,13 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         description: "답변이 필요한 질문을 처리합니다.",
         keywords: "questions inbox review",
         execute: () => goToView("questions")
+      },
+      {
+        id: "action:view-trash",
+        label: "휴지통 보기",
+        description: "삭제된 문서를 확인하고 복원합니다.",
+        keywords: "trash restore deleted",
+        execute: () => goToView("trash")
       }
     ],
     [createRootPage, goToView]
@@ -1136,22 +1515,254 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   const renderPageTree = (nodes: SidebarPageNode[], depth: number): React.ReactNode =>
     nodes.map((node) => {
       const isActive = location.pathname.includes(`/doc/${node.doc.id}`);
+      const isCreatingChild = sidebarCreatingParentId === node.doc.id;
+      const isDeleting = sidebarDeletingDocumentId === node.doc.id;
+      const isFavoritePending = sidebarFavoritePendingId === node.doc.id;
+      const isMoving = sidebarMovePendingDocumentId === node.doc.id;
+      const isRenamePending = sidebarRenamePendingDocumentId === node.doc.id;
+      const isFavorite = sidebarFavoriteSet.has(node.doc.id);
+      const menuOpen = sidebarPageMenuDocId === node.doc.id;
+      const isRenaming = sidebarRenamingDocumentId === node.doc.id;
+      const menuDisabled =
+        isCreatingChild ||
+        isDeleting ||
+        isFavoritePending ||
+        isMoving ||
+        isRenamePending ||
+        !!creatingRootPage ||
+        !!sidebarMovePendingDocumentId;
+      const isDragged = sidebarDraggingDocumentId === node.doc.id;
+      const isChildDropTarget = sidebarDropTarget?.mode === "CHILD" && sidebarDropTarget.targetDocumentId === node.doc.id;
+      const isSiblingDropTarget = sidebarDropTarget?.mode === "SIBLING" && sidebarDropTarget.targetDocumentId === node.doc.id;
       return (
         <li className="sidebar-page-item" key={node.doc.id}>
-          <button
-            className={`sidebar-page-button${isActive ? " is-active" : ""}`}
-            onClick={() => {
-              if (!activeWorkspaceId) {
+          <div
+            aria-hidden="true"
+            className={`sidebar-drop-zone sidebar-drop-zone-sibling${isSiblingDropTarget ? " is-active" : ""}`}
+            onDragOver={(event) => {
+              if (!sidebarDraggingDocumentId || sidebarDraggingDocumentId === node.doc.id) {
                 return;
               }
-              navigate(workspaceDocumentPath(activeWorkspaceId, node.doc.id));
+              event.preventDefault();
+              setSidebarDropTarget({ targetDocumentId: node.doc.id, mode: "SIBLING" });
             }}
-            style={{ paddingLeft: `${12 + depth * 16}px` }}
-            type="button"
+            onDrop={(event) => {
+              event.preventDefault();
+              const draggingId = sidebarDraggingDocumentId ?? event.dataTransfer.getData("text/plain");
+              if (!draggingId || draggingId === node.doc.id) {
+                return;
+              }
+              void moveSidebarDocument(draggingId, node.doc.parent_document_id ?? null, "SIBLING");
+            }}
+          />
+
+          <div
+            className={`sidebar-page-row${isActive ? " is-active" : ""}${isDragged ? " is-dragging" : ""}${isChildDropTarget ? " is-drop-child" : ""}`}
+            data-sidebar-menu-root={node.doc.id}
+            onDragOver={(event) => {
+              if (!sidebarDraggingDocumentId || sidebarDraggingDocumentId === node.doc.id) {
+                return;
+              }
+              event.preventDefault();
+              setSidebarDropTarget({ targetDocumentId: node.doc.id, mode: "CHILD" });
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              const draggingId = sidebarDraggingDocumentId ?? event.dataTransfer.getData("text/plain");
+              if (!draggingId || draggingId === node.doc.id) {
+                return;
+              }
+              void moveSidebarDocument(draggingId, node.doc.id, "CHILD");
+            }}
           >
-            <span className="sidebar-page-dot">•</span>
-            <span className="sidebar-page-title">{node.doc.title}</span>
-          </button>
+            <button
+              className={`sidebar-page-button${isActive ? " is-active" : ""}`}
+              draggable={!menuDisabled}
+              onClick={() => {
+                if (!activeWorkspaceId) {
+                  return;
+                }
+                navigate(workspaceDocumentPath(activeWorkspaceId, node.doc.id));
+              }}
+              onDragEnd={() => {
+                setSidebarDraggingDocumentId(null);
+                setSidebarDropTarget(null);
+              }}
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", node.doc.id);
+                setSidebarDraggingDocumentId(node.doc.id);
+                setSidebarDropTarget(null);
+                setSidebarPageMenuDocId(null);
+              }}
+              style={{ paddingLeft: `${12 + depth * 16}px` }}
+              type="button"
+            >
+              <span className="sidebar-page-dot">•</span>
+              {isFavorite ? <span className="sidebar-page-favorite" title="즐겨찾기">★</span> : null}
+              <span className="sidebar-page-title">{node.doc.title}</span>
+            </button>
+            <div className="sidebar-page-row-actions">
+              <button
+                aria-label="하위 페이지 추가"
+                className="sidebar-page-action"
+                disabled={menuDisabled}
+                onClick={() => {
+                  void createSidebarChildPage(node.doc);
+                }}
+                title="하위 페이지 추가"
+                type="button"
+              >
+                +
+              </button>
+              <button
+                aria-expanded={menuOpen}
+                aria-label="페이지 메뉴"
+                className="sidebar-page-action"
+                disabled={menuDisabled}
+                onClick={() => {
+                  setSidebarPageMenuDocId((previous) => {
+                    const next = previous === node.doc.id ? null : node.doc.id;
+                    if (next !== node.doc.id) {
+                      setSidebarRenamingDocumentId(null);
+                      setSidebarRenameDraft("");
+                    }
+                    return next;
+                  });
+                }}
+                title="페이지 메뉴"
+                type="button"
+              >
+                ...
+              </button>
+              {menuOpen ? (
+                <div className="sidebar-page-menu" role="menu">
+                  <button
+                    className="sidebar-page-menu-item"
+                    onClick={() => {
+                      if (!activeWorkspaceId) {
+                        return;
+                      }
+                      navigate(workspaceDocumentPath(activeWorkspaceId, node.doc.id));
+                      setSidebarPageMenuDocId(null);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    문서 수정
+                  </button>
+                  <button
+                    className="sidebar-page-menu-item"
+                    onClick={() => {
+                      if (!activeWorkspaceId) {
+                        return;
+                      }
+                      navigate(workspaceDocumentDetailPath(activeWorkspaceId, node.doc.id));
+                      setSidebarPageMenuDocId(null);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    문서 상세 보기
+                  </button>
+                  <button
+                    className="sidebar-page-menu-item"
+                    onClick={() => {
+                      void createSidebarChildPage(node.doc);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    하위 페이지 추가
+                  </button>
+                  <button
+                    className="sidebar-page-menu-item"
+                    disabled={isFavoritePending}
+                    onClick={() => {
+                      void toggleSidebarFavorite(node.doc.id, !isFavorite);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {isFavorite ? "즐겨찾기 해제" : "즐겨찾기에 추가"}
+                  </button>
+                  <button
+                    className="sidebar-page-menu-item"
+                    onClick={() => {
+                      void copySidebarDocumentLink(node.doc.id);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    링크 복사
+                  </button>
+                  {isRenaming ? (
+                    <div className="sidebar-page-inline-rename">
+                      <input
+                        aria-label="새 페이지 이름"
+                        className="field-input inline-rename-input"
+                        onChange={(event) => setSidebarRenameDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void renameSidebarDocument(node.doc);
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            cancelSidebarDocumentRename();
+                          }
+                        }}
+                        value={sidebarRenameDraft}
+                      />
+                      <div className="inline-rename-actions">
+                        <button
+                          className="btn btn-ghost btn-small inline-rename-button"
+                          disabled={isRenamePending}
+                          onClick={() => {
+                            cancelSidebarDocumentRename();
+                          }}
+                          type="button"
+                        >
+                          취소
+                        </button>
+                        <button
+                          className="btn btn-primary btn-small inline-rename-button"
+                          disabled={isRenamePending || !sidebarRenameDraft.trim()}
+                          onClick={() => {
+                            void renameSidebarDocument(node.doc);
+                          }}
+                          type="button"
+                        >
+                          {isRenamePending ? "저장 중..." : "저장"}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      className="sidebar-page-menu-item"
+                      onClick={() => {
+                        beginSidebarDocumentRename(node.doc);
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      이름 바꾸기
+                    </button>
+                  )}
+                  <button
+                    className="sidebar-page-menu-item is-danger"
+                    disabled={isDeleting || isRenamePending}
+                    onClick={() => {
+                      void deleteSidebarDocument(node.doc);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    휴지통으로 이동
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
           {node.children.length > 0 ? <ul className="sidebar-page-list">{renderPageTree(node.children, depth + 1)}</ul> : null}
         </li>
       );
@@ -1254,6 +1865,47 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
           </div>
         </div>
 
+        {pagesBrowseMode === "DOCUMENT" ? (
+          <div className="sidebar-section sidebar-section-favorites">
+            <div className="sidebar-section-title-row">
+              <p className="sidebar-section-label">Favorites</p>
+              <span className="sidebar-pill">{sidebarFavoriteDocumentIds.length}</span>
+            </div>
+            <ErrorPanel
+              error={sidebarFavoriteError}
+              onRetry={() => {
+                void loadSidebarFavorites();
+              }}
+            />
+            <ul className="sidebar-page-list sidebar-favorites-list">
+              {favoriteSidebarDocuments.length > 0 ? (
+                favoriteSidebarDocuments.map((document) => {
+                  const isActive = location.pathname.includes(`/doc/${document.id}`);
+                  return (
+                    <li className="sidebar-page-item" key={`favorite-${document.id}`}>
+                      <button
+                        className={`sidebar-page-button${isActive ? " is-active" : ""}`}
+                        onClick={() => {
+                          if (!activeWorkspaceId) {
+                            return;
+                          }
+                          navigate(workspaceDocumentPath(activeWorkspaceId, document.id));
+                        }}
+                        type="button"
+                      >
+                        <span className="sidebar-page-favorite" title="즐겨찾기">★</span>
+                        <span className="sidebar-page-title">{document.title}</span>
+                      </button>
+                    </li>
+                  );
+                })
+              ) : (
+                <li className="sidebar-empty">즐겨찾기 문서가 없습니다.</li>
+              )}
+            </ul>
+          </div>
+        ) : null}
+
         <div className="sidebar-section sidebar-section-pages">
           <div className="sidebar-section-title-row">
             <p className="sidebar-section-label">Pages</p>
@@ -1285,9 +1937,37 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
             placeholder={pagesBrowseMode === "DOCUMENT" ? "페이지 제목 검색" : "노드/문서 검색"}
             value={sidebarQuery}
           />
+          <NoticePanel notice={sidebarActionNotice} />
+          <ErrorPanel
+            error={sidebarActionError}
+            onRetry={() => {
+              void loadSidebarDocuments();
+            }}
+          />
           {pagesBrowseMode === "DOCUMENT" ? (
             <>
               <ErrorPanel error={documentError} />
+              <div
+                aria-hidden="true"
+                className={`sidebar-root-drop-zone${sidebarDropTarget?.mode === "ROOT" ? " is-active" : ""}${sidebarDraggingDocumentId ? " is-visible" : ""}`}
+                onDragOver={(event) => {
+                  if (!sidebarDraggingDocumentId) {
+                    return;
+                  }
+                  event.preventDefault();
+                  setSidebarDropTarget({ targetDocumentId: null, mode: "ROOT" });
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const draggingId = sidebarDraggingDocumentId ?? event.dataTransfer.getData("text/plain");
+                  if (!draggingId) {
+                    return;
+                  }
+                  void moveSidebarDocument(draggingId, null, "ROOT");
+                }}
+              >
+                루트로 이동하려면 여기에 드롭하세요
+              </div>
               <ul className="sidebar-page-list">
                 {filteredPageTreeRoots.length > 0 ? (
                   renderPageTree(filteredPageTreeRoots, 0)
@@ -1339,6 +2019,13 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
               type="button"
             >
               Questions
+            </button>
+            <button
+              className={`sidebar-view-button${activeView === "trash" ? " is-active" : ""}`}
+              onClick={() => goToView("trash")}
+              type="button"
+            >
+              Trash
             </button>
           </div>
         </div>
@@ -1410,6 +2097,16 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
                 <button
                   className="header-menu-item"
                   onClick={() => {
+                    goToView("trash");
+                    setIsSidebarOpen(false);
+                  }}
+                  type="button"
+                >
+                  Trash
+                </button>
+                <button
+                  className="header-menu-item"
+                  onClick={() => {
                     navigate("/workspace");
                     setIsSidebarOpen(false);
                   }}
@@ -1435,7 +2132,15 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
             <span>{state.workspaceName ?? "Workspace"}</span>
             <span>/</span>
             <strong>
-              {activeView === "tree" ? "Tree" : activeView === "questions" ? "Questions" : activeView === "workspace" ? "Settings" : "Documents"}
+              {activeView === "tree"
+                ? "Tree"
+                : activeView === "questions"
+                  ? "Questions"
+                  : activeView === "trash"
+                    ? "Trash"
+                    : activeView === "workspace"
+                      ? "Settings"
+                      : "Documents"}
             </strong>
           </div>
           <button
@@ -1740,6 +2445,9 @@ export default function App() {
     const [error, setError] = useState<UiError | null>(null);
     const [viewMode, setViewMode] = useState<"CARD" | "LIST">("CARD");
     const [sortBy, setSortBy] = useState<"UPDATED" | "TITLE">("UPDATED");
+    const [bulkRetrying, setBulkRetrying] = useState(false);
+    const [bulkRetryError, setBulkRetryError] = useState<UiError | null>(null);
+    const [bulkRetryNotice, setBulkRetryNotice] = useState<UiNotice | null>(null);
 
     const loadDocuments = useCallback(async () => {
       setError(null);
@@ -1769,6 +2477,76 @@ export default function App() {
       return ordered;
     }, [documents, sortBy]);
 
+    const failedRetryTargets = useMemo(
+      () =>
+        documents
+          .map((doc) => ({ doc, failedStage: getFailedPipelineStage(doc) }))
+          .filter((entry): entry is { doc: DocumentItem; failedStage: PipelineStage } => entry.failedStage !== null),
+      [documents]
+    );
+
+    useEffect(() => {
+      setBulkRetryNotice(null);
+      setBulkRetryError(null);
+      setBulkRetrying(false);
+    }, [state.workspaceId]);
+
+    const retryFailedDocuments = useCallback(async () => {
+      if (!state.workspaceId || bulkRetrying) {
+        return;
+      }
+      if (failedRetryTargets.length === 0) {
+        setBulkRetryNotice({ tone: "info", message: "재실행할 실패 문서가 없습니다." });
+        setBulkRetryError(null);
+        return;
+      }
+
+      setBulkRetrying(true);
+      setBulkRetryError(null);
+      setBulkRetryNotice(null);
+
+      try {
+        const results = await Promise.allSettled(
+          failedRetryTargets.map((target) =>
+            api.request(
+              `/documents/${target.doc.id}/pipeline/retry`,
+              {
+                method: "POST",
+                body: JSON.stringify({ stage: target.failedStage })
+              },
+              true
+            )
+          )
+        );
+
+        const successCount = results.filter((result) => result.status === "fulfilled").length;
+        const failedCount = results.length - successCount;
+
+        if (successCount > 0) {
+          setBulkRetryNotice({
+            tone: failedCount === 0 ? "success" : "info",
+            message:
+              failedCount === 0
+                ? `실패 문서 ${successCount}건의 재실행을 요청했습니다.`
+                : `실패 문서 ${successCount}건 재실행 요청 완료, ${failedCount}건은 실패했습니다.`
+          });
+        } else {
+          setBulkRetryNotice(null);
+        }
+
+        if (failedCount > 0) {
+          setBulkRetryError({
+            message: `${failedCount}건은 재실행 요청에 실패했습니다. 잠시 후 다시 시도하세요.`,
+            status: null
+          });
+        }
+
+        await loadDocuments();
+      } finally {
+        setBulkRetrying(false);
+      }
+    }, [api, bulkRetrying, failedRetryTargets, loadDocuments, state.workspaceId]);
+
     return (
       <Layout api={api}>
         <section className="panel">
@@ -1777,6 +2555,18 @@ export default function App() {
             subtitle="문서 데이터베이스를 카드/리스트 뷰로 탐색하고 바로 편집으로 이동하세요."
             action={
               <div className="action-row">
+                <button
+                  className="btn btn-primary btn-small"
+                  disabled={!state.workspaceId || bulkRetrying || failedRetryTargets.length === 0}
+                  onClick={() => {
+                    void retryFailedDocuments();
+                  }}
+                  type="button"
+                >
+                  {bulkRetrying
+                    ? "실패 항목 전체 재실행 중..."
+                    : `실패 항목 전체 재실행${failedRetryTargets.length > 0 ? ` (${failedRetryTargets.length})` : ""}`}
+                </button>
                 <div className="editor-view-toggle" role="tablist" aria-label="문서함 보기 전환">
                   <button
                     aria-selected={viewMode === "CARD"}
@@ -1817,6 +2607,13 @@ export default function App() {
             error={error}
             onRetry={() => {
               void loadDocuments();
+            }}
+          />
+          <NoticePanel notice={bulkRetryNotice} />
+          <ErrorPanel
+            error={bulkRetryError}
+            onRetry={() => {
+              void retryFailedDocuments();
             }}
           />
 
@@ -1891,6 +2688,9 @@ export default function App() {
     const [collapsedIds, setCollapsedIds] = useState<string[]>([]);
     const [collapsedNodeIds, setCollapsedNodeIds] = useState<string[]>([]);
     const [openMenuDocId, setOpenMenuDocId] = useState<string | null>(null);
+    const [renamingDocumentId, setRenamingDocumentId] = useState<string | null>(null);
+    const [renameDraft, setRenameDraft] = useState("");
+    const [renamePendingDocumentId, setRenamePendingDocumentId] = useState<string | null>(null);
     const [loadingList, setLoadingList] = useState(false);
     const [documentsLoaded, setDocumentsLoaded] = useState(false);
     const [loadingNodeTree, setLoadingNodeTree] = useState(false);
@@ -1948,6 +2748,9 @@ export default function App() {
       setCollapsedNodeIds([]);
       setSidebarMode("DOCUMENT");
       setOpenMenuDocId(null);
+      setRenamingDocumentId(null);
+      setRenameDraft("");
+      setRenamePendingDocumentId(null);
       setDocumentsLoaded(false);
       setNodeTreeResponse(null);
       setNodeTreeError(null);
@@ -2225,6 +3028,14 @@ export default function App() {
       };
     }, [openMenuDocId]);
 
+    useEffect(() => {
+      if (renamingDocumentId && renamingDocumentId !== openMenuDocId) {
+        setRenamingDocumentId(null);
+        setRenameDraft("");
+        setRenamePendingDocumentId(null);
+      }
+    }, [openMenuDocId, renamingDocumentId]);
+
     const toggleCollapsed = useCallback((documentId: string) => {
       setCollapsedIds((previous) =>
         previous.includes(documentId) ? previous.filter((item) => item !== documentId) : [...previous, documentId]
@@ -2356,27 +3167,41 @@ export default function App() {
       }
     }, [api, draftBody, draftTitle, selectedDocument, selectedDocumentId, state.workspaceId]);
 
+    const beginRenameDocument = useCallback((document: DocumentItem) => {
+      setError(null);
+      setNotice(null);
+      setOpenMenuDocId(document.id);
+      setRenamingDocumentId(document.id);
+      setRenameDraft(document.title);
+    }, []);
+
+    const cancelRenameDocument = useCallback(() => {
+      if (renamePendingDocumentId) {
+        return;
+      }
+      setRenamingDocumentId(null);
+      setRenameDraft("");
+    }, [renamePendingDocumentId]);
+
     const renameDocument = useCallback(
       async (documentId: string) => {
-        if (!state.workspaceId) {
+        if (!state.workspaceId || renamePendingDocumentId) {
           return;
         }
         const target = documentById.get(documentId);
         if (!target) {
           return;
         }
-        const renamed = window.prompt("새 페이지 이름을 입력하세요.", target.title);
-        if (renamed === null) {
-          return;
-        }
-        const nextTitle = renamed.trim();
+        const nextTitle = renameDraft.trim();
         if (!nextTitle || nextTitle === target.title) {
+          setRenamingDocumentId(null);
+          setRenameDraft("");
           return;
         }
 
-        setOpenMenuDocId(null);
         setError(null);
         setNotice(null);
+        setRenamePendingDocumentId(documentId);
         try {
           let version: number | undefined;
           let bodyMarkdown = "";
@@ -2412,12 +3237,27 @@ export default function App() {
             setDraftTitle(refreshed.title);
             setDraftBody(refreshed.body_markdown ?? "");
           }
+          setOpenMenuDocId(null);
+          setRenamingDocumentId(null);
+          setRenameDraft("");
           setNotice({ tone: "success", message: "페이지 이름을 변경했습니다." });
         } catch (e) {
           setError(toUiError(e, "페이지 이름 변경에 실패했습니다"));
+        } finally {
+          setRenamePendingDocumentId(null);
         }
       },
-      [api, documentById, draftBody, loadDocuments, selectedDocument, selectedDocumentId, state.workspaceId]
+      [
+        api,
+        documentById,
+        draftBody,
+        loadDocuments,
+        renameDraft,
+        renamePendingDocumentId,
+        selectedDocument,
+        selectedDocumentId,
+        state.workspaceId
+      ]
     );
 
     const deleteDocument = useCallback(
@@ -2600,6 +3440,8 @@ export default function App() {
         const isFavorite = favoriteSet.has(node.doc.id);
         const isCreatingChild = creatingParentId === node.doc.id;
         const isDeleting = deletingDocumentId === node.doc.id;
+        const isRenaming = renamingDocumentId === node.doc.id;
+        const isRenamePending = renamePendingDocumentId === node.doc.id;
 
         return (
           <li className="editor-tree-item" key={node.doc.id}>
@@ -2648,7 +3490,14 @@ export default function App() {
                   aria-label="페이지 메뉴"
                   className="editor-tree-action"
                   onClick={() => {
-                    setOpenMenuDocId((previous) => (previous === node.doc.id ? null : node.doc.id));
+                    setOpenMenuDocId((previous) => {
+                      const next = previous === node.doc.id ? null : node.doc.id;
+                      if (next !== node.doc.id) {
+                        setRenamingDocumentId(null);
+                        setRenameDraft("");
+                      }
+                      return next;
+                    });
                   }}
                   type="button"
                 >
@@ -2677,19 +3526,61 @@ export default function App() {
                     >
                       링크 복사
                     </button>
-                    <button
-                      className="editor-tree-menu-item"
-                      onClick={() => {
-                        void renameDocument(node.doc.id);
-                      }}
-                      role="menuitem"
-                      type="button"
-                    >
-                      이름 바꾸기
-                    </button>
+                    {isRenaming ? (
+                      <div className="editor-tree-inline-rename">
+                        <input
+                          aria-label="새 페이지 이름"
+                          className="field-input inline-rename-input"
+                          onChange={(event) => setRenameDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void renameDocument(node.doc.id);
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
+                              cancelRenameDocument();
+                            }
+                          }}
+                          value={renameDraft}
+                        />
+                        <div className="inline-rename-actions">
+                          <button
+                            className="btn btn-ghost btn-small inline-rename-button"
+                            disabled={isRenamePending}
+                            onClick={() => {
+                              cancelRenameDocument();
+                            }}
+                            type="button"
+                          >
+                            취소
+                          </button>
+                          <button
+                            className="btn btn-primary btn-small inline-rename-button"
+                            disabled={isRenamePending || !renameDraft.trim()}
+                            onClick={() => {
+                              void renameDocument(node.doc.id);
+                            }}
+                            type="button"
+                          >
+                            {isRenamePending ? "저장 중..." : "저장"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        className="editor-tree-menu-item"
+                        onClick={() => {
+                          beginRenameDocument(node.doc);
+                        }}
+                        role="menuitem"
+                        type="button"
+                      >
+                        이름 바꾸기
+                      </button>
+                    )}
                     <button
                       className="editor-tree-menu-item is-danger"
-                      disabled={isDeleting}
+                      disabled={isDeleting || isRenamePending}
                       onClick={() => {
                         void deleteDocument(node.doc.id);
                       }}
@@ -3975,6 +4866,113 @@ export default function App() {
     );
   }
 
+  function TrashPage() {
+    const [documents, setDocuments] = useState<DocumentItem[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [restoringDocumentId, setRestoringDocumentId] = useState<string | null>(null);
+    const [error, setError] = useState<UiError | null>(null);
+    const [notice, setNotice] = useState<UiNotice | null>(null);
+
+    const loadTrashDocuments = useCallback(async () => {
+      if (!state.workspaceId) {
+        setDocuments([]);
+        return;
+      }
+      setLoading(true);
+      setError(null);
+      try {
+        const response = await api.request<DocumentListResponse>("/documents/trash?page=0&size=200", {}, true);
+        setDocuments(response.items);
+      } catch (e) {
+        setError(toUiError(e, "휴지통 목록을 불러오지 못했습니다"));
+      } finally {
+        setLoading(false);
+      }
+    }, [api, state.workspaceId]);
+
+    useEffect(() => {
+      void loadTrashDocuments();
+    }, [loadTrashDocuments, state.workspaceId]);
+
+    const restoreDocument = useCallback(
+      async (documentId: string) => {
+        if (!state.workspaceId || restoringDocumentId) {
+          return;
+        }
+        setRestoringDocumentId(documentId);
+        setError(null);
+        setNotice(null);
+        try {
+          await api.request<void>(
+            `/documents/${documentId}/restore`,
+            {
+              method: "POST"
+            },
+            true
+          );
+          setNotice({ tone: "success", message: "문서를 복원했습니다." });
+          await loadTrashDocuments();
+        } catch (e) {
+          setError(toUiError(e, "문서 복원에 실패했습니다"));
+        } finally {
+          setRestoringDocumentId(null);
+        }
+      },
+      [api, loadTrashDocuments, restoringDocumentId, state.workspaceId]
+    );
+
+    return (
+      <Layout api={api}>
+        <section className="panel">
+          <PageHeader
+            title="휴지통"
+            subtitle="삭제된 문서를 확인하고 복원하세요."
+            action={
+              <button className="btn btn-secondary" disabled={!state.workspaceId || loading} onClick={() => void loadTrashDocuments()} type="button">
+                {loading ? "새로고침 중..." : "새로고침"}
+              </button>
+            }
+          />
+          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
+          <NoticePanel notice={notice} />
+          <ErrorPanel
+            error={error}
+            onRetry={() => {
+              void loadTrashDocuments();
+            }}
+          />
+
+          {state.workspaceId && documents.length === 0 ? (
+            <EmptyState title="휴지통이 비어 있습니다" description="삭제된 문서가 없습니다." />
+          ) : null}
+
+          <ul className="documents-list-view">
+            {documents.map((document) => (
+              <li className="documents-list-row" key={document.id}>
+                <div className="documents-list-main">
+                  <strong>{document.title}</strong>
+                  <p className="muted">삭제 시각 {new Date(document.updated_at).toLocaleString("ko-KR")}</p>
+                </div>
+                <div className="action-row">
+                  <button
+                    className="btn btn-primary btn-small"
+                    disabled={restoringDocumentId === document.id}
+                    onClick={() => {
+                      void restoreDocument(document.id);
+                    }}
+                    type="button"
+                  >
+                    {restoringDocumentId === document.id ? "복원 중..." : "복원"}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      </Layout>
+    );
+  }
+
   function TreePage() {
     const [tree, setTree] = useState<TreeActiveResponse | null>(null);
     const [selectedView, setSelectedView] = useState<TreeView>("topic");
@@ -4687,6 +5685,16 @@ export default function App() {
         }
       />
       <Route
+        path="/w/:workspaceId/view/trash"
+        element={
+          <ProtectedRoute>
+            <WorkspaceRouteSync>
+              <TrashPage />
+            </WorkspaceRouteSync>
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/w/:workspaceId/view/editor"
         element={
           <ProtectedRoute>
@@ -4728,6 +5736,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <LegacyViewRedirect view="questions" />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/trash"
+        element={
+          <ProtectedRoute>
+            <LegacyViewRedirect view="trash" />
           </ProtectedRoute>
         }
       />

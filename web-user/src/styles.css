@@ -170,6 +170,13 @@ code {
   min-height: 0;
 }
 
+.sidebar-section-favorites {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 220px;
+}
+
 .sidebar-section-label {
   margin: 0;
   color: #60708a;
@@ -212,7 +219,7 @@ code {
   list-style: none;
   display: grid;
   gap: 3px;
-  overflow: hidden;
+  overflow: visible;
   padding-right: 4px;
 }
 
@@ -220,13 +227,189 @@ code {
   gap: 5px;
 }
 
+.sidebar-favorites-list {
+  overflow-y: auto;
+  max-height: 144px;
+}
+
 .sidebar-page-item {
   display: grid;
   gap: 3px;
+  position: relative;
+}
+
+.sidebar-page-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sidebar-page-row.is-dragging {
+  opacity: 0.5;
+}
+
+.sidebar-page-row.is-drop-child {
+  border-radius: 10px;
+  outline: 2px dashed #85b0f5;
+  outline-offset: 1px;
+}
+
+.sidebar-page-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.sidebar-page-row:hover .sidebar-page-row-actions,
+.sidebar-page-row:focus-within .sidebar-page-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sidebar-page-action {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid #d2deee;
+  background: #fff;
+  color: #324f79;
+  font-family: var(--font-ui);
+  font-size: 0.88rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.sidebar-page-action:hover:not(:disabled) {
+  border-color: #91b8f8;
+  background: #ebf3ff;
+}
+
+.sidebar-page-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.sidebar-drop-zone {
+  height: 8px;
+  border-radius: 999px;
+  margin: 1px 10px;
+  background: transparent;
+  transition: background-color 0.16s ease;
+}
+
+.sidebar-drop-zone.is-active {
+  background: #8cb6f9;
+}
+
+.sidebar-root-drop-zone {
+  border: 1px dashed #d6e3f5;
+  border-radius: 10px;
+  min-height: 0;
+  height: 0;
+  overflow: hidden;
+  background: #f8fbff;
+  color: #5d7392;
+  font-size: 0.8rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: all 0.16s ease;
+}
+
+.sidebar-root-drop-zone.is-visible {
+  height: 34px;
+  min-height: 34px;
+  padding: 4px 8px;
+  opacity: 1;
+}
+
+.sidebar-root-drop-zone.is-active {
+  border-color: #91b8f8;
+  background: #ebf3ff;
+  color: #244974;
+}
+
+.sidebar-page-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  width: 236px;
+  border: 1px solid #d4dfef;
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 16px 28px rgba(21, 47, 90, 0.16);
+  padding: 6px;
+  display: grid;
+  gap: 2px;
+  z-index: 40;
+}
+
+.sidebar-page-menu-item {
+  width: 100%;
+  border: 1px solid transparent;
+  background: #fff;
+  border-radius: 8px;
+  color: #2a446b;
+  font-family: var(--font-ui);
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-align: left;
+  padding: 7px 8px;
+  cursor: pointer;
+}
+
+.sidebar-page-menu-item:hover:not(:disabled) {
+  border-color: #c7d9f6;
+  background: #edf4ff;
+}
+
+.sidebar-page-menu-item.is-danger {
+  color: #8d2820;
+}
+
+.sidebar-page-menu-item.is-danger:hover:not(:disabled) {
+  border-color: #f3cbc7;
+  background: #fceae8;
+}
+
+.sidebar-page-inline-rename,
+.editor-tree-inline-rename {
+  border: 1px solid #d5e3f6;
+  border-radius: 9px;
+  background: #f8fbff;
+  padding: 7px;
+  display: grid;
+  gap: 6px;
+}
+
+.inline-rename-input {
+  min-height: 34px;
+  padding: 6px 9px;
+  font-size: 0.84rem;
+}
+
+.inline-rename-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.inline-rename-button {
+  min-width: 54px;
 }
 
 .sidebar-page-button {
-  width: 100%;
+  flex: 1 1 auto;
+  width: auto;
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
@@ -242,6 +425,14 @@ code {
   padding: 10px 12px;
   min-height: 42px;
   overflow: hidden;
+}
+
+.sidebar-page-button[draggable="true"] {
+  cursor: grab;
+}
+
+.sidebar-page-button[draggable="true"]:active {
+  cursor: grabbing;
 }
 
 .sidebar-page-button:hover {
@@ -265,6 +456,14 @@ code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sidebar-page-favorite {
+  color: #d28100;
+  width: 11px;
+  text-align: center;
+  font-size: 0.8rem;
+  flex: 0 0 auto;
 }
 
 .sidebar-node-list {
@@ -1394,7 +1593,7 @@ code {
   position: absolute;
   right: 0;
   top: calc(100% + 6px);
-  width: 190px;
+  width: 236px;
   border: 1px solid #d4dfef;
   border-radius: 11px;
   background: #fff;

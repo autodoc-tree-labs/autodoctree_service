@@ -101,6 +101,26 @@ Response (example):
 ## GET /documents
 Query: `status`, `q`, `page`, `size`, `sort`
 
+## GET /documents/trash
+Query: `q`, `page`, `size`
+
+## GET /documents/favorites
+Response:
+```json
+{
+  "items": [
+    { "document_id": "doc_1", "created_at": "2026-02-20T10:12:03" }
+  ],
+  "total": 1
+}
+```
+
+## POST /documents/{documentId}/favorite
+- 현재 사용자 기준으로 문서를 즐겨찾기에 추가 (멱등)
+
+## DELETE /documents/{documentId}/favorite
+- 현재 사용자 기준으로 문서를 즐겨찾기에서 제거 (멱등)
+
 ## PATCH /documents/{documentId}
 - title/body updates (optimistic locking recommended)
 ```json
@@ -110,6 +130,13 @@ Query: `status`, `q`, `page`, `size`, `sort`
   "body_markdown": "# updated"
 }
 ```
+
+## POST /documents/{documentId}/move
+```json
+{ "parent_document_id": "doc_parent_id_or_null" }
+```
+- `parent_document_id`가 `null`이면 루트로 이동
+- 자기 자신/자식 하위로 이동하려 하면 `400`
 
 ## POST /documents/{documentId}/pipeline/retry
 ```json
@@ -125,6 +152,9 @@ Query: `status`, `q`, `page`, `size`, `sort`
 
 ## DELETE /documents/{documentId}
 - soft delete
+
+## POST /documents/{documentId}/restore
+- 휴지통 문서를 복원하고 pipeline을 다시 enqueue
 
 ---
 

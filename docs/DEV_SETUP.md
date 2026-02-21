@@ -133,8 +133,13 @@ pnpm -C web-user dev --port 5174
 
 ### 3-1. web-user IA / 라우트
 `web-user`는 Workspace-first AppShell을 사용합니다.
-- Sidebar: Workspace switcher, Quick actions, Pages 트리, Views
+- Sidebar: Workspace switcher, Quick actions, Favorites, Pages 트리(드래그 이동), Views
 - Main: 문서 중심 편집/탐색
+
+즐겨찾기 API:
+- `GET /api/v1/documents/favorites`
+- `POST /api/v1/documents/{documentId}/favorite`
+- `DELETE /api/v1/documents/{documentId}/favorite`
 
 주요 라우트:
 - `/w/:workspaceId` (기본 Documents)
@@ -143,6 +148,7 @@ pnpm -C web-user dev --port 5174
 - `/w/:workspaceId/view/documents`
 - `/w/:workspaceId/view/tree`
 - `/w/:workspaceId/view/questions`
+- `/w/:workspaceId/view/trash`
 
 단축키:
 - `Cmd/Ctrl + K`: Command Palette
