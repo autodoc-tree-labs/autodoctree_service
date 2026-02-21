@@ -10,6 +10,8 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest
 import software.amazon.awssdk.services.s3.model.GetObjectResponse
 import software.amazon.awssdk.services.s3.model.PutObjectRequest
 import software.amazon.awssdk.services.s3.presigner.S3Presigner
+import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest
+import software.amazon.awssdk.services.s3.presigner.model.PresignedGetObjectRequest
 import software.amazon.awssdk.services.s3.presigner.model.PresignedPutObjectRequest
 import software.amazon.awssdk.services.s3.presigner.model.PutObjectPresignRequest
 import java.time.Duration
@@ -42,6 +44,23 @@ class S3StorageService(
             .build()
 
         return s3Presigner.presignPutObject(presignRequest)
+    }
+
+    fun presignGetObject(
+        workspaceId: String,
+        objectKey: String,
+        expiresInSeconds: Long
+    ): PresignedGetObjectRequest {
+        assertWorkspaceObjectKey(workspaceId, objectKey)
+        val getObjectRequest = GetObjectRequest.builder()
+            .bucket(storageProperties.bucket)
+            .key(objectKey)
+            .build()
+        val presignRequest = GetObjectPresignRequest.builder()
+            .signatureDuration(Duration.ofSeconds(expiresInSeconds))
+            .getObjectRequest(getObjectRequest)
+            .build()
+        return s3Presigner.presignGetObject(presignRequest)
     }
 
     fun readObjectBytes(workspaceId: String, objectKey: String): ByteArray {

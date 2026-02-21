@@ -13,8 +13,10 @@ import com.autodoctree.api.storage.S3StorageService
 import com.autodoctree.api.tenant.WorkspaceContext
 import com.autodoctree.common.Stage
 import com.autodoctree.common.StageStatus
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.LocalDateTime
@@ -56,25 +58,31 @@ class DocumentService(
     private val documentFavoriteRepository: DocumentFavoriteRepository,
     private val pipelineStatusRepository: PipelineStatusRepository,
     private val attachmentRepository: AttachmentRepository,
+    private val documentContentMapper: DocumentContentMapper,
+    private val s3StorageService: S3StorageService,
     private val outboxService: OutboxService,
     private val auditService: AuditService
 ) {
+    private val logger = LoggerFactory.getLogger(javaClass)
 
     @Transactional
     fun createDocument(
         context: WorkspaceContext,
         title: String,
         bodyMarkdown: String?,
+        blocksJson: JsonNode?,
         sourceType: String,
         parentDocumentId: String?
     ): Map<String, Any?> {
         requireEditor(context)
         val resolvedParentDocumentId = resolveParentDocumentId(context, parentDocumentId)
+        val resolvedContent = documentContentMapper.resolveForPersist(blocksJson, bodyMarkdown)
         val document = documentRepository.create(
             workspaceId = context.workspaceId,
             title = title,
-            bodyMarkdown = bodyMarkdown,
-            bodyText = bodyMarkdown,
+            bodyMarkdown = resolvedContent.bodyMarkdown,
+            bodyText = resolvedContent.bodyText,
+            blocksJson = resolvedContent.blocksJson,
             sourceType = sourceType,
             createdBy = context.userId,
             parentDocumentId = resolvedParentDocumentId
@@ -98,14 +106,47 @@ class DocumentService(
         val status = pipelineStatusRepository.findByWorkspaceAndDocument(context.workspaceId, documentId)
             ?: throw NotFoundException()
         val attachments = attachmentRepository.listByWorkspaceAndDocument(context.workspaceId, documentId)
+        val attachmentPayload = attachments.map { attachment ->
+            val downloadUrl = if (attachment.status == "UPLOADED") {
+                runCatching {
+                    s3StorageService.presignGetObject(
+                        workspaceId = context.workspaceId,
+                        objectKey = attachment.objectKey,
+                        expiresInSeconds = 600
+                    ).url().toString()
+                }.onFailure { error ->
+                    logger.warn(
+                        "document_attachment_presign_failed workspace_id={} document_id={} attachment_id={} error_type={}",
+                        context.workspaceId,
+                        documentId,
+                        attachment.id,
+                        error::class.java.simpleName
+                    )
+                }.getOrNull()
+            } else {
+                null
+            }
+            mapOf(
+                "id" to attachment.id,
+                "filename" to attachment.filename,
+                "content_type" to attachment.contentType,
+                "size" to attachment.size,
+                "status" to attachment.status,
+                "download_url" to downloadUrl
+            )
+        }
         return mapOf(
             "id" to document.id,
             "workspace_id" to document.workspaceId,
             "title" to document.title,
             "body_markdown" to (document.bodyMarkdown ?: ""),
+            "blocks_json" to documentContentMapper.toResponseBlocks(document.blocksJson, document.bodyMarkdown),
             "parent_document_id" to document.parentDocumentId,
             "status" to document.status,
             "version" to document.version,
+            "created_by" to document.createdBy,
+            "updated_by" to document.updatedBy,
+            "created_at" to document.createdAt.toString(),
             "updated_at" to document.updatedAt.toString(),
             "pipeline_status" to mapOf(
                 "ingest" to status.ingestStatus.name,
@@ -114,13 +155,7 @@ class DocumentService(
                 "tree" to status.treeStatus.name,
                 "failure_reason" to status.failureReason
             ),
-            "attachments" to attachments.map {
-                mapOf(
-                    "id" to it.id,
-                    "content_type" to it.contentType,
-                    "size" to it.size
-                )
-            }
+            "attachments" to attachmentPayload
         )
     }
 
@@ -146,6 +181,9 @@ class DocumentService(
                 "title" to document.title,
                 "parent_document_id" to document.parentDocumentId,
                 "status" to document.status,
+                "created_by" to document.createdBy,
+                "updated_by" to document.updatedBy,
+                "created_at" to document.createdAt.toString(),
                 "updated_at" to document.updatedAt.toString(),
                 "pipeline_status" to mapOf(
                     "ingest" to (pipeline?.ingestStatus?.name ?: "PENDING"),
@@ -190,6 +228,9 @@ class DocumentService(
                 "title" to document.title,
                 "parent_document_id" to document.parentDocumentId,
                 "status" to document.status,
+                "created_by" to document.createdBy,
+                "updated_by" to document.updatedBy,
+                "created_at" to document.createdAt.toString(),
                 "updated_at" to document.updatedAt.toString(),
                 "pipeline_status" to mapOf(
                     "ingest" to (pipeline?.ingestStatus?.name ?: "PENDING"),
@@ -277,15 +318,19 @@ class DocumentService(
         documentId: String,
         expectedVersion: Long,
         title: String,
-        bodyMarkdown: String?
+        bodyMarkdown: String?,
+        blocksJson: JsonNode?
     ) {
         requireEditor(context)
+        val resolvedContent = documentContentMapper.resolveForPersist(blocksJson, bodyMarkdown)
         documentRepository.update(
             workspaceId = context.workspaceId,
             documentId = documentId,
             expectedVersion = expectedVersion,
             title = title,
-            bodyMarkdown = bodyMarkdown,
+            bodyMarkdown = resolvedContent.bodyMarkdown,
+            bodyText = resolvedContent.bodyText,
+            blocksJson = resolvedContent.blocksJson,
             updatedBy = context.userId
         )
         outboxService.enqueue(
@@ -302,15 +347,20 @@ class DocumentService(
     @Transactional
     fun deleteDocument(context: WorkspaceContext, documentId: String) {
         requireEditor(context)
-        documentRepository.findByWorkspaceAndId(context.workspaceId, documentId) ?: throw NotFoundException()
-        documentFavoriteRepository.removeByDocument(context.workspaceId, documentId)
-        documentRepository.softDelete(context.workspaceId, documentId)
-        outboxService.enqueue(
-            workspaceId = context.workspaceId,
-            documentId = documentId,
-            eventType = "DocumentDeleted",
-            payload = mapOf("document_id" to documentId)
-        )
+        val subtreeDocumentIds = documentRepository.listSubtreeDocumentIds(context.workspaceId, documentId)
+        if (subtreeDocumentIds.isEmpty()) {
+            throw NotFoundException()
+        }
+        documentFavoriteRepository.removeByDocuments(context.workspaceId, subtreeDocumentIds)
+        documentRepository.softDeleteDocuments(context.workspaceId, subtreeDocumentIds)
+        subtreeDocumentIds.forEach { deletedDocumentId ->
+            outboxService.enqueue(
+                workspaceId = context.workspaceId,
+                documentId = deletedDocumentId,
+                eventType = "DocumentDeleted",
+                payload = mapOf("document_id" to deletedDocumentId)
+            )
+        }
     }
 
     @Transactional
@@ -426,6 +476,17 @@ class AttachmentService(
     private val outboxService: OutboxService,
     private val auditService: AuditService
 ) {
+    private val maxAttachmentSizeBytes = 50L * 1024L * 1024L
+    private val allowedExactContentTypes = setOf(
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/plain",
+        "text/markdown",
+        "text/csv",
+        "application/octet-stream"
+    )
+
     @Transactional
     fun presign(
         context: WorkspaceContext,
@@ -439,6 +500,12 @@ class AttachmentService(
         val document = documentRepository.findByWorkspaceAndId(context.workspaceId, documentId) ?: throw NotFoundException()
         if (size <= 0) {
             throw BadRequestException("size must be positive")
+        }
+        if (size > maxAttachmentSizeBytes) {
+            throw BadRequestException("size exceeds maximum allowed bytes")
+        }
+        if (!isAllowedContentType(contentType)) {
+            throw BadRequestException("unsupported content_type")
         }
         val attachment = attachmentRepository.create(
             workspaceId = context.workspaceId,
@@ -494,6 +561,14 @@ class AttachmentService(
 
     private fun sanitizeFilename(name: String): String {
         return name.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+    }
+
+    private fun isAllowedContentType(contentType: String): Boolean {
+        val normalized = contentType.trim().lowercase()
+        if (normalized.startsWith("image/")) {
+            return true
+        }
+        return normalized in allowedExactContentTypes
     }
 }
 

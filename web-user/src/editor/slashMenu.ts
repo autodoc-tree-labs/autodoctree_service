@@ -86,7 +86,7 @@ export const buildRecommendedItems = <T extends SlashMenuItem>(
   }
   const byId = new Map(allItems.map((item) => [item.id, item]));
   const fromRecent = recentIds.map((id) => byId.get(id)).filter((item): item is T => Boolean(item));
-  const fallback = ["text", "h2", "todo", "callout", "image", "table", "code"]
+  const fallback = ["text", "emoji", "h2", "todo", "callout", "image", "table", "code"]
     .map((id) => byId.get(id))
     .filter((item): item is T => Boolean(item));
 

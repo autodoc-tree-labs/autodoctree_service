@@ -36,6 +36,7 @@
 | B-1207 | Search v2 Multilingual Hybrid BM25+Vector | `tasks/backlog/B-1207 — Search v2 Multilingual Hybrid BM25+Vector.md` |
 | B-1400 | Block editor v1 backend model and sync pipeline | `tasks/backlog/B-1400 - Block editor v1 backend model and sync pipeline.md` |
 | B-1401 | Cascading soft delete for document hierarchy | `tasks/backlog/B-1401 - Cascading soft delete for document hierarchy.md` |
+| B-1402 | Enforce tenant scope on workspace invite creation endpoint | `tasks/backlog/B-1402 - Enforce tenant scope on workspace invite creation endpoint.md` |
 | I-0101 | Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards | `tasks/backlog/I-0101 — Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards.md` |
 | I-0201 | Ollama Embedding Setup (bge-m3) — Offline Bootstrap & Healthchecks | `tasks/backlog/I-0201 — Ollama Embedding Setup (bge-m3) — Offline Bootstrap  Healthchecks.md` |
 | I-0301 | OpenSearch Korean Analyzer (nori) for Search Index + Field Mapping | `tasks/backlog/I-0301 — OpenSearch Korean Analyzer (nori) for Search Index  Field Mapping.md` |
@@ -44,6 +45,7 @@
 | I-1001 | Offline Model Packaging & Bootstrap (bge-m3 llama3.1 reranker clip) | `tasks/backlog/I-1001 — Offline Model Packaging  Bootstrap (bge-m3 llama3.1 reranker clip).md` |
 | I-1101 | Security Baseline for Local (secretsenv PII logging policy enforcement) | `tasks/backlog/I-1101 — Security Baseline for Local (secretsenv PII logging policy enforcement).md` |
 | I-1211 | Test workspace SQL seed bootstrap for document and node classification | `tasks/backlog/I-1211 — Test workspace SQL seed bootstrap for document and node classification.md` |
+| I-1407 | Bulk synthetic dataset seeder for 1000+ docs and file metadata | `tasks/backlog/I-1407 - Bulk synthetic dataset seeder for 1000+ docs and file metadata.md` |
 | U-0302 | User UI: Template Bin & Unsorted Inbox (격리유보 영역 UX) | `tasks/backlog/U-0302 — User UI Template Bin  Unsorted Inbox (격리유보 영역 UX).md` |
 | U-0402 | User UI: Confidence-aware Placement (후보 폴더 Top-3 제안 + 원클릭 확정) | `tasks/backlog/U-0402 — User UI Confidence-aware Placement (후보 폴더 Top-3 제안  원클릭 확정).md` |
 | U-0801 | User UI: Multi-View Navigator (TopicProjectTimelineVersion) | `tasks/backlog/U-0801 — User UI Multi-View Navigator (TopicProjectTimelineVersion).md` |
@@ -61,3 +63,4 @@
 | U-1403 | Hide deleted subtree docs in node view and editor selection | `tasks/backlog/U-1403 - Hide deleted subtree docs in node view and editor selection.md` |
 | U-1404 | Sidebar workspace launcher popover and member invite | `tasks/backlog/U-1404 - Sidebar workspace launcher popover and member invite.md` |
 | U-1405 | Drag and drop attachment upload in EditorV2 | `tasks/backlog/U-1405 - Drag and drop attachment upload in EditorV2.md` |
+| U-1406 | Collapsible editor side panels for wider writing area | `tasks/backlog/U-1406 - Collapsible editor side panels for wider writing area.md` |

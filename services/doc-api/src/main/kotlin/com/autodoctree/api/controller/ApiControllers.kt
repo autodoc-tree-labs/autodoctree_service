@@ -12,6 +12,7 @@ import com.autodoctree.api.domain.TreeViewType
 import com.autodoctree.api.domain.WorkspaceService
 import com.autodoctree.api.security.CurrentUserProvider
 import com.autodoctree.api.tenant.WorkspaceContextResolver
+import com.fasterxml.jackson.databind.JsonNode
 import io.micrometer.core.instrument.MeterRegistry
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.Valid
@@ -174,7 +175,14 @@ class DocumentController(
         @Valid @RequestBody body: CreateDocumentRequest
     ): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)
-        return documentService.createDocument(context, body.title, body.bodyMarkdown, body.sourceType, body.parentDocumentId)
+        return documentService.createDocument(
+            context = context,
+            title = body.title,
+            bodyMarkdown = body.bodyMarkdown,
+            blocksJson = body.blocksJson,
+            sourceType = body.sourceType,
+            parentDocumentId = body.parentDocumentId
+        )
     }
 
     @GetMapping("/favorites")
@@ -239,7 +247,14 @@ class DocumentController(
         @Valid @RequestBody body: PatchDocumentRequest
     ): ResponseEntity<Void> {
         val context = workspaceContextResolver.resolve(request)
-        documentService.patchDocument(context, documentId, body.version, body.title, body.bodyMarkdown)
+        documentService.patchDocument(
+            context = context,
+            documentId = documentId,
+            expectedVersion = body.version,
+            title = body.title,
+            bodyMarkdown = body.bodyMarkdown,
+            blocksJson = body.blocksJson
+        )
         return ResponseEntity.noContent().build()
     }
 
@@ -423,6 +438,15 @@ class TreeController(
             mode = body.mode,
             viewType = TreeViewType.fromApi(body.view)
         )
+    }
+
+    @GetMapping("/rebuild/status")
+    fun rebuildStatus(
+        request: HttpServletRequest,
+        @RequestParam(required = false) view: String?
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return treeService.getRebuildStatus(context, TreeViewType.fromApi(view))
     }
 
     @PostMapping("/snapshots/{snapshotId}/activate")
@@ -753,6 +777,7 @@ data class AcceptWorkspaceInviteRequest(
 data class CreateDocumentRequest(
     @field:NotBlank val title: String,
     val bodyMarkdown: String?,
+    val blocksJson: JsonNode? = null,
     @field:NotBlank val sourceType: String,
     val parentDocumentId: String? = null
 )
@@ -760,7 +785,8 @@ data class CreateDocumentRequest(
 data class PatchDocumentRequest(
     @field:NotNull val version: Long,
     @field:NotBlank val title: String,
-    val bodyMarkdown: String?
+    val bodyMarkdown: String?,
+    val blocksJson: JsonNode? = null
 )
 
 data class MoveDocumentRequest(

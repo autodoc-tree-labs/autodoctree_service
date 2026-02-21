@@ -81,9 +81,17 @@ Response:
 {
   "title": "Locking strategy",
   "body_markdown": "# ...",
+  "blocks_json": {
+    "type": "doc",
+    "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "..." }] }]
+  },
   "source_type": "EDITOR"
 }
 ```
+
+Notes:
+- `blocks_json`는 optional 입니다.
+- 서버는 `blocks_json` 저장 시 `body_markdown`/`body_text`를 동기화합니다.
 
 ## GET /documents/{documentId}
 Response (example):
@@ -92,9 +100,24 @@ Response (example):
   "id": "doc_1",
   "workspace_id": "ws_1",
   "title": "Locking strategy",
+  "body_markdown": "# Locking strategy\\n...",
+  "blocks_json": { "type": "doc", "content": [] },
+  "created_by": "user_1",
+  "updated_by": "user_1",
+  "created_at": "2026-02-21T11:00:00",
+  "updated_at": "2026-02-21T11:05:00",
   "status": "PROCESSING",
   "pipeline_status": { "ingest": "DONE", "embed": "RUNNING", "index": "PENDING", "tree": "PENDING" },
-  "attachments": [ { "id": "att_1", "content_type": "application/pdf", "size": 12345 } ]
+  "attachments": [
+    {
+      "id": "att_1",
+      "filename": "spec.pdf",
+      "content_type": "application/pdf",
+      "size": 12345,
+      "status": "UPLOADED",
+      "download_url": "https://...presigned-get..."
+    }
+  ]
 }
 ```
 
@@ -122,12 +145,16 @@ Response:
 - 현재 사용자 기준으로 문서를 즐겨찾기에서 제거 (멱등)
 
 ## PATCH /documents/{documentId}
-- title/body updates (optimistic locking recommended)
+- title/body/blocks updates (optimistic locking recommended)
 ```json
 {
   "version": 0,
   "title": "new title",
-  "body_markdown": "# updated"
+  "body_markdown": "# updated",
+  "blocks_json": {
+    "type": "doc",
+    "content": [{ "type": "heading", "attrs": { "level": 1 }, "content": [{ "type": "text", "text": "updated" }] }]
+  }
 }
 ```
 
@@ -152,6 +179,7 @@ Response:
 
 ## DELETE /documents/{documentId}
 - soft delete
+- 대상 문서의 하위 페이지(subtree)도 함께 soft delete
 
 ## POST /documents/{documentId}/restore
 - 휴지통 문서를 복원하고 pipeline을 다시 enqueue
@@ -173,6 +201,16 @@ Response:
 ```json
 { "attachment_id": "att_1", "upload_url": "https://...presigned...", "expires_in_seconds": 900 }
 ```
+
+Validation policy:
+- size must be `> 0` and `<= 50MB`
+- content_type allowlist:
+  - `image/*`
+  - `application/pdf`
+  - `application/msword`
+  - `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+  - `text/plain`, `text/markdown`, `text/csv`
+  - `application/octet-stream`
 
 ## POST /attachments/complete
 ```json
@@ -285,6 +323,17 @@ Response:
 ## POST /tree/rebuild
 ```json
 { "mode": "DEBOUNCED", "view": "topic" }
+```
+
+## GET /tree/rebuild/status?view=topic|project|timeline|version|template
+Response:
+```json
+{
+  "status": "RUNNING",
+  "pending_count": 1,
+  "running_since": "2026-02-21T04:02:11.228910Z",
+  "view_type": "topic"
+}
 ```
 
 ## GET /trees?view=topic|project|timeline|version|template

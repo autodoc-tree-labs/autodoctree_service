@@ -689,6 +689,28 @@ class TreeAdminDebugIntegrationTest {
     }
 
     @Test
+    fun `tree rebuild status endpoint reports queued workspace state`() {
+        mockMvc.perform(
+            post("/api/v1/tree/rebuild")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+                .content(objectMapper.writeValueAsString(mapOf("mode" to "DEBOUNCED", "view" to "topic")))
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("QUEUED"))
+
+        mockMvc.perform(
+            get("/api/v1/tree/rebuild/status")
+                .param("view", "topic")
+                .header("Authorization", "Bearer $token")
+                .header("X-Workspace-Id", workspaceId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("QUEUED"))
+            .andExpect(jsonPath("$.pending_count").isNumber)
+            .andExpect(jsonPath("$.view_type").value("topic"))
+    }
+
+    @Test
     fun `locked node keeps label and parent label across rebuild`() {
         val beforeSnapshot = treeRepository.findActiveSnapshot(workspaceId) ?: error("active snapshot missing")
         val beforeNodes = treeRepository.listNodes(workspaceId, beforeSnapshot.id)

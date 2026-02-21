@@ -119,6 +119,30 @@ curl -s http://localhost:8080/api/v1/health
 - 문서 모드 검증용 부모-자식(`parent_document_id`) 데이터와 노드 모드 검증용 다주제 문서가 함께 생성됩니다.
 - 스크립트는 idempotent하게 동작합니다.
 
+### 2-2. Bulk dataset 시드 (1000건+)
+분류/검색/트리 튜닝용 대량 데이터를 생성합니다.
+
+```bash
+# 기본: child 문서 1200건 + 카테고리 root + 첨부 메타데이터
+./scripts/seed_bulk_workspace_dataset.sh
+```
+
+환경변수로 볼륨과 대상 워크스페이스를 조절할 수 있습니다.
+
+```bash
+SEED_WORKSPACE_ID=8f70d9bb-9e5b-4c48-b6a6-9f2755899c11 \
+SEED_WORKSPACE_NAME=Test \
+SEED_OWNER_EMAIL=owner@autodoc.local \
+SEED_DOC_COUNT=1800 \
+SEED_ATTACHMENT_RATIO=45 \
+./scripts/seed_bulk_workspace_dataset.sh
+```
+
+- SQL 파일: `scripts/sql/seed_bulk_workspace_dataset.sql`
+- `SEED_DOC_COUNT`는 child 문서 개수입니다(루트 문서는 카테고리별로 추가 생성).
+- `SEED_ATTACHMENT_RATIO`는 child 문서 중 첨부 메타데이터를 생성할 비율(0~100)입니다.
+- 스크립트는 upsert 기반으로 재실행 가능하며, `DocumentSaved` outbox를 `PENDING`으로 맞춥니다.
+
 Ollama smoke:
 ```bash
 ./scripts/llm_smoke.sh
@@ -130,6 +154,13 @@ pnpm -w install
 pnpm -C web-admin dev --port 5173
 pnpm -C web-user dev --port 5174
 ```
+
+Block editor 모드 전환:
+```bash
+VITE_FEATURE_BLOCK_EDITOR=true pnpm -C web-user dev --port 5174
+```
+- `true`(기본): TipTap 기반 Block Editor(EditorV2)
+- `false`: 기존 Markdown textarea(EditorV1)
 
 ### 3-1. web-user IA / 라우트
 `web-user`는 Workspace-first AppShell을 사용합니다.
@@ -153,6 +184,24 @@ pnpm -C web-user dev --port 5174
 단축키:
 - `Cmd/Ctrl + K`: Command Palette
 - `Cmd/Ctrl + S`: 문서 저장(문서 편집 화면)
+
+Block Editor V2 요약:
+- `blocks_json` 기반 편집 + 서버에서 `body_markdown`/`body_text` 동기화
+- Slash menu(`/`)로 블록 삽입 (추천/기본/미디어/데이터 섹션)
+- Slash 검색: 한글/영문 fuzzy + 별칭(`/h1`, `/todo`, `/table`, `/toc`)
+- 지원 블록: heading/list/todo/toggle/callout/quote/divider/code/table/toc/image/file
+- 문서 상단에 `created_by`, `updated_by`, `created_at`, `updated_at` 표시
+
+Attachment upload policy:
+- API: `/api/v1/attachments/presign` -> PUT upload -> `/api/v1/attachments/complete`
+- size: `> 0`, `<= 50MB`
+- content_type allowlist:
+  - `image/*`
+  - `application/pdf`
+  - `application/msword`
+  - `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+  - `text/plain`, `text/markdown`, `text/csv`
+  - `application/octet-stream`
 
 워크스페이스 선택 규칙:
 - 마지막 사용 workspace(`autodoc.user.last-workspace.v1`) 자동 복원
@@ -180,7 +229,7 @@ Important flags:
 - `security.log-max-string-length`
 - `TREE_NEIGHBOR_TOP_K` (권장 `5`)
 - `TREE_NEIGHBOR_NORMALIZE` (권장 `true`)
-- `TREE_NEIGHBOR_MIN_SIMILARITY` (권장 `0.65`)
+- `TREE_NEIGHBOR_MIN_SIMILARITY` (권장 `0.55`)
 - `TREE_NEIGHBOR_MIN_SIMILARITY_AUTO` / `TREE_NEIGHBOR_MIN_SIMILARITY_AUTO_MARGIN`
 - `TREE_NEIGHBOR_MUTUAL_KNN`
 - `TREE_NEIGHBOR_SHARED_NEIGHBOR_JACCARD_MIN` (권장 `0.10`)
@@ -214,6 +263,7 @@ Important flags:
 - `TREE_OPTIMIZER_MIN_IMPROVEMENT`
 - `TREE_RERANKER_PER_DOC_BUDGET`
 - `TREE_RERANKER_PASS_THRESHOLD`
+- `TREE_FUSION_LEXICAL_GATE` (권장 `0.25`)
 - `TREE_QUESTION_MAX_OPEN`
 - `TREE_QUESTION_TTL_HOURS`
 - `TREE_QUESTION_GENERATE_BATCH_SIZE`
@@ -243,13 +293,16 @@ Important flags:
 ### Tree Rebuild 품질 기본값 (운영 권장)
 - normalize된 cosine(`TREE_NEIGHBOR_NORMALIZE=true`) 환경에서는 무관 문서 baseline이 `0.5` 근처가 될 수 있습니다.
 - 이때 `TREE_NEIGHBOR_MIN_SIMILARITY=0.25`는 사실상 대부분 edge를 통과시켜 과연결/혼합을 유발합니다.
-- 운영에서는 normalize=true일 때 `minSimilarity`를 보통 `0.6~0.8` 범위에서 시작해 조정합니다.
+- 운영에서는 normalize=true일 때 `minSimilarity`를 보통 `0.55~0.75` 범위에서 시작해 조정합니다.
 - 권장 기본값:
   - `TREE_NEIGHBOR_NORMALIZE=true`
-  - `TREE_NEIGHBOR_MIN_SIMILARITY=0.65`
+  - `TREE_NEIGHBOR_MIN_SIMILARITY=0.55`
   - `TREE_NEIGHBOR_TOP_K=5`
   - `TREE_NEIGHBOR_MUTUAL_KNN=true`
   - `TREE_NEIGHBOR_SHARED_NEIGHBOR_JACCARD_MIN=0.10`
+  - `TREE_FUSION_LEXICAL_GATE=0.25`
+  - `TREE_ASSIGN_AUTO_THRESHOLD=0.58`
+  - `TREE_ASSIGN_RECOMMEND_THRESHOLD=0.45`
   - `TREE_CLUSTER_MERGE_MIN_AFFINITY=0.55`
 
 `tree_rebuild_summary`에서 운영자가 먼저 볼 값:

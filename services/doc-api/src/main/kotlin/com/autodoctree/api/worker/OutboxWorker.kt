@@ -85,9 +85,10 @@ class OutboxWorker(
     private fun flushDebouncedRebuilds() {
         val dueRequests = rebuildDebounceQueue.dequeueDue()
         dueRequests.forEach { pending ->
-            runCatching {
+            rebuildDebounceQueue.markRunning(pending.workspaceId)
+            try {
                 treeService.rebuildWorkspace(pending.workspaceId)
-            }.onFailure { ex ->
+            } catch (ex: Exception) {
                 logger.warn(
                     "debounced_rebuild_failed workspace_id={} triggers={} reason_count={} message={}",
                     pending.workspaceId,
@@ -95,6 +96,8 @@ class OutboxWorker(
                     pending.reasons.size,
                     ex.message
                 )
+            } finally {
+                rebuildDebounceQueue.markIdle(pending.workspaceId)
             }
         }
     }

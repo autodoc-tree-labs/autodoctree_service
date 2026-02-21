@@ -9,7 +9,7 @@
 - `tasks/backlog/` : 티켓 기반 개발(프론트/백엔드/인프라 포함)
 
 ## Goals (v1 GA)
-- Web에서 문서 작성(Markdown) + 파일 업로드(PDF/DOCX/TXT/MD)
+- Web에서 문서 작성(Markdown V1 + TipTap Block Editor V2) + 파일 업로드(PDF/DOCX/TXT/MD/Image)
 - 비동기 파이프라인: ingest → embedding → index → auto-tree snapshot
 - 가상 트리(스냅샷): 2-depth 기본, recommended/apply, lock(고정)
 - (옵션) multi-view tree(`topic/project/timeline/version/template`)로 목적별 구조 분리
@@ -85,13 +85,16 @@ WS_ID=<workspace-id> ./scripts/search-smoke.sh
 
 ### Tree Rebuild Quality (defaults)
 - `neighbor-normalize=true`인 경우 무관 문서 cosine도 정규화 후 `0.5` 근처가 될 수 있으므로, 낮은 임계값(`0.25`)은 과연결을 유발할 수 있습니다.
-- normalize 환경에서는 `minSimilarity`를 보통 `0.6~0.8` 범위로 두고 시작하는 것이 안전합니다.
+- normalize 환경에서는 `minSimilarity`를 보통 `0.55~0.75` 범위로 두고 시작하는 것이 안전합니다.
 - 기본/권장값:
   - `tree.neighbor-normalize=true`
-  - `tree.neighbor-min-similarity=0.65`
+  - `tree.neighbor-min-similarity=0.55`
   - `tree.neighbor-top-k=5`
   - `tree.neighbor-mutual-knn=true`
   - `tree.neighbor-shared-neighbor-jaccard-min=0.10`
+  - `tree.fusion-lexical-gate=0.25`
+  - `tree.assign-auto-threshold=0.58`
+  - `tree.assign-recommend-threshold=0.45`
   - `tree.cluster-merge-min-affinity=0.55`
 - `tree_rebuild_summary` 주요 확인 항목:
   - `similarity_distributions.fused_sim.p95/p99`
@@ -140,6 +143,30 @@ python3 scripts/model_manifest_verify.py --manifest models/manifest.json
 - 스크립트는 idempotent이며 재실행해도 중복 삽입을 방지합니다.
 - `DocumentSaved` outbox 이벤트도 함께 enqueue되어 worker가 ingest→embed→index→tree를 이어서 처리할 수 있습니다.
 
+### Seed: bulk dataset (1000+ docs + attachment metadata)
+대량 테스트/분류 튜닝용으로 카테고리 다변화 문서를 한 번에 생성합니다.
+
+```bash
+# 기본: child 1200건 + 카테고리 root 문서 + 첨부 메타데이터(기본 35%)
+./scripts/seed_bulk_workspace_dataset.sh
+```
+
+옵션은 환경변수로 제어합니다.
+
+```bash
+SEED_WORKSPACE_ID=8f70d9bb-9e5b-4c48-b6a6-9f2755899c11 \
+SEED_WORKSPACE_NAME=Test \
+SEED_OWNER_EMAIL=owner@autodoc.local \
+SEED_DOC_COUNT=1500 \
+SEED_ATTACHMENT_RATIO=40 \
+./scripts/seed_bulk_workspace_dataset.sh
+```
+
+- SQL 원본: `scripts/sql/seed_bulk_workspace_dataset.sql`
+- `SEED_DOC_COUNT`는 child 문서 개수이며, 카테고리 root 문서는 별도로 추가됩니다.
+- 첨부는 DB 메타데이터(파일명/타입/object_key) 기준으로 생성됩니다.
+- `DocumentSaved` outbox 이벤트를 `PENDING`으로 upsert하여 파이프라인 재처리가 가능하도록 맞춥니다.
+
 3) front
 ```bash
 pnpm -w install
@@ -172,9 +199,38 @@ pnpm -C web-admin dev --port 5173
 - `Cmd/Ctrl + K`: Command Palette(문서 열기/새 페이지/뷰 이동)
 - 에디터에서 `Cmd/Ctrl + S`: 문서 저장
 
+### Block Editor V2 (feature flag)
+- 기본값은 기존 Markdown textarea(`EditorV1`)입니다.
+- 기본값은 TipTap 기반 `EditorV2`가 활성화(`VITE_FEATURE_BLOCK_EDITOR` 미설정 시 true)됩니다.
+- 기존 Markdown textarea(`EditorV1`)로 강제하려면 `VITE_FEATURE_BLOCK_EDITOR=false`를 설정합니다.
+- `EditorV2`는 `blocks_json`을 저장하고, 서버가 `body_markdown`/`body_text`를 동기화해 기존 검색/임베딩 파이프라인을 유지합니다.
+- Slash menu(`/`)는 추천/기본/미디어/데이터 섹션으로 노출되며, 한글/영문 fuzzy 검색과 별칭(`/h1`, `/todo`, `/table`)을 지원합니다.
+- 지원 블록(MVP):
+  - Text, H1/H2/H3, Bullet/Numbered, Todo, Toggle, Quote, Callout, Divider, Code
+  - Table v1, TOC, Image/File upload block, block drag handle
+- 문서 응답에는 `created_by`, `updated_by`, `created_at`, `updated_at`가 포함되며 에디터 화면에 표시됩니다.
+
+### Attachment upload policy (editor)
+- 업로드 방식: `POST /api/v1/attachments/presign` -> client PUT -> `POST /api/v1/attachments/complete`
+- 서버 정책:
+  - size: `> 0` and `<= 50MB`
+  - content type: `image/*`, `application/pdf`, `application/msword`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `text/plain`, `text/markdown`, `text/csv`, `application/octet-stream`
+- 로그에는 파일 본문/문서 본문/블록 원문을 남기지 않습니다.
+
 워크스페이스 컨텍스트:
 - 로그인 후 마지막 워크스페이스(`localStorage`)를 우선 복원합니다.
 - 없으면 첫 번째 워크스페이스를 자동 선택합니다.
+
+### Tree rebuild status UX (refresh-safe)
+- 트리 화면은 `GET /api/v1/tree/rebuild/status`로 `QUEUED/RUNNING/IDLE`를 동기화합니다.
+- `QUEUED/RUNNING` 상태는 워크스페이스별로 `localStorage`에 캐시되며, 새로고침 직후에도 상태 배너/버튼 문구를 복원합니다.
+- 캐시 TTL은 기본 15분이며, 서버에서 `IDLE` 응답을 받으면 캐시를 정리합니다.
+- 상태 엔드포인트가 일시 실패해도 캐시된 진행 상태를 우선 유지해 UX 공백을 줄입니다.
+
+### Document open resilience (attachments)
+- 문서 상세 조회 시 첨부파일 `download_url` presign 생성이 일부 실패해도 문서 본문 로딩은 실패하지 않도록 처리합니다.
+- 이 경우 실패한 첨부만 `download_url: null`로 내려가며, API 전체는 `200`을 유지합니다.
+- `EditorV2` 이미지 노드뷰는 mount 초기 시점에서 `editor.view.dom` 접근 오류를 방지하도록 가드되어, 이미지 블록 포함 문서도 안정적으로 열립니다.
 
 4) tests/build
 ```bash

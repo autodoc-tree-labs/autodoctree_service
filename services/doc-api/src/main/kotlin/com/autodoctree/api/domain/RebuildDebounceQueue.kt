@@ -14,11 +14,18 @@ data class PendingRebuild(
     val reasons: MutableSet<String>
 )
 
+data class RebuildQueueStatus(
+    val status: String,
+    val pendingCount: Int,
+    val runningSince: Instant?
+)
+
 @Service
 class RebuildDebounceQueue(
     private val workerProperties: WorkerProperties
 ) {
     private val pendingByWorkspace = ConcurrentHashMap<String, PendingRebuild>()
+    private val runningSinceByWorkspace = ConcurrentHashMap<String, Instant>()
 
     fun request(workspaceId: String, reason: String) {
         val now = Instant.now()
@@ -57,5 +64,28 @@ class RebuildDebounceQueue(
 
     fun pendingCount(workspaceId: String): Int {
         return pendingByWorkspace[workspaceId]?.triggerCount ?: 0
+    }
+
+    fun markRunning(workspaceId: String) {
+        runningSinceByWorkspace[workspaceId] = Instant.now()
+    }
+
+    fun markIdle(workspaceId: String) {
+        runningSinceByWorkspace.remove(workspaceId)
+    }
+
+    fun status(workspaceId: String): RebuildQueueStatus {
+        val pendingCount = pendingCount(workspaceId)
+        val runningSince = runningSinceByWorkspace[workspaceId]
+        val status = when {
+            runningSince != null -> "RUNNING"
+            pendingCount > 0 -> "QUEUED"
+            else -> "IDLE"
+        }
+        return RebuildQueueStatus(
+            status = status,
+            pendingCount = pendingCount,
+            runningSince = runningSince
+        )
     }
 }

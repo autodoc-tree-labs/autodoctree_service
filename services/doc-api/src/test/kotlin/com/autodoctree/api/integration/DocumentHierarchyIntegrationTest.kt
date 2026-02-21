@@ -1,6 +1,7 @@
 package com.autodoctree.api.integration
 
 import com.autodoctree.api.db.MembershipRepository
+import com.autodoctree.api.db.TreeRepository
 import com.autodoctree.api.db.UserRepository
 import com.autodoctree.api.db.WorkspaceRepository
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -41,6 +42,9 @@ class DocumentHierarchyIntegrationTest {
     private lateinit var membershipRepository: MembershipRepository
 
     @Autowired
+    private lateinit var treeRepository: TreeRepository
+
+    @Autowired
     private lateinit var passwordEncoder: PasswordEncoder
 
     private lateinit var wsAId: String
@@ -70,9 +74,10 @@ class DocumentHierarchyIntegrationTest {
     }
 
     @Test
-    fun `create child persists parent relationship and survives parent delete`() {
+    fun `create child persists parent relationship and parent delete cascades to descendants`() {
         val rootId = createDocument(tokenA, wsAId, "Hierarchy Root", null)
         val childId = createDocument(tokenA, wsAId, "Hierarchy Child", rootId)
+        val grandChildId = createDocument(tokenA, wsAId, "Hierarchy GrandChild", childId)
 
         val childResponse = mockMvc.perform(
             get("/api/v1/documents/$childId")
@@ -99,24 +104,132 @@ class DocumentHierarchyIntegrationTest {
         assertEquals(rootId, childNode?.path("parent_document_id")?.asText())
 
         mockMvc.perform(
-            delete("/api/v1/documents/$rootId")
+            post("/api/v1/documents/$childId/favorite")
                 .header("Authorization", "Bearer $tokenA")
                 .header("X-Workspace-Id", wsAId)
         ).andExpect(status().isNoContent)
 
-        val childAfterDelete = mockMvc.perform(
-            get("/api/v1/documents/$childId")
+        mockMvc.perform(
+            post("/api/v1/documents/$grandChildId/favorite")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isNoContent)
+
+        val activeSnapshot = treeRepository.createSnapshot(
+            workspaceId = wsAId,
+            status = "ACTIVE",
+            movedRatio = 0.0,
+            churnCount = 0,
+            nodeRenameCount = 0
+        )
+        val rootNode = treeRepository.insertNode(
+            workspaceId = wsAId,
+            snapshotId = activeSnapshot.id,
+            parentId = null,
+            label = "AutoDoc",
+            depth = 0,
+            locked = false
+        )
+        treeRepository.insertMembership(
+            workspaceId = wsAId,
+            snapshotId = activeSnapshot.id,
+            nodeId = rootNode.id,
+            documentId = rootId,
+            rationaleJson = "{}"
+        )
+        treeRepository.insertMembership(
+            workspaceId = wsAId,
+            snapshotId = activeSnapshot.id,
+            nodeId = rootNode.id,
+            documentId = childId,
+            rationaleJson = "{}"
+        )
+        treeRepository.insertMembership(
+            workspaceId = wsAId,
+            snapshotId = activeSnapshot.id,
+            nodeId = rootNode.id,
+            documentId = grandChildId,
+            rationaleJson = "{}"
+        )
+
+        val activeTreeBeforeDelete = mockMvc.perform(
+            get("/api/v1/tree/active?view=topic")
                 .header("Authorization", "Bearer $tokenA")
                 .header("X-Workspace-Id", wsAId)
         ).andExpect(status().isOk)
             .andReturn()
             .response
             .contentAsString
-        val childAfterDeletePayload = objectMapper.readTree(childAfterDelete)
-        assertTrue(
-            childAfterDeletePayload.path("parent_document_id").isNull,
-            "Expected child parent_document_id to be null after deleting parent"
-        )
+        val treeBeforeNodes = objectMapper.readTree(activeTreeBeforeDelete).path("nodes")
+        val treeBeforeDocIds = mutableSetOf<String>()
+        treeBeforeNodes.forEach { node ->
+            node.path("documents").forEach { docNode ->
+                treeBeforeDocIds += docNode.asText()
+            }
+        }
+        assertTrue(treeBeforeDocIds.contains(rootId), "Expected active tree to include root before delete")
+
+        mockMvc.perform(
+            delete("/api/v1/documents/$rootId")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isNoContent)
+
+        mockMvc.perform(
+            get("/api/v1/documents/$childId")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isNotFound)
+
+        mockMvc.perform(
+            get("/api/v1/documents/$grandChildId")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isNotFound)
+
+        val trashResponse = mockMvc.perform(
+            get("/api/v1/documents/trash")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+        val trashItems = objectMapper.readTree(trashResponse).path("items")
+        assertTrue(trashItems.any { it.path("id").asText() == rootId }, "Expected root document in trash")
+        assertTrue(trashItems.any { it.path("id").asText() == childId }, "Expected child document in trash")
+        assertTrue(trashItems.any { it.path("id").asText() == grandChildId }, "Expected grandchild document in trash")
+
+        val favoritesResponse = mockMvc.perform(
+            get("/api/v1/documents/favorites")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+        val favoriteItems = objectMapper.readTree(favoritesResponse).path("items")
+        assertTrue(favoriteItems.none { it.path("document_id").asText() == childId }, "Expected child favorite removed")
+        assertTrue(favoriteItems.none { it.path("document_id").asText() == grandChildId }, "Expected grandchild favorite removed")
+
+        val activeTreeAfterDelete = mockMvc.perform(
+            get("/api/v1/tree/active?view=topic")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+        val deletedIds = setOf(rootId, childId, grandChildId)
+        val treeAfterNodes = objectMapper.readTree(activeTreeAfterDelete).path("nodes")
+        treeAfterNodes.forEach { node ->
+            node.path("documents").forEach { docNode ->
+                assertTrue(docNode.asText() !in deletedIds, "Deleted documents must not appear in active tree documents")
+            }
+            node.path("document_summaries").forEach { summary ->
+                assertTrue(summary.path("id").asText() !in deletedIds, "Deleted documents must not appear in active tree summaries")
+            }
+        }
     }
 
     @Test

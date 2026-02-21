@@ -21,9 +21,11 @@ class WorkspaceContextFilter(
 ) : OncePerRequestFilter() {
 
     private val missingScopeCounter = meterRegistry.counter("security.tenant_scope_missing_total")
+    private val workspaceScopedInvitePath = Regex("^/api/v1/workspaces/[^/]+/invites(?:/.*)?$")
 
     override fun shouldNotFilter(request: HttpServletRequest): Boolean {
         val path = request.requestURI
+        val isWorkspaceScopedInvite = workspaceScopedInvitePath.matches(path)
         return !(path.startsWith("/api/v1/documents") ||
             path.startsWith("/api/v1/attachments") ||
             path.startsWith("/api/v1/search") ||
@@ -32,7 +34,8 @@ class WorkspaceContextFilter(
             path.startsWith("/api/v1/questions") ||
             path.startsWith("/api/v1/feedback") ||
             path.startsWith("/api/v1/admin") ||
-            path.contains("/members"))
+            path.contains("/members") ||
+            isWorkspaceScopedInvite)
     }
 
     override fun doFilterInternal(

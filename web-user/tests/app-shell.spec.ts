@@ -474,6 +474,24 @@ test("saving page title in editor updates sidebar page tree immediately", async 
   await expect(pagesSectionTitles.filter({ hasText: /^코난 전기$/ })).toHaveCount(0);
 });
 
+test("editor page supports left and right panel arrow toggles with correct defaults", async ({ page }) => {
+  await page.goto("/w/ws-1/doc/doc-1");
+
+  await expect(page.locator(".workspace-layout")).not.toHaveClass(/is-left-sidebar-collapsed/);
+  await expect(page.locator(".workspace-sidebar")).toBeVisible();
+  await expect(page.locator("#workspace-doc-context-panel")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "우측 패널 열기" }).click();
+  await expect(page.locator("#workspace-doc-context-panel")).toBeVisible();
+  await page.getByRole("button", { name: "우측 패널 닫기" }).click();
+  await expect(page.locator("#workspace-doc-context-panel")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "좌측 패널 닫기" }).click();
+  await expect(page.locator(".workspace-layout")).toHaveClass(/is-left-sidebar-collapsed/);
+  await page.getByRole("button", { name: "좌측 패널 열기" }).click();
+  await expect(page.locator(".workspace-layout")).not.toHaveClass(/is-left-sidebar-collapsed/);
+});
+
 test("opens image block document without tiptap mount crash", async ({ page }) => {
   await page.route("**/api/v1/documents/doc-1", async (route) => {
     if (route.request().method() !== "GET") {
@@ -581,6 +599,27 @@ test("drag and drop upload on editor surface keeps app stable and inserts attach
   await dataTransfer.dispose();
 });
 
+test("slash menu emoji item opens picker and inserts selected emoji", async ({ page }) => {
+  await page.goto("/w/ws-1/doc/doc-1");
+
+  const editorSurface = page.locator(".editor-v2-prosemirror");
+  await editorSurface.click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/emoji");
+
+  const slashMenu = page.locator(".editor-v2-slash");
+  await expect(slashMenu).toBeVisible();
+  const emojiSlashItem = slashMenu.getByRole("button", { name: /Emoji/i }).first();
+  await expect(emojiSlashItem).toBeVisible();
+  await emojiSlashItem.click();
+
+  const emojiPicker = page.locator(".editor-v2-emoji-picker");
+  await expect(emojiPicker).toBeVisible();
+  await emojiPicker.getByRole("button", { name: "Fire 🔥" }).click();
+  await expect(editorSurface).toContainText("🔥");
+});
+
 test("slash menu arrow navigation auto-scrolls to keep active item visible", async ({ page }) => {
   await page.goto("/w/ws-1/doc/doc-1");
 
@@ -627,6 +666,39 @@ test("workspace launcher shows settings, invite, and logout actions", async ({ p
   await page.getByRole("button", { name: "초대 링크 생성" }).click();
   await expect(page.getByText("멤버 초대 토큰을 생성했습니다.")).toBeVisible();
   await expect(page.locator(".workspace-launcher-token code")).toContainText("invite-ws-1-VIEWER");
+});
+
+test("sidebar popovers stay inside the sidebar width when resized narrow", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("autodoc.workspace.sidebar-width.by-workspace.v1", JSON.stringify({ "ws-1": 220 }));
+  });
+
+  await page.goto("/w/ws-1");
+
+  const sidebar = page.locator(".workspace-sidebar");
+  const sidebarBounds = await sidebar.boundingBox();
+  expect(sidebarBounds).not.toBeNull();
+
+  await page.getByRole("button", { name: "워크스페이스 메뉴 열기" }).click();
+  const launcherPopover = page.locator(".workspace-launcher-popover");
+  await expect(launcherPopover).toBeVisible();
+  const launcherBounds = await launcherPopover.boundingBox();
+  expect(launcherBounds).not.toBeNull();
+  expect(launcherBounds!.x).toBeGreaterThanOrEqual(sidebarBounds!.x - 1);
+  expect(launcherBounds!.x + launcherBounds!.width).toBeLessThanOrEqual(sidebarBounds!.x + sidebarBounds!.width + 1);
+
+  await page.getByRole("button", { name: "워크스페이스 메뉴 열기" }).click();
+  const targetRow = page.locator(".sidebar-page-row", {
+    has: page.getByRole("button", { name: "• ★ 코난 전기", exact: true })
+  });
+  await targetRow.hover();
+  await targetRow.getByRole("button", { name: "페이지 메뉴" }).click();
+  const pageMenu = targetRow.locator(".sidebar-page-menu");
+  await expect(pageMenu).toBeVisible();
+  const pageMenuBounds = await pageMenu.boundingBox();
+  expect(pageMenuBounds).not.toBeNull();
+  expect(pageMenuBounds!.x).toBeGreaterThanOrEqual(sidebarBounds!.x - 1);
+  expect(pageMenuBounds!.x + pageMenuBounds!.width).toBeLessThanOrEqual(sidebarBounds!.x + sidebarBounds!.width + 1);
 });
 
 test("tree rebuild status notice remains visible after refresh from cached status", async ({ page }) => {

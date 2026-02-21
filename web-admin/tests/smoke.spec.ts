@@ -273,7 +273,7 @@ test("loads tree debug page and renders neighbors table", async ({ page }) => {
   });
   let questionControlEnabled = true;
   let questionOpenCount = 2;
-  let questionAnsweredCount = 5;
+  const questionAnsweredCount = 5;
   let questionExpiredCount = 1;
   const questionItems = [
     {

@@ -1021,6 +1021,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   const [inviteNotice, setInviteNotice] = useState<UiNotice | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_WIDTH_DEFAULT);
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  const [isDesktopSidebarCollapsed, setIsDesktopSidebarCollapsed] = useState(false);
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [creatingRootPage, setCreatingRootPage] = useState(false);
@@ -1035,6 +1036,12 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   const activeView = detectSidebarView(location.pathname);
   const applySidebarWidth = useCallback((nextWidth: number) => {
     setSidebarWidth(clampSidebarWidth(nextWidth));
+  }, []);
+  const toggleDesktopSidebar = useCallback(() => {
+    setIsDesktopSidebarCollapsed((previous) => !previous);
+    setIsWorkspaceLauncherOpen(false);
+    setIsInviteFormOpen(false);
+    setSidebarPageMenuDocId(null);
   }, []);
 
   useEffect(() => {
@@ -2234,16 +2241,20 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     [applySidebarWidth, sidebarWidth]
   );
 
-  const workspaceLayoutStyle = useMemo(
-    () =>
-      ({
-        "--workspace-sidebar-width": `${clampSidebarWidth(sidebarWidth)}px`
-      }) as React.CSSProperties,
-    [sidebarWidth]
-  );
+  const workspaceLayoutStyle = useMemo(() => {
+    const clampedWidth = clampSidebarWidth(sidebarWidth);
+    return {
+      "--workspace-sidebar-width": `${clampedWidth}px`,
+      "--workspace-sidebar-visible-width": isDesktopSidebarCollapsed ? "0px" : `${clampedWidth}px`,
+      "--workspace-sidebar-resizer-width": isDesktopSidebarCollapsed ? "0px" : "10px"
+    } as React.CSSProperties;
+  }, [isDesktopSidebarCollapsed, sidebarWidth]);
 
   return (
-    <div className={`workspace-layout${isSidebarResizing ? " is-resizing" : ""}`} style={workspaceLayoutStyle}>
+    <div
+      className={`workspace-layout${isSidebarResizing ? " is-resizing" : ""}${isDesktopSidebarCollapsed ? " is-left-sidebar-collapsed" : ""}`}
+      style={workspaceLayoutStyle}
+    >
       <div
         className={`workspace-sidebar-backdrop${isSidebarOpen ? " is-open" : ""}`}
         onClick={() => {
@@ -2253,7 +2264,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         }}
         role="presentation"
       />
-      <aside className={`workspace-sidebar${isSidebarOpen ? " is-open" : ""}`}>
+      <aside className={`workspace-sidebar${isSidebarOpen ? " is-open" : ""}${isDesktopSidebarCollapsed ? " is-collapsed" : ""}`}>
         <div className="workspace-sidebar-header">
           <div className="workspace-launcher" ref={workspaceLauncherRef}>
             <button
@@ -2608,6 +2619,14 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
               type="button"
             >
               메뉴
+            </button>
+            <button
+              aria-label={isDesktopSidebarCollapsed ? "좌측 패널 열기" : "좌측 패널 닫기"}
+              className="btn btn-ghost btn-small sidebar-collapse-toggle"
+              onClick={toggleDesktopSidebar}
+              type="button"
+            >
+              {isDesktopSidebarCollapsed ? "▶" : "◀"}
             </button>
             {isSidebarOpen ? (
               <div className="header-menu-panel">
@@ -4587,6 +4606,7 @@ export default function App() {
     const [error, setError] = useState<UiError | null>(null);
     const [notice, setNotice] = useState<UiNotice | null>(null);
     const [memberEmailById, setMemberEmailById] = useState<Record<string, string>>({});
+    const [isContextPanelOpen, setIsContextPanelOpen] = useState(false);
 
     const currentUserClaims = useMemo(() => parseJwtClaims(state.accessToken), [state.accessToken]);
 
@@ -4879,6 +4899,18 @@ export default function App() {
             subtitle="페이지를 바로 편집하고 저장 상태를 확인하세요."
             action={
               <div className="action-row">
+                <button
+                  aria-controls="workspace-doc-context-panel"
+                  aria-expanded={isContextPanelOpen}
+                  aria-label={isContextPanelOpen ? "우측 패널 닫기" : "우측 패널 열기"}
+                  className="btn btn-ghost btn-small editor-context-toggle-button"
+                  onClick={() => {
+                    setIsContextPanelOpen((previous) => !previous);
+                  }}
+                  type="button"
+                >
+                  {isContextPanelOpen ? "▶" : "◀"}
+                </button>
                 <button className="btn btn-secondary" disabled={!documentId || creatingChild || deleting} onClick={() => void createChildPage()} type="button">
                   {creatingChild ? "생성 중..." : "하위 페이지"}
                 </button>
@@ -4904,7 +4936,7 @@ export default function App() {
           {loading ? <p className="muted">문서를 불러오는 중입니다...</p> : null}
 
           {doc ? (
-            <div className="editor-doc-layout">
+            <div className={`editor-doc-layout${isContextPanelOpen ? " is-side-open" : ""}`}>
               <div className="editor-doc-main">
                 <div className="field-stack">
                   <label className="field-label" htmlFor="workspace-doc-title">
@@ -4960,26 +4992,28 @@ export default function App() {
                 </p>
               </div>
 
-              <aside className="editor-doc-side panel-soft">
-                <h3 className="section-title">문서 컨텍스트</h3>
-                <p className="section-subtitle">트리 위치/추천 스냅샷과 파이프라인 상세를 바로 확인할 수 있습니다.</p>
-                <div className="pipeline-grid">
-                  <StatusChip label="수집" value={doc.pipeline_status.ingest} />
-                  <StatusChip label="임베딩" value={doc.pipeline_status.embed} />
-                  <StatusChip label="인덱스" value={doc.pipeline_status.index} />
-                  <StatusChip label="트리" value={doc.pipeline_status.tree} />
-                </div>
-                {workspaceId ? (
-                  <div className="field-stack">
-                    <Link className="btn btn-secondary" to={workspaceViewPath(workspaceId, "tree")}>
-                      트리에서 위치/이동 보기
-                    </Link>
-                    <Link className="btn btn-ghost" to={workspaceDocumentDetailPath(workspaceId, doc.id)}>
-                      파이프라인 상세
-                    </Link>
+              {isContextPanelOpen ? (
+                <aside className="editor-doc-side panel-soft" id="workspace-doc-context-panel">
+                  <h3 className="section-title">문서 컨텍스트</h3>
+                  <p className="section-subtitle">트리 위치/추천 스냅샷과 파이프라인 상세를 바로 확인할 수 있습니다.</p>
+                  <div className="pipeline-grid">
+                    <StatusChip label="수집" value={doc.pipeline_status.ingest} />
+                    <StatusChip label="임베딩" value={doc.pipeline_status.embed} />
+                    <StatusChip label="인덱스" value={doc.pipeline_status.index} />
+                    <StatusChip label="트리" value={doc.pipeline_status.tree} />
                   </div>
-                ) : null}
-              </aside>
+                  {workspaceId ? (
+                    <div className="field-stack">
+                      <Link className="btn btn-secondary" to={workspaceViewPath(workspaceId, "tree")}>
+                        트리에서 위치/이동 보기
+                      </Link>
+                      <Link className="btn btn-ghost" to={workspaceDocumentDetailPath(workspaceId, doc.id)}>
+                        파이프라인 상세
+                      </Link>
+                    </div>
+                  ) : null}
+                </aside>
+              ) : null}
             </div>
           ) : (
             <EmptyState title="문서를 찾을 수 없습니다" description="좌측 Pages에서 문서를 선택해 주세요." />

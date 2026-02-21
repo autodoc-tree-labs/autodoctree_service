@@ -22,6 +22,7 @@ class LogSanitizerTest {
 
         val payload = mapOf(
             "body_markdown" to "secret body",
+            "blocks_json" to """{"type":"doc"}""",
             "nested" to mapOf(
                 "apiToken" to "abc123",
                 "safe_field" to "ok"
@@ -36,6 +37,7 @@ class LogSanitizerTest {
         val firstListItem = (sanitized["list"] as List<*>).first() as Map<*, *>
 
         assertEquals("[REDACTED]", sanitized["body_markdown"])
+        assertEquals("[REDACTED]", sanitized["blocks_json"])
         assertEquals("[REDACTED]", nested["apiToken"])
         assertEquals("ok", nested["safe_field"])
         assertEquals("[REDACTED]", firstListItem["chunk_text"])

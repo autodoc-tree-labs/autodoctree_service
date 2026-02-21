@@ -47,6 +47,12 @@ type SlashState = {
   y: number;
 };
 
+type EmojiPickerState = {
+  open: boolean;
+  x: number;
+  y: number;
+};
+
 const EMPTY_SLASH_STATE: SlashState = {
   open: false,
   from: 0,
@@ -55,6 +61,31 @@ const EMPTY_SLASH_STATE: SlashState = {
   x: 0,
   y: 0
 };
+
+const EMPTY_EMOJI_PICKER_STATE: EmojiPickerState = {
+  open: false,
+  x: 0,
+  y: 0
+};
+
+const EMOJI_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "😀", label: "Smile" },
+  { value: "😄", label: "Happy" },
+  { value: "😉", label: "Wink" },
+  { value: "🤔", label: "Think" },
+  { value: "👍", label: "Thumbs up" },
+  { value: "✅", label: "Check" },
+  { value: "🔥", label: "Fire" },
+  { value: "🎉", label: "Party" },
+  { value: "🚀", label: "Rocket" },
+  { value: "💡", label: "Idea" },
+  { value: "📌", label: "Pin" },
+  { value: "⚠️", label: "Warning" },
+  { value: "🧠", label: "Brain" },
+  { value: "📎", label: "Clip" },
+  { value: "📝", label: "Memo" },
+  { value: "🔍", label: "Search" }
+];
 
 const CODE_LANGUAGES = ["plaintext", "kotlin", "typescript", "javascript", "python", "java", "sql", "bash"];
 const IMAGE_WIDTH_OPTIONS = ["25%", "50%", "75%", "100%"];
@@ -625,6 +656,7 @@ const hydrateDocumentWithAttachments = (doc: BlockDoc, attachments: AttachmentSu
 export function EditorV2({ docId, value, attachments, disabled = false, onChange, onUploadAttachment }: EditorV2Props) {
   const [slash, setSlash] = useState<SlashState>(EMPTY_SLASH_STATE);
   const [slashIndex, setSlashIndex] = useState(0);
+  const [emojiPicker, setEmojiPicker] = useState<EmojiPickerState>(EMPTY_EMOJI_PICKER_STATE);
   const [recentSlashIds, setRecentSlashIds] = useState<string[]>([]);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -635,6 +667,7 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const editorSurfaceRef = useRef<HTMLDivElement | null>(null);
   const slashMenuRef = useRef<HTMLDivElement | null>(null);
+  const emojiPickerRef = useRef<HTMLDivElement | null>(null);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const pendingUploadKindRef = useRef<"image" | "file" | null>(null);
   const appliedContentRef = useRef("");
@@ -760,6 +793,48 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
     setSlash(EMPTY_SLASH_STATE);
     setSlashIndex(0);
   }, []);
+
+  const closeEmojiPicker = useCallback(() => {
+    setEmojiPicker(EMPTY_EMOJI_PICKER_STATE);
+  }, []);
+
+  const openEmojiPicker = useCallback(() => {
+    const margin = 12;
+    const pickerWidth = Math.min(300, window.innerWidth - margin * 2);
+    const pickerHeight = 220;
+    const anchorX = slashRef.current.open ? slashRef.current.x : margin;
+    const anchorY = slashRef.current.open ? slashRef.current.y : margin;
+
+    let x = anchorX;
+    if (x + pickerWidth > window.innerWidth - margin) {
+      x = window.innerWidth - pickerWidth - margin;
+    }
+    if (x < margin) {
+      x = margin;
+    }
+
+    let y = anchorY;
+    if (y + pickerHeight > window.innerHeight - margin) {
+      y = Math.max(margin, anchorY - pickerHeight - 8);
+    }
+
+    setEmojiPicker({
+      open: true,
+      x,
+      y
+    });
+  }, []);
+
+  const insertEmojiAtCursor = useCallback(
+    (emoji: string) => {
+      if (!editor) {
+        return;
+      }
+      editor.chain().focus().insertContent(`${emoji} `).run();
+      closeEmojiPicker();
+    },
+    [closeEmojiPicker, editor]
+  );
 
   const setSlashPosition = useCallback(
     (targetEditor: Editor, from: number, to: number, query: string) => {
@@ -1077,6 +1152,15 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
         run: (targetEditor) => targetEditor.chain().focus().setParagraph().run()
       },
       {
+        id: "emoji",
+        label: "Emoji",
+        description: "이모지 선택",
+        group: "basic",
+        aliases: ["/emoji", "/em", "/이모지"],
+        keywords: ["emoji", "emoticon", "icon", "smile", "이모지", "표정"],
+        run: () => openEmojiPicker()
+      },
+      {
         id: "h1",
         label: "Heading 1",
         description: "큰 제목",
@@ -1212,7 +1296,7 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
         run: () => openUploadDialog("file")
       }
     ];
-  }, [openUploadDialog]);
+  }, [openEmojiPicker, openUploadDialog]);
 
   const filteredSlashItems = useMemo(() => filterSlashItems(slashItems, slash.query), [slash.query, slashItems]);
 
@@ -1358,6 +1442,12 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
     }
 
     const keyHandler = (event: KeyboardEvent) => {
+      if (emojiPicker.open && event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeEmojiPicker();
+        return;
+      }
       if (!slashRef.current.open) {
         return;
       }
@@ -1408,7 +1498,7 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
     return () => {
       editor.view.dom.removeEventListener("keydown", keyHandler, true);
     };
-  }, [applySlashItem, closeSlashMenu, editor, flatSlashItems, slashIndex]);
+  }, [applySlashItem, closeEmojiPicker, closeSlashMenu, editor, emojiPicker.open, flatSlashItems, slashIndex]);
 
   useEffect(() => {
     if (!editor || !slash.open) {
@@ -1434,6 +1524,43 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
       window.removeEventListener("mousedown", handleOutside);
     };
   }, [closeSlashMenu, editor, slash.open]);
+
+  useEffect(() => {
+    if (!emojiPicker.open) {
+      return;
+    }
+
+    const handleOutside = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      if (emojiPickerRef.current?.contains(target)) {
+        return;
+      }
+      closeEmojiPicker();
+    };
+
+    window.addEventListener("mousedown", handleOutside);
+    return () => {
+      window.removeEventListener("mousedown", handleOutside);
+    };
+  }, [closeEmojiPicker, emojiPicker.open]);
+
+  useEffect(() => {
+    if (!emojiPicker.open) {
+      return;
+    }
+    const handleViewportChange = () => {
+      closeEmojiPicker();
+    };
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("scroll", handleViewportChange, true);
+    return () => {
+      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("scroll", handleViewportChange, true);
+    };
+  }, [closeEmojiPicker, emojiPicker.open]);
 
   useEffect(() => {
     if (!editor || !slash.open) {
@@ -1610,6 +1737,29 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
               </div>
             );
           })}
+        </div>
+      ) : null}
+
+      {emojiPicker.open ? (
+        <div className="editor-v2-emoji-picker" ref={emojiPickerRef} style={{ left: emojiPicker.x, top: emojiPicker.y }}>
+          <p className="editor-v2-emoji-picker-title">이모지</p>
+          <div className="editor-v2-emoji-grid">
+            {EMOJI_OPTIONS.map((option) => (
+              <button
+                aria-label={`${option.label} ${option.value}`}
+                className="editor-v2-emoji-btn"
+                key={option.value}
+                onClick={(event) => {
+                  event.preventDefault();
+                  insertEmojiAtCursor(option.value);
+                }}
+                title={option.label}
+                type="button"
+              >
+                {option.value}
+              </button>
+            ))}
+          </div>
         </div>
       ) : null}
 

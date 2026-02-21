@@ -68,7 +68,7 @@ class SearchPaletteIntegrationTest {
                 .header("Authorization", "Bearer $token")
                 .header("X-Workspace-Id", wsId)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content(objectMapper.writeValueAsString(mapOf("eventType" to "COMMAND", "commandKey" to "tree")))
+                .content(objectMapper.writeValueAsString(mapOf("event_type" to "COMMAND", "command_key" to "tree")))
         ).andExpect(status().isCreated)
 
         mockMvc.perform(

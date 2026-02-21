@@ -49,12 +49,13 @@ data class DocumentRow(
     val title: String,
     val bodyMarkdown: String?,
     val bodyText: String?,
+    val blocksJson: String? = null,
     val sourceType: String,
     val status: String,
     val version: Long,
     val deleted: Boolean,
     val createdBy: String,
-    val updatedBy: String,
+    val updatedBy: String = createdBy,
     val createdAt: LocalDateTime,
     val updatedAt: LocalDateTime,
     val templateScore: Double? = null,
@@ -464,6 +465,7 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             title = rs.getString("title"),
             bodyMarkdown = rs.getString("body_markdown"),
             bodyText = rs.getString("body_text"),
+            blocksJson = rs.getString("blocks_json"),
             parentDocumentId = rs.getString("parent_document_id"),
             sourceType = rs.getString("source_type"),
             status = rs.getString("status"),
@@ -485,6 +487,7 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
         title: String,
         bodyMarkdown: String?,
         bodyText: String?,
+        blocksJson: String? = null,
         sourceType: String,
         createdBy: String,
         parentDocumentId: String? = null
@@ -494,15 +497,16 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
         jdbcTemplate.update(
             """
             INSERT INTO documents(
-                id, workspace_id, title, body_markdown, body_text, parent_document_id, source_type,
+                id, workspace_id, title, body_markdown, body_text, blocks_json, parent_document_id, source_type,
                 status, version, deleted, created_by, updated_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, false, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, ?, 0, false, ?, ?, ?, ?)
             """.trimIndent(),
             id,
             workspaceId,
             title,
             bodyMarkdown,
             bodyText,
+            blocksJson,
             parentDocumentId,
             sourceType,
             "PROCESSING",
@@ -517,6 +521,7 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
             title = title,
             bodyMarkdown = bodyMarkdown,
             bodyText = bodyText,
+            blocksJson = blocksJson,
             parentDocumentId = parentDocumentId,
             sourceType = sourceType,
             status = "PROCESSING",
@@ -594,17 +599,20 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
         expectedVersion: Long,
         title: String,
         bodyMarkdown: String?,
+        bodyText: String?,
+        blocksJson: String?,
         updatedBy: String
     ) {
         val updated = jdbcTemplate.update(
             """
             UPDATE documents
-            SET title = ?, body_markdown = ?, body_text = ?, version = version + 1, updated_at = ?, updated_by = ?
+            SET title = ?, body_markdown = ?, body_text = ?, blocks_json = CAST(? AS JSON), version = version + 1, updated_at = ?, updated_by = ?
             WHERE workspace_id = ? AND id = ? AND version = ? AND deleted = false
             """.trimIndent(),
             title,
             bodyMarkdown,
-            bodyMarkdown,
+            bodyText,
+            blocksJson,
             LocalDateTime.now(),
             updatedBy,
             workspaceId,
@@ -616,23 +624,51 @@ class DocumentRepository(private val jdbcTemplate: JdbcTemplate) {
         }
     }
 
-    fun softDelete(workspaceId: String, documentId: String) {
+    fun listSubtreeDocumentIds(workspaceId: String, rootDocumentId: String): List<String> {
+        val documents = listWorkspaceDocuments(workspaceId)
+        if (documents.none { it.id == rootDocumentId }) {
+            return emptyList()
+        }
+        val childrenByParent = mutableMapOf<String, MutableList<String>>()
+        documents.forEach { document ->
+            val parentId = document.parentDocumentId ?: return@forEach
+            childrenByParent.computeIfAbsent(parentId) { mutableListOf() }.add(document.id)
+        }
+        val result = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        val queue = ArrayDeque<String>()
+        queue.add(rootDocumentId)
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            if (!seen.add(current)) {
+                continue
+            }
+            result += current
+            childrenByParent[current].orEmpty().forEach { childId ->
+                queue.add(childId)
+            }
+        }
+        return result
+    }
+
+    fun softDeleteDocuments(workspaceId: String, documentIds: Collection<String>) {
+        if (documentIds.isEmpty()) {
+            return
+        }
+        val placeholders = documentIds.joinToString(",") { "?" }
+        val args = mutableListOf<Any>(
+            "DELETED",
+            LocalDateTime.now(),
+            workspaceId
+        )
+        args.addAll(documentIds)
         jdbcTemplate.update(
             """
             UPDATE documents
-            SET parent_document_id = NULL, updated_at = ?
-            WHERE workspace_id = ? AND parent_document_id = ? AND deleted = false
+            SET deleted = true, status = ?, parent_document_id = NULL, updated_at = ?
+            WHERE workspace_id = ? AND id IN ($placeholders) AND deleted = false
             """.trimIndent(),
-            LocalDateTime.now(),
-            workspaceId,
-            documentId
-        )
-        jdbcTemplate.update(
-            "UPDATE documents SET deleted = true, status = ?, parent_document_id = NULL, updated_at = ? WHERE workspace_id = ? AND id = ?",
-            "DELETED",
-            LocalDateTime.now(),
-            workspaceId,
-            documentId
+            *args.toTypedArray()
         )
     }
 
@@ -835,6 +871,22 @@ class DocumentFavoriteRepository(private val jdbcTemplate: JdbcTemplate) {
             """.trimIndent(),
             workspaceId,
             documentId
+        )
+    }
+
+    fun removeByDocuments(workspaceId: String, documentIds: Collection<String>) {
+        if (documentIds.isEmpty()) {
+            return
+        }
+        val placeholders = documentIds.joinToString(",") { "?" }
+        val args = mutableListOf<Any>(workspaceId)
+        args.addAll(documentIds)
+        jdbcTemplate.update(
+            """
+            DELETE FROM document_favorite
+            WHERE workspace_id = ? AND document_id IN ($placeholders)
+            """.trimIndent(),
+            *args.toTypedArray()
         )
     }
 }

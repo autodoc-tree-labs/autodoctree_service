@@ -13,6 +13,7 @@ class LogSanitizer(
     private val blockedKeys = setOf(
         "body_markdown",
         "body_text",
+        "blocks_json",
         "chunk_text",
         "vector_json",
         "upload_url",

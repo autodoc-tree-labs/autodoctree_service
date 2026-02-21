@@ -1224,8 +1224,10 @@ class TreeService(
                 "nodes" to emptyList<Any>()
             )
         val nodes = treeRepository.listNodes(context.workspaceId, active.id, normalizedView.name)
-        val memberships = treeRepository.listMemberships(context.workspaceId, active.id, normalizedView.name)
         val documentsById = documentRepository.listWorkspaceDocuments(context.workspaceId).associateBy { it.id }
+        val memberships = treeRepository
+            .listMemberships(context.workspaceId, active.id, normalizedView.name)
+            .filter { membership -> documentsById.containsKey(membership.documentId) }
         val membershipsByNode = memberships.groupBy { it.nodeId }
         val membershipByDocumentId = memberships.associateBy { it.documentId }
         val nodeById = nodes.associateBy { it.id }
@@ -1312,6 +1314,17 @@ class TreeService(
         )
     }
 
+    fun getRebuildStatus(context: WorkspaceContext, viewType: TreeViewType = TreeViewType.TOPIC): Map<String, Any?> {
+        val normalizedView = resolveViewType(viewType)
+        val status = rebuildDebounceQueue.status(context.workspaceId)
+        return mapOf(
+            "status" to status.status,
+            "pending_count" to status.pendingCount,
+            "running_since" to status.runningSince?.toString(),
+            "view_type" to normalizedView.apiValue
+        )
+    }
+
     @Transactional
     fun requestRebuild(context: WorkspaceContext, mode: String, viewType: TreeViewType = TreeViewType.TOPIC): Map<String, Any?> {
         val normalizedView = resolveViewType(viewType)
@@ -1326,8 +1339,13 @@ class TreeService(
                 "pending_count" to rebuildDebounceQueue.pendingCount(context.workspaceId)
             )
         }
-        val snapshot = rebuildWorkspace(context.workspaceId, context.userId, manual = manual, viewType = normalizedView)
-        return mapOf("snapshot_id" to snapshot.id, "status" to snapshot.status, "view_type" to normalizedView.apiValue)
+        rebuildDebounceQueue.markRunning(context.workspaceId)
+        return try {
+            val snapshot = rebuildWorkspace(context.workspaceId, context.userId, manual = manual, viewType = normalizedView)
+            mapOf("snapshot_id" to snapshot.id, "status" to snapshot.status, "view_type" to normalizedView.apiValue)
+        } finally {
+            rebuildDebounceQueue.markIdle(context.workspaceId)
+        }
     }
 
     @Transactional

@@ -22,5 +22,11 @@ security:
   log-sanitizer-enabled: ${SECURITY_LOG_SANITIZER_ENABLED:true}
   log-max-string-length: ${SECURITY_LOG_MAX_STRING_LENGTH:240}
 
+tree:
+  neighbor-min-similarity: ${TREE_NEIGHBOR_MIN_SIMILARITY:0.55}
+  fusion-lexical-gate: ${TREE_FUSION_LEXICAL_GATE:0.25}
+  assign-auto-threshold: ${TREE_ASSIGN_AUTO_THRESHOLD:0.58}
+  assign-recommend-threshold: ${TREE_ASSIGN_RECOMMEND_THRESHOLD:0.45}
+
 llm:
   provider: ${LLM_PROVIDER:ollama}

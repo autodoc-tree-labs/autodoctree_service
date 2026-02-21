@@ -203,6 +203,12 @@ class TenantIsolationIntegrationTest {
         ).andExpect(status().isForbidden)
 
         mockMvc.perform(
+            get("/api/v1/tree/rebuild/status")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
             get("/api/v1/documents/$wsADocId/explain")
                 .header("Authorization", "Bearer $tokenB")
                 .header("X-Workspace-Id", wsBId)
@@ -410,6 +416,40 @@ class TenantIsolationIntegrationTest {
                 .header("Authorization", "Bearer $tokenB")
                 .header("X-Workspace-Id", wsAId)
         ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
+            post("/api/v1/workspaces/$wsAId/invites")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "email" to "blocked-invite@autodoc.local",
+                            "role" to "MEMBER"
+                        )
+                    )
+                )
+        ).andExpect(status().isForbidden)
+    }
+
+    @Test
+    fun `owner can create workspace invite with matching tenant scope`() {
+        mockMvc.perform(
+            post("/api/v1/workspaces/$wsAId/invites")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "email" to "invitee@autodoc.local",
+                            "role" to "VIEWER"
+                        )
+                    )
+                )
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.invite_token").isString)
     }
 
     @Test
