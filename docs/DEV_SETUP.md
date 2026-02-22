@@ -6,6 +6,14 @@
 - pnpm 10+
 - Docker Desktop
 
+## 0. Fresh clone (처음 실행)
+```bash
+git clone <repo-url>
+cd autodoc-tree-monorepo-docs
+cp .env.example .env
+pnpm -w install
+```
+
 ## 1. Start local infra
 ```bash
 docker compose up -d
@@ -23,6 +31,10 @@ Services:
 - Redis: `localhost:56379`
 - MinIO API: `localhost:59000`
 - MinIO Console: `localhost:59001`
+- Mailpit SMTP: `localhost:51025`
+- Mailpit UI: `localhost:58025`
+
+Mailpit은 로컬 메일 수신함입니다. 회원가입 인증코드는 실제 Gmail이 아니라 `http://localhost:58025`에서 확인합니다.
 
 Optional observability stack (Prometheus + Grafana):
 ```bash
@@ -85,20 +97,57 @@ Smoke check:
 
 If host port `18081` is already used, override with `STRUCTURE_WORKER_PORT`.
 
-## 2. Backend (IntelliJ)
+## 2. Backend (CLI 권장 / IntelliJ)
+CLI 풀 실행(권장):
+```bash
+SPRING_PROFILES_ACTIVE=local \
+DOC_API_JWT_SECRET=dev-secret-change-me \
+FEATURE_EMBEDDING_OLLAMA=true \
+EMBEDDING_PROVIDER=ollama \
+EMBEDDING_OLLAMA_BASE_URL=http://localhost:21434 \
+EMBEDDING_OLLAMA_MODEL=bge-m3 \
+EMBEDDING_OLLAMA_TIMEOUT_MS=60000 \
+LLM_PROVIDER=ollama \
+LLM_OLLAMA_BASE_URL=http://localhost:21434 \
+LLM_OLLAMA_MODEL=llama3.1:8b-instruct \
+FEATURE_LLM_LABELING=true \
+FEATURE_LLM_EXPLAIN=true \
+SMTP_HOST=localhost \
+SMTP_PORT=51025 \
+SMTP_AUTH=false \
+SMTP_STARTTLS_ENABLE=false \
+DOC_API_REGISTER_SENDER_EMAIL=no-reply@autodoc.local \
+./gradlew -p services :doc-api:bootRun
+```
+
+Ollama 기본 포트(`11434`)를 쓸 때는 아래 2개만 바꿉니다.
+```bash
+EMBEDDING_OLLAMA_BASE_URL=http://localhost:11434
+LLM_OLLAMA_BASE_URL=http://localhost:11434
+```
+
+IntelliJ 실행:
 1. Open `services/` as Gradle project.
 2. Run `doc-api` main class: `com.autodoctree.api.DocApiApplicationKt`
 3. Env:
 - `SPRING_PROFILES_ACTIVE=local`
 - `DOC_API_JWT_SECRET=dev-secret-change-me`
+- Signup email verification:
+  - `SMTP_HOST=localhost`
+  - `SMTP_PORT=51025`
+  - `SMTP_AUTH=false`
+  - `SMTP_STARTTLS_ENABLE=false`
+  - `DOC_API_REGISTER_SENDER_EMAIL=no-reply@autodoc.local`
+  - `DOC_API_REGISTER_CODE_TTL_SECONDS=600`
+  - `DOC_API_REGISTER_MAX_ATTEMPTS=5`
 - MinIO를 기본 포트 외로 바꿨다면 `S3_ENDPOINT`를 같은 주소로 지정 (예: `http://localhost:59010`)
 - Ollama 임베딩 사용 시:
   - `FEATURE_EMBEDDING_OLLAMA=true`
   - `EMBEDDING_PROVIDER=ollama`
-  - `EMBEDDING_OLLAMA_BASE_URL=http://localhost:11434`
+  - `EMBEDDING_OLLAMA_BASE_URL=http://localhost:21434`
   - `EMBEDDING_OLLAMA_MODEL=bge-m3`
   - `LLM_PROVIDER=ollama`
-  - `LLM_OLLAMA_BASE_URL=http://localhost:11434`
+  - `LLM_OLLAMA_BASE_URL=http://localhost:21434`
   - `LLM_OLLAMA_MODEL=llama3.1:8b-instruct`
   - `FEATURE_LLM_LABELING=true`
   - `FEATURE_LLM_EXPLAIN=true`
@@ -107,6 +156,16 @@ Quick test:
 ```bash
 curl -s http://localhost:8080/api/v1/health
 ```
+
+회원가입 인증코드 발송 스모크(로컬 Mailpit 확인):
+```bash
+curl -s -X POST http://localhost:8080/api/v1/auth/register/request-code \
+  -H "Content-Type: application/json" \
+  -d '{"email":"signup-smoke@autodoc.local","password":"password123"}'
+```
+
+- 위 요청 뒤 Mailpit UI(`http://localhost:58025`)에서 인증코드를 확인할 수 있어야 합니다.
+- SMTP 연결 실패 시 `503`이 반환됩니다(메일 서버 설정 확인).
 
 ### 2-1. Test workspace 시드(SQL + Shell)
 `Test` 워크스페이스와 다양한 주제 문서를 SQL로 주입합니다.
@@ -123,7 +182,7 @@ curl -s http://localhost:8080/api/v1/health
 분류/검색/트리 튜닝용 대량 데이터를 생성합니다.
 
 ```bash
-# 기본: child 문서 1200건 + 카테고리 root + 첨부 메타데이터
+# 기본: child 문서 3000건 + 카테고리 root + 첨부 메타데이터
 ./scripts/seed_bulk_workspace_dataset.sh
 ```
 
@@ -141,6 +200,7 @@ SEED_ATTACHMENT_RATIO=45 \
 - SQL 파일: `scripts/sql/seed_bulk_workspace_dataset.sql`
 - `SEED_DOC_COUNT`는 child 문서 개수입니다(루트 문서는 카테고리별로 추가 생성).
 - `SEED_ATTACHMENT_RATIO`는 child 문서 중 첨부 메타데이터를 생성할 비율(0~100)입니다.
+- 제목/본문은 카테고리 + 포커스 + 문서유형 + 상태 조합으로 생성되어 반복 문구를 줄입니다.
 - 스크립트는 upsert 기반으로 재실행 가능하며, `DocumentSaved` outbox를 `PENDING`으로 맞춥니다.
 
 Ollama smoke:
@@ -164,7 +224,14 @@ VITE_FEATURE_BLOCK_EDITOR=true pnpm -C web-user dev --port 5174
 
 ### 3-1. web-user IA / 라우트
 `web-user`는 Workspace-first AppShell을 사용합니다.
-- Sidebar: Workspace switcher, Quick actions, Favorites, Pages 트리(드래그 이동), Views
+- Sidebar: Workspace launcher(멀티 계정/워크스페이스), Quick actions, Favorites, Pages 트리(상위 기본 노출 + 하위 토글), Views
+- Workspace launcher:
+  - 계정별 워크스페이스 전환
+  - 계정별 `새 워크스페이스`와 `...` 메뉴(워크스페이스 생성/참여, 로그아웃)
+  - `다른 계정 추가`는 로그인 전용(기존 계정 세션 추가)
+  - 회원가입은 `/signup` 별도 화면(이메일 인증코드 발송/검증)으로 진행
+  - `모든 계정에서 로그아웃`
+- Pages는 상위 20개까지만 기본 노출하며 초과 시 `... 더보기`로 Library 뷰로 이동
 - Main: 문서 중심 편집/탐색
 
 즐겨찾기 API:
@@ -173,10 +240,13 @@ VITE_FEATURE_BLOCK_EDITOR=true pnpm -C web-user dev --port 5174
 - `DELETE /api/v1/documents/{documentId}/favorite`
 
 주요 라우트:
+- `/login` (로그인 전용)
+- `/signup` (회원가입 + 이메일 인증코드)
 - `/w/:workspaceId` (기본 Documents)
 - `/w/:workspaceId/doc/:docId` (문서 편집)
 - `/w/:workspaceId/doc/:docId/details` (문서 상세/파이프라인)
 - `/w/:workspaceId/view/documents`
+- `/w/:workspaceId/view/library`
 - `/w/:workspaceId/view/tree`
 - `/w/:workspaceId/view/questions`
 - `/w/:workspaceId/view/trash`
@@ -204,8 +274,14 @@ Attachment upload policy:
   - `application/octet-stream`
 
 워크스페이스 선택 규칙:
-- 마지막 사용 workspace(`autodoc.user.last-workspace.v1`) 자동 복원
-- 저장값이 없으면 첫 workspace 자동 선택
+- 계정 세션은 `autodoc.user.sessions.v2`에 저장
+- 활성 계정의 마지막 workspace(`autodoc.user.last-workspace.v1`) 자동 복원
+- 저장값이 없으면 활성 계정의 첫 workspace 자동 선택
+
+초대 토큰 보안:
+- 토큰은 DB에 해시(`token_hash`)로 저장되고 원문은 저장되지 않음
+- 기본 만료 7일 + 수락 시 즉시 재사용 불가
+- `DOC_API_INVITE_REQUIRE_EMAIL_MATCH=true` 기본값으로 초대 이메일과 다른 계정은 수락할 수 없음
 
 ## 4. HTTP smoke
 Use IntelliJ HTTP Client files in `tools/http/`:
@@ -399,3 +475,8 @@ docker compose --profile ml up -d reranker-api
 - Workspace invites (dev mock token flow):
   - create invite `POST /api/v1/workspaces/{workspaceId}/invites`
   - accept invite `POST /api/v1/workspaces/invites/accept`
+
+## Signup verification APIs
+- `POST /api/v1/auth/register/request-code` : 이메일/비밀번호로 인증코드 발송
+- `POST /api/v1/auth/register/verify` : 이메일/인증코드 검증 후 가입 완료
+- `POST /api/v1/auth/register` : `verify`와 동일한 호환 엔드포인트
