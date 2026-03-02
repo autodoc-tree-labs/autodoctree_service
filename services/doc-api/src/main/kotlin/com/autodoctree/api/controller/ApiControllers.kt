@@ -20,6 +20,7 @@ import jakarta.validation.constraints.Email
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.NotNull
 import jakarta.validation.constraints.Positive
+import jakarta.validation.constraints.Size
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.DeleteMapping
@@ -55,6 +56,30 @@ class MetricsController(
 class AuthController(
     private val authService: AuthService
 ) {
+
+    @PostMapping("/register/request-code")
+    fun requestRegisterCode(@Valid @RequestBody request: RegisterCodeRequest): Map<String, Long> {
+        val expiresInSeconds = authService.requestRegistrationCode(request.email, request.password)
+        return mapOf("expires_in_seconds" to expiresInSeconds)
+    }
+
+    @PostMapping("/register")
+    fun register(@Valid @RequestBody request: RegisterRequest): Map<String, String> {
+        val tokens = authService.register(request.email, request.verificationCode)
+        return mapOf(
+            "access_token" to tokens.accessToken,
+            "refresh_token" to tokens.refreshToken
+        )
+    }
+
+    @PostMapping("/register/verify")
+    fun verifyRegister(@Valid @RequestBody request: RegisterRequest): Map<String, String> {
+        val tokens = authService.register(request.email, request.verificationCode)
+        return mapOf(
+            "access_token" to tokens.accessToken,
+            "refresh_token" to tokens.refreshToken
+        )
+    }
 
     @PostMapping("/login")
     fun login(@Valid @RequestBody request: LoginRequest): Map<String, String> {
@@ -227,6 +252,41 @@ class DocumentController(
     ): Map<String, Any?> {
         val context = workspaceContextResolver.resolve(request)
         return documentService.listDocuments(context, status, query, page, size)
+    }
+
+    @GetMapping("/sidebar")
+    fun listSidebarDocuments(request: HttpServletRequest): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return documentService.listSidebar(context)
+    }
+
+    @GetMapping("/library")
+    fun listLibraryDocuments(
+        request: HttpServletRequest,
+        @RequestParam(required = false, name = "q") query: String?,
+        @RequestParam(defaultValue = "0") page: Int,
+        @RequestParam(defaultValue = "100") size: Int
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return documentService.listLibrary(context, query, page, size)
+    }
+
+    @PostMapping("/library/personal-top")
+    fun movePersonalTop(
+        request: HttpServletRequest,
+        @Valid @RequestBody body: UpdatePersonalTopRequest
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return documentService.movePersonalTop(context, body.documentIds)
+    }
+
+    @PostMapping("/library/bulk-trash")
+    fun bulkTrashRoots(
+        request: HttpServletRequest,
+        @Valid @RequestBody body: BulkTrashRootDocumentsRequest
+    ): Map<String, Any?> {
+        val context = workspaceContextResolver.resolve(request)
+        return documentService.bulkTrashRoots(context, body.documentIds)
     }
 
     @GetMapping("/trash")
@@ -745,6 +805,16 @@ data class LoginRequest(
     @field:NotBlank val password: String
 )
 
+data class RegisterCodeRequest(
+    @field:Email val email: String,
+    @field:NotBlank @field:Size(min = 8, max = 128) val password: String
+)
+
+data class RegisterRequest(
+    @field:Email val email: String,
+    @field:NotBlank val verificationCode: String
+)
+
 data class RefreshRequest(
     @field:NotBlank
     val refreshToken: String
@@ -791,6 +861,14 @@ data class PatchDocumentRequest(
 
 data class MoveDocumentRequest(
     val parentDocumentId: String? = null
+)
+
+data class UpdatePersonalTopRequest(
+    val documentIds: List<String> = emptyList()
+)
+
+data class BulkTrashRootDocumentsRequest(
+    val documentIds: List<String> = emptyList()
 )
 
 data class PresignRequest(

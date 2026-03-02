@@ -254,6 +254,83 @@ class DocumentHierarchyIntegrationTest {
         ).andExpect(status().isBadRequest)
     }
 
+    @Test
+    fun `library and sidebar endpoints include descendants and support personal top plus bulk trash`() {
+        val rootAId = createDocument(tokenA, wsAId, "루트 A", null)
+        val childA1Id = createDocument(tokenA, wsAId, "루트 A 하위", rootAId)
+        createDocument(tokenA, wsAId, "루트 B", null)
+        val rootCId = createDocument(tokenA, wsAId, "루트 C", null)
+
+        val libraryBefore = mockMvc.perform(
+            get("/api/v1/documents/library")
+                .param("page", "0")
+                .param("size", "100")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+        val libraryItemsBefore = objectMapper.readTree(libraryBefore).path("items")
+        val rootANode = libraryItemsBefore.firstOrNull { it.path("id").asText() == rootAId }
+        assertTrue(rootANode != null, "Expected root A in library list")
+        assertTrue(
+            rootANode?.path("children")?.any { it.path("id").asText() == childA1Id } == true,
+            "Expected root A to include descendants inline"
+        )
+
+        mockMvc.perform(
+            post("/api/v1/documents/library/personal-top")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "document_ids" to listOf(rootCId)
+                        )
+                    )
+                )
+        ).andExpect(status().isOk)
+
+        val sidebarAfterPin = mockMvc.perform(
+            get("/api/v1/documents/sidebar")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isOk)
+            .andReturn()
+            .response
+            .contentAsString
+        val sidebarItemsAfterPin = objectMapper.readTree(sidebarAfterPin).path("items")
+        assertEquals(rootCId, sidebarItemsAfterPin.first().path("id").asText())
+
+        mockMvc.perform(
+            post("/api/v1/documents/library/bulk-trash")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf(
+                            "document_ids" to listOf(rootAId)
+                        )
+                    )
+                )
+        ).andExpect(status().isOk)
+
+        mockMvc.perform(
+            get("/api/v1/documents/$rootAId")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isNotFound)
+
+        mockMvc.perform(
+            get("/api/v1/documents/$childA1Id")
+                .header("Authorization", "Bearer $tokenA")
+                .header("X-Workspace-Id", wsAId)
+        ).andExpect(status().isNotFound)
+    }
+
     private fun createDocument(token: String, workspaceId: String, title: String, parentDocumentId: String?): String {
         val payload = mutableMapOf<String, Any?>(
             "title" to title,

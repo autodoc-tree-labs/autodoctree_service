@@ -93,7 +93,23 @@ INSERT INTO tmp_bulk_categories(
     (21, 'research-papers',     '논문/리서치',        'citation',      'benchmark',      'methodology',    'pdf',  'application/pdf'),
     (22, 'incident-review',     '장애 회고',          'postmortem',    'timeline',       'action-item',    'md',   'text/markdown'),
     (23, 'knowledge-base',      '지식베이스',         'faq',           'runbook',        'howto',          'txt',  'text/plain'),
-    (24, 'project-portfolio',   '프로젝트 포트폴리오','milestone',     'scope',          'retrospective',  'pptx', 'application/octet-stream');
+    (24, 'project-portfolio',   '프로젝트 포트폴리오','milestone',     'scope',          'retrospective',  'pptx', 'application/octet-stream'),
+    (25, 'climate-sustainability', '기후/지속가능성', 'carbon',      'esg',            'renewable',      'pdf',  'application/pdf'),
+    (26, 'gaming-esports',      '게임/e스포츠',       'matchmaking',   'meta',           'latency',        'md',   'text/markdown'),
+    (27, 'food-culinary',       '요리/식음료',        'recipe',        'kitchen',        'menu',           'txt',  'text/plain'),
+    (28, 'media-content',       '콘텐츠/미디어',      'editorial',     'script',         'thumbnail',      'png',  'image/png'),
+    (29, 'startup-investing',   '스타트업/투자',      'valuation',     'term-sheet',     'diligence',      'pdf',  'application/pdf'),
+    (30, 'public-policy',       '공공정책',           'regulation',    'governance',     'citizen',        'docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+    (31, 'biotech-medical',     '바이오/메디컬',      'clinical',      'assay',          'protocol',       'pdf',  'application/pdf'),
+    (32, 'manufacturing-iot',   '제조/IoT',           'sensor',        'plc',            'oee',            'csv',  'text/csv'),
+    (33, 'mobility-auto',       '모빌리티/자동차',    'ev',            'telematics',     'safety',         'md',   'text/markdown'),
+    (34, 'real-estate-space',   '부동산/공간',        'lease',         'occupancy',      'facility',       'pdf',  'application/pdf'),
+    (35, 'creator-economy',     '크리에이터 이코노미', 'creator',      'sponsorship',    'ugc',            'csv',  'text/csv'),
+    (36, 'nonprofit-social',    '비영리/소셜임팩트',   'donation',      'grant',          'impact',         'docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+    (37, 'academia-conference', '학회/컨퍼런스',       'submission',    'reviewer',       'presentation',   'pptx', 'application/octet-stream'),
+    (38, 'language-localization', '언어/로컬라이제이션', 'i18n',      'translation',    'terminology',    'txt',  'text/plain'),
+    (39, 'retail-commerce',     '리테일/커머스',      'sku',           'promotion',      'merchandising',  'csv',  'text/csv'),
+    (40, 'cloud-finops',        '클라우드 FinOps',    'cloud-cost',    'rightsizing',    'savings',        'md',   'text/markdown');
 
 DROP TABLE IF EXISTS tmp_bulk_roots;
 CREATE TEMP TABLE tmp_bulk_roots ON COMMIT DROP AS
@@ -147,14 +163,12 @@ enriched AS (
         r.document_id AS root_document_id,
         pg_temp.seed_uuid('bulk-doc:' || :'seed_workspace_id' || ':' || b.seq_no::TEXT) AS document_id,
         ((b.seq_no - 1) / p.category_total) + 1 AS ordinal_in_category,
-        CASE (b.seq_no % 6)
-            WHEN 0 THEN '운영 점검'
-            WHEN 1 THEN '주간 리뷰'
-            WHEN 2 THEN '실험 리포트'
-            WHEN 3 THEN '개선 제안'
-            WHEN 4 THEN '이슈 로그'
-            ELSE '실행 계획'
-        END AS stage_label
+        (ARRAY['주간 운영', '월간 리뷰', '실험 기록', '개선 제안', '리스크 점검', '실행 계획', '고객 피드백', '성과 분석', '장애 예방', '프로세스 개선', '비용 최적화', '품질 개선'])[((b.seq_no + c.category_idx * 2) % 12) + 1] AS stage_label,
+        (ARRAY['온보딩', '자동화', '가이드', '체크포인트', '런북', '플레이북', '실행안', '회고', '브리프', 'FAQ', '설정안', '템플릿', '정책안', '의사결정 로그', '비교 분석', '검증 노트'])[((b.seq_no * 3 + c.category_idx) % 16) + 1] AS artifact_label,
+        (ARRAY['핵심지표', '사용자경험', '신뢰성', '보안성', '확장성', '협업', '효율화', '운영안정성', '성장전략', '리텐션', '품질보증', '비용절감', '자동화율', '거버넌스'])[((b.seq_no * 5 + c.category_idx) % 14) + 1] AS focus_label,
+        (ARRAY['draft', 'review', 'pending', 'final', 'refactor', 'archive'])[((b.seq_no * 7 + c.category_idx) % 6) + 1] AS maturity_code,
+        (ARRAY['초안', '검토중', '승인대기', '확정', '리팩토링 예정', '아카이브 후보'])[((b.seq_no * 7 + c.category_idx) % 6) + 1] AS maturity_label,
+        (ARRAY['P0', 'P1', 'P2', 'P3'])[((b.seq_no + c.category_idx) % 4) + 1] AS priority_label
     FROM base b
     JOIN tmp_bulk_categories c ON c.category_idx = b.category_idx
     JOIN tmp_bulk_roots r ON r.category_idx = b.category_idx
@@ -176,20 +190,34 @@ SELECT
     wp.keyword_c,
     wp.file_ext,
     wp.content_type,
+    wp.stage_label,
+    wp.artifact_label,
+    wp.focus_label,
+    wp.maturity_code,
+    wp.maturity_label,
+    wp.priority_label,
     wp.document_id,
     wp.ordinal_in_category,
-    format('%s %s %s', wp.category_label, wp.stage_label, LPAD(wp.ordinal_in_category::TEXT, 4, '0')) AS title,
+    format('%s %s %s (%s)', wp.category_label, wp.focus_label, wp.artifact_label, wp.maturity_label) AS title,
     format(
-        E'# %s %s %s\n\n## 핵심 요약\n- 키워드: %s, %s, %s\n- 문서 일련번호: %s\n- 분기: Q%s\n\n## 본문\n%s 영역에서 정책/프로세스/실험 결과를 정리한다.\n정량 지표(precision, recall, latency, cost)와 정성 피드백을 함께 기록한다.\n동일 카테고리 문서 간 참조를 유지해 트리 안정성을 높인다.\n\n## 체크리스트\n1. %s 기준선 점검\n2. %s 이슈 로그 정리\n3. %s 개선안 확정\n',
+        E'# %s %s %s (%s)\n\n> 우선순위: %s\n> 분류 키워드: %s, %s, %s\n\n## 배경\n%s 영역에서 %s 이슈를 중심으로 운영 상태를 점검하고 실행안을 정리한다.\n기존 문서/첨부와 연결해 분류 정확도와 탐색성을 높이는 것이 목표다.\n\n## 이번 문서 목표\n- %s 관점에서 현재 상태를 진단한다.\n- %s 기준으로 개선 우선순위를 도출한다.\n- %s 단계에서 필요한 실행 항목을 확정한다.\n\n## 실행 체크리스트\n- [ ] 현황 데이터 수집 및 결측치 점검\n- [ ] 핵심 이해관계자 일정 동기화\n- [ ] 대안별 비용/효과 비교표 작성\n- [ ] 변경 후 모니터링 임계치 확정\n\n## 참고 지표\n| 항목 | 값 |\n| --- | --- |\n| 문서 코드 | %s |\n| 분기 | Q%s |\n| 예상 영향도 | %s%% |\n| 첨부 필요 여부 | %s |\n\n## 리스크/대응\n1. %s 관련 병목이 재발할 수 있어 가드레일을 강화한다.\n2. %s 신호가 약한 경우 수동 검토 fallback을 유지한다.\n3. %s 변경점은 단계 배포로 확산 리스크를 낮춘다.\n\n## 다음 액션\n- 연계 문서 2건 추가 작성\n- 허브 페이지 요약 갱신\n',
         wp.category_label,
-        wp.stage_label,
-        LPAD(wp.ordinal_in_category::TEXT, 4, '0'),
+        wp.focus_label,
+        wp.artifact_label,
+        wp.maturity_label,
+        wp.priority_label,
         wp.keyword_a,
         wp.keyword_b,
         wp.keyword_c,
-        wp.seq_no,
-        ((wp.seq_no % 4) + 1),
         wp.category_label,
+        wp.stage_label,
+        wp.focus_label,
+        wp.priority_label,
+        wp.maturity_label,
+        upper(substr(md5(wp.document_id), 1, 6)),
+        ((wp.seq_no % 4) + 1),
+        (50 + ((wp.seq_no * 11) % 50)),
+        CASE WHEN (wp.seq_no % 3 = 0) THEN '예' ELSE '아니오' END,
         wp.keyword_a,
         wp.keyword_b,
         wp.keyword_c
@@ -347,10 +375,10 @@ WITH ratio AS (
 SELECT
     pg_temp.seed_uuid('bulk-attachment:' || :'seed_workspace_id' || ':' || c.document_id) AS attachment_id,
     c.document_id,
-    format('%s_reference_%s.%s', c.category_key, LPAD(c.ordinal_in_category::TEXT, 4, '0'), c.file_ext) AS filename,
+    format('%s_%s_%s_%s.%s', c.category_key, c.keyword_a, c.maturity_code, LPAD(c.ordinal_in_category::TEXT, 4, '0'), c.file_ext) AS filename,
     c.content_type,
     (4096 + ((c.seq_no * 7919) % 1048576))::BIGINT AS size,
-    format('workspaces/%s/attachments/%s/seed_%s.%s', :'seed_workspace_id', c.document_id, LPAD(c.seq_no::TEXT, 5, '0'), c.file_ext) AS object_key,
+    format('workspaces/%s/attachments/%s/%s_%s_%s.%s', :'seed_workspace_id', c.document_id, c.category_key, c.keyword_b, LPAD(c.seq_no::TEXT, 5, '0'), c.file_ext) AS object_key,
     md5('bulk-attachment-checksum:' || c.document_id) AS checksum_sha256
 FROM tmp_bulk_children c
 CROSS JOIN ratio r

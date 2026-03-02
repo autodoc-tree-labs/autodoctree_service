@@ -2,7 +2,9 @@ package com.autodoctree.api.domain
 
 import com.autodoctree.api.db.AttachmentRepository
 import com.autodoctree.api.db.DocumentFavoriteRepository
+import com.autodoctree.api.db.DocumentPersonalTopRepository
 import com.autodoctree.api.db.DocumentRepository
+import com.autodoctree.api.db.DocumentRow
 import com.autodoctree.api.db.PipelineStatusRow
 import com.autodoctree.api.db.PipelineStatusRepository
 import com.autodoctree.api.infra.BadRequestException
@@ -56,6 +58,7 @@ class OutboxService(
 class DocumentService(
     private val documentRepository: DocumentRepository,
     private val documentFavoriteRepository: DocumentFavoriteRepository,
+    private val documentPersonalTopRepository: DocumentPersonalTopRepository,
     private val pipelineStatusRepository: PipelineStatusRepository,
     private val attachmentRepository: AttachmentRepository,
     private val documentContentMapper: DocumentContentMapper,
@@ -64,6 +67,14 @@ class DocumentService(
     private val auditService: AuditService
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
+    private val sidebarRootLimit = 20
+    private val personalTopLimit = 20
+    private val libraryPageSizeMax = 100
+
+    private data class LibraryTreeNode(
+        val document: DocumentRow,
+        val children: MutableList<LibraryTreeNode> = mutableListOf()
+    )
 
     @Transactional
     fun createDocument(
@@ -205,6 +216,132 @@ class DocumentService(
             "page" to page,
             "size" to size,
             "total" to total
+        )
+    }
+
+    fun listSidebar(context: WorkspaceContext): Map<String, Any?> {
+        val documents = documentRepository.listWorkspaceDocuments(context.workspaceId)
+        val roots = buildLibraryForest(documents)
+        val personalTopDocumentIds = resolvePersonalTopDocumentIds(context, roots.map { it.document.id }.toSet())
+        val orderedRoots = orderRootsByPersonalTop(roots, personalTopDocumentIds)
+        val limitedRoots = orderedRoots.take(sidebarRootLimit)
+        return mapOf(
+            "items" to limitedRoots.map { toLibraryTreePayload(it) },
+            "total_roots" to orderedRoots.size,
+            "limit" to sidebarRootLimit,
+            "has_more" to (orderedRoots.size > sidebarRootLimit),
+            "personal_top_document_ids" to personalTopDocumentIds
+        )
+    }
+
+    fun listLibrary(
+        context: WorkspaceContext,
+        query: String?,
+        page: Int,
+        size: Int
+    ): Map<String, Any?> {
+        val safePage = page.coerceAtLeast(0)
+        val safeSize = size.coerceIn(1, libraryPageSizeMax)
+        val documents = documentRepository.listWorkspaceDocuments(context.workspaceId)
+        val allRoots = buildLibraryForest(documents)
+        val personalTopDocumentIds = resolvePersonalTopDocumentIds(context, allRoots.map { it.document.id }.toSet())
+        val filteredRoots = filterLibraryForest(allRoots, query)
+        val orderedRoots = orderRootsByPersonalTop(filteredRoots, personalTopDocumentIds)
+        val totalRoots = orderedRoots.size
+        val fromIndex = (safePage * safeSize).coerceAtMost(totalRoots)
+        val toIndex = (fromIndex + safeSize).coerceAtMost(totalRoots)
+        val pageRoots = orderedRoots.subList(fromIndex, toIndex)
+        val totalPages = if (totalRoots == 0) 0 else ((totalRoots - 1) / safeSize) + 1
+        return mapOf(
+            "items" to pageRoots.map { toLibraryTreePayload(it) },
+            "page" to safePage,
+            "size" to safeSize,
+            "total_roots" to totalRoots,
+            "total_pages" to totalPages,
+            "has_more" to (toIndex < totalRoots),
+            "personal_top_document_ids" to personalTopDocumentIds
+        )
+    }
+
+    @Transactional
+    fun movePersonalTop(context: WorkspaceContext, documentIds: List<String>): Map<String, Any?> {
+        val selectedRootIds = normalizeDocumentIds(documentIds)
+        if (selectedRootIds.isEmpty()) {
+            throw BadRequestException("document_ids required")
+        }
+        val roots = buildLibraryForest(documentRepository.listWorkspaceDocuments(context.workspaceId))
+        val rootIdSet = roots.map { it.document.id }.toSet()
+        selectedRootIds.forEach { rootId ->
+            if (!rootIdSet.contains(rootId)) {
+                throw BadRequestException("document_ids must include only root documents")
+            }
+        }
+        val existingRootIds = resolvePersonalTopDocumentIds(context, rootIdSet)
+        val merged = (selectedRootIds + existingRootIds).distinct().take(personalTopLimit)
+        documentPersonalTopRepository.replaceForWorkspaceAndUser(context.workspaceId, context.userId, merged)
+        auditService.write(
+            context.workspaceId,
+            context.userId,
+            "document.personal_top.move",
+            mapOf(
+                "selected_count" to selectedRootIds.size,
+                "stored_count" to merged.size
+            )
+        )
+        return mapOf(
+            "items" to merged,
+            "limit" to personalTopLimit,
+            "total" to merged.size
+        )
+    }
+
+    @Transactional
+    fun bulkTrashRoots(context: WorkspaceContext, documentIds: List<String>): Map<String, Any?> {
+        requireEditor(context)
+        val rootIds = normalizeDocumentIds(documentIds)
+        if (rootIds.isEmpty()) {
+            throw BadRequestException("document_ids required")
+        }
+
+        val documentsById = documentRepository.listWorkspaceDocuments(context.workspaceId).associateBy { it.id }
+        rootIds.forEach { rootId ->
+            val document = documentsById[rootId] ?: throw NotFoundException()
+            if (document.parentDocumentId != null) {
+                throw BadRequestException("only root documents can be trashed in bulk")
+            }
+        }
+
+        val deletedDocumentIds = linkedSetOf<String>()
+        rootIds.forEach { rootId ->
+            deletedDocumentIds.addAll(documentRepository.listSubtreeDocumentIds(context.workspaceId, rootId))
+        }
+        if (deletedDocumentIds.isEmpty()) {
+            throw NotFoundException()
+        }
+
+        documentFavoriteRepository.removeByDocuments(context.workspaceId, deletedDocumentIds)
+        documentPersonalTopRepository.removeByDocuments(context.workspaceId, deletedDocumentIds)
+        documentRepository.softDeleteDocuments(context.workspaceId, deletedDocumentIds)
+        deletedDocumentIds.forEach { deletedDocumentId ->
+            outboxService.enqueue(
+                workspaceId = context.workspaceId,
+                documentId = deletedDocumentId,
+                eventType = "DocumentDeleted",
+                payload = mapOf("document_id" to deletedDocumentId)
+            )
+        }
+        auditService.write(
+            context.workspaceId,
+            context.userId,
+            "document.bulk_trash",
+            mapOf(
+                "root_count" to rootIds.size,
+                "document_count" to deletedDocumentIds.size
+            )
+        )
+        return mapOf(
+            "deleted_root_count" to rootIds.size,
+            "deleted_document_count" to deletedDocumentIds.size
         )
     }
 
@@ -352,6 +489,7 @@ class DocumentService(
             throw NotFoundException()
         }
         documentFavoriteRepository.removeByDocuments(context.workspaceId, subtreeDocumentIds)
+        documentPersonalTopRepository.removeByDocuments(context.workspaceId, subtreeDocumentIds)
         documentRepository.softDeleteDocuments(context.workspaceId, subtreeDocumentIds)
         subtreeDocumentIds.forEach { deletedDocumentId ->
             outboxService.enqueue(
@@ -456,6 +594,105 @@ class DocumentService(
             cursor = documents[cursor]?.parentDocumentId
         }
         return parent.id
+    }
+
+    private fun normalizeDocumentIds(documentIds: List<String>): List<String> {
+        return documentIds
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+    }
+
+    private fun buildLibraryForest(documents: List<DocumentRow>): List<LibraryTreeNode> {
+        val sorted = documents.sortedWith { left, right -> compareDocumentsByRecency(left, right) }
+        val nodeById = sorted.associate { it.id to LibraryTreeNode(document = it) }
+        val roots = mutableListOf<LibraryTreeNode>()
+        sorted.forEach { document ->
+            val node = nodeById[document.id] ?: return@forEach
+            val parentId = document.parentDocumentId
+            val parentNode = if (!parentId.isNullOrBlank() && parentId != document.id) nodeById[parentId] else null
+            if (parentNode == null) {
+                roots += node
+            } else {
+                parentNode.children += node
+            }
+        }
+        fun sortRecursively(nodes: MutableList<LibraryTreeNode>) {
+            nodes.sortWith { left, right -> compareDocumentsByRecency(left.document, right.document) }
+            nodes.forEach { child ->
+                if (child.children.isNotEmpty()) {
+                    sortRecursively(child.children)
+                }
+            }
+        }
+        sortRecursively(roots)
+        return roots
+    }
+
+    private fun filterLibraryForest(roots: List<LibraryTreeNode>, query: String?): List<LibraryTreeNode> {
+        val normalized = query?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return roots
+        fun filterRecursively(node: LibraryTreeNode): LibraryTreeNode? {
+            val title = node.document.title.lowercase()
+            val body = (node.document.bodyText ?: "").lowercase()
+            val children = node.children
+                .mapNotNull(::filterRecursively)
+                .toMutableList()
+            val matched = title.contains(normalized) || body.contains(normalized)
+            return if (!matched && children.isEmpty()) {
+                null
+            } else {
+                LibraryTreeNode(document = node.document, children = children)
+            }
+        }
+        return roots.mapNotNull(::filterRecursively)
+    }
+
+    private fun resolvePersonalTopDocumentIds(
+        context: WorkspaceContext,
+        validRootIds: Set<String>
+    ): List<String> {
+        return documentPersonalTopRepository
+            .listByWorkspaceAndUser(context.workspaceId, context.userId)
+            .map { it.documentId }
+            .filter { validRootIds.contains(it) }
+            .distinct()
+            .take(personalTopLimit)
+    }
+
+    private fun orderRootsByPersonalTop(
+        roots: List<LibraryTreeNode>,
+        personalTopDocumentIds: List<String>
+    ): List<LibraryTreeNode> {
+        if (roots.isEmpty()) {
+            return emptyList()
+        }
+        val rootById = roots.associateBy { it.document.id }
+        val pinned = personalTopDocumentIds.mapNotNull { rootById[it] }
+        val pinnedSet = pinned.map { it.document.id }.toSet()
+        val unpinned = roots.filterNot { pinnedSet.contains(it.document.id) }
+        return pinned + unpinned
+    }
+
+    private fun compareDocumentsByRecency(left: DocumentRow, right: DocumentRow): Int {
+        val updatedDiff = right.updatedAt.compareTo(left.updatedAt)
+        if (updatedDiff != 0) {
+            return updatedDiff
+        }
+        return left.title.compareTo(right.title)
+    }
+
+    private fun toLibraryTreePayload(node: LibraryTreeNode): Map<String, Any?> {
+        return mapOf(
+            "id" to node.document.id,
+            "title" to node.document.title,
+            "parent_document_id" to node.document.parentDocumentId,
+            "status" to node.document.status,
+            "created_by" to node.document.createdBy,
+            "updated_by" to node.document.updatedBy,
+            "created_at" to node.document.createdAt.toString(),
+            "updated_at" to node.document.updatedAt.toString(),
+            "children" to node.children.map { toLibraryTreePayload(it) }
+        )
     }
 
     private fun stageStatus(pipeline: PipelineStatusRow, stage: Stage): StageStatus {

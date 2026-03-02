@@ -29,6 +29,32 @@ Base URL: `/api/v1`
 ---
 
 # 1) Auth
+## POST /auth/register/request-code
+```json
+{ "email": "new-user@example.com", "password": "password123" }
+```
+- 회원가입 인증코드를 이메일로 발송합니다.
+- 로컬 기본 SMTP는 Mailpit(`localhost:51025`)이며, 수신 메일은 `http://localhost:58025`에서 확인합니다.
+- SMTP 전송 실패 시 `503`을 반환합니다.
+- 응답:
+```json
+{ "expires_in_seconds": 600 }
+```
+
+## POST /auth/register/verify
+```json
+{ "email": "new-user@example.com", "verification_code": "123456" }
+```
+- 이메일 인증코드가 검증되면 새 사용자 계정을 생성합니다.
+- 서버가 기본 워크스페이스를 생성하고 OWNER 멤버십을 부여합니다.
+- 응답은 `login`과 동일한 토큰 페어입니다.
+
+## POST /auth/register
+```json
+{ "email": "new-user@example.com", "verification_code": "123456" }
+```
+- `register/verify`와 동일하게 동작하는 호환 엔드포인트입니다.
+
 ## POST /auth/login
 ```json
 { "email": "user@example.com", "password": "..." }
@@ -72,6 +98,23 @@ Response:
 { "role": "VIEWER" }
 ```
 ## DELETE /workspaces/{workspaceId}/members/{userId}
+
+## POST /workspaces/{workspaceId}/invites
+```json
+{ "email": "member@example.com", "role": "MEMBER" }
+```
+Response:
+```json
+{ "invite_token": "..." }
+```
+
+## POST /workspaces/invites/accept
+```json
+{ "token": "..." }
+```
+- 초대 토큰은 생성 시 지정한 `email` 계정에 바인딩됩니다.
+- 현재 로그인 계정의 이메일과 초대 이메일이 다르면 `403 TENANT_FORBIDDEN`을 반환합니다.
+- 초대 토큰은 만료(기본 7일) + 1회 수락 후 재사용 불가입니다.
 
 ---
 
@@ -123,6 +166,69 @@ Response (example):
 
 ## GET /documents
 Query: `status`, `q`, `page`, `size`, `sort`
+
+## GET /documents/sidebar
+- 좌측 패널 전용 응답 (루트 20개 제한 + 하위 트리 동봉)
+- Response:
+```json
+{
+  "items": [
+    {
+      "id": "doc_root_1",
+      "title": "루트 문서",
+      "parent_document_id": null,
+      "status": "READY",
+      "updated_at": "2026-02-21T12:00:00",
+      "children": [
+        { "id": "doc_child_1", "title": "하위 문서", "parent_document_id": "doc_root_1", "status": "READY", "updated_at": "2026-02-21T11:00:00", "children": [] }
+      ]
+    }
+  ],
+  "total_roots": 237,
+  "limit": 20,
+  "has_more": true,
+  "personal_top_document_ids": ["doc_root_1", "doc_root_2"]
+}
+```
+
+## GET /documents/library
+Query: `q`, `page`, `size` (`size` max `100`)
+
+Response:
+```json
+{
+  "items": [
+    {
+      "id": "doc_root_1",
+      "title": "루트 문서",
+      "parent_document_id": null,
+      "status": "READY",
+      "updated_at": "2026-02-21T12:00:00",
+      "children": []
+    }
+  ],
+  "page": 0,
+  "size": 100,
+  "total_roots": 237,
+  "total_pages": 3,
+  "has_more": true,
+  "personal_top_document_ids": ["doc_root_1", "doc_root_2"]
+}
+```
+
+## POST /documents/library/personal-top
+```json
+{ "document_ids": ["doc_root_7", "doc_root_3"] }
+```
+- 선택한 루트 문서를 개인 상단 순서로 이동합니다.
+- 최대 20개까지 유지합니다.
+
+## POST /documents/library/bulk-trash
+```json
+{ "document_ids": ["doc_root_7", "doc_root_3"] }
+```
+- 루트 문서만 허용합니다.
+- 각 루트의 하위 subtree도 함께 soft delete 합니다.
 
 ## GET /documents/trash
 Query: `q`, `page`, `size`

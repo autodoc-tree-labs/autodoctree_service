@@ -26,6 +26,9 @@ type UploadAttachmentResult = {
 
 type UploadAttachmentFn = (file: File, onProgress: (percent: number) => void) => Promise<UploadAttachmentResult>;
 type UploadKind = "image" | "file";
+type UploadInsertOptions = {
+  imageDefaultWidth?: string;
+};
 
 type EditorV2Props = {
   docId: string;
@@ -92,6 +95,8 @@ const IMAGE_WIDTH_OPTIONS = ["25%", "50%", "75%", "100%"];
 const RECENT_SLASH_KEY = "autodoc.editor.v2.recentSlash.v1";
 const MIN_IMAGE_WIDTH_PERCENT = 20;
 const MAX_IMAGE_WIDTH_PERCENT = 100;
+const DEFAULT_IMAGE_INSERT_WIDTH = "100%";
+const DRAG_DROP_IMAGE_INSERT_WIDTH = "50%";
 const detectUploadKind = (file: File): UploadKind => (file.type.toLowerCase().startsWith("image/") ? "image" : "file");
 const hasDraggedFiles = (dataTransfer: DataTransfer | null | undefined): boolean => {
   if (!dataTransfer) {
@@ -104,7 +109,11 @@ const hasDraggedFiles = (dataTransfer: DataTransfer | null | undefined): boolean
   return dataTransfer.files.length > 0;
 };
 
-const buildUploadInsertContent = (uploaded: UploadAttachmentResult, kind: UploadKind): Record<string, unknown> =>
+const buildUploadInsertContent = (
+  uploaded: UploadAttachmentResult,
+  kind: UploadKind,
+  options?: UploadInsertOptions
+): Record<string, unknown> =>
   kind === "image"
     ? {
         type: "image",
@@ -115,7 +124,7 @@ const buildUploadInsertContent = (uploaded: UploadAttachmentResult, kind: Upload
           filename: uploaded.filename,
           mimeType: uploaded.content_type,
           size: uploaded.size,
-          width: "100%"
+          width: options?.imageDefaultWidth ?? DEFAULT_IMAGE_INSERT_WIDTH
         }
       }
     : {
@@ -876,14 +885,22 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
         return;
       }
       targetEditor.chain().focus().deleteRange({ from: current.from, to: current.to }).run();
-      closeSlashMenu();
+      window.requestAnimationFrame(() => {
+        closeSlashMenu();
+      });
     },
     [closeSlashMenu]
   );
 
   const insertUploadedAttachment = useCallback(
-    (targetEditor: Editor, uploaded: UploadAttachmentResult, kind: UploadKind, insertPos?: number): number | undefined => {
-      const content = buildUploadInsertContent(uploaded, kind);
+    (
+      targetEditor: Editor,
+      uploaded: UploadAttachmentResult,
+      kind: UploadKind,
+      insertPos?: number,
+      options?: UploadInsertOptions
+    ): number | undefined => {
+      const content = buildUploadInsertContent(uploaded, kind, options);
       if (typeof insertPos === "number") {
         const safePos = Math.max(1, Math.min(insertPos, targetEditor.state.doc.content.size));
         const insertedAtPosition = targetEditor.chain().focus().insertContentAt(safePos, content).run();
@@ -898,7 +915,7 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
   );
 
   const uploadAndInsertEntries = useCallback(
-    async (entries: Array<{ file: File; kind: UploadKind }>, options?: { insertPos?: number }) => {
+    async (entries: Array<{ file: File; kind: UploadKind }>, options?: { insertPos?: number; imageDefaultWidth?: string }) => {
       if (!editor || entries.length === 0) {
         return;
       }
@@ -913,7 +930,9 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
             setUploadProgress(percent);
           });
           setUploadProgress(100);
-          const insertedSelectionPos = insertUploadedAttachment(editor, uploaded, entry.kind, nextInsertPos);
+          const insertedSelectionPos = insertUploadedAttachment(editor, uploaded, entry.kind, nextInsertPos, {
+            imageDefaultWidth: options?.imageDefaultWidth
+          });
           nextInsertPos = typeof insertedSelectionPos === "number" ? insertedSelectionPos : undefined;
         } catch (error) {
           const message = error instanceof Error ? error.message : "파일 업로드에 실패했습니다.";
@@ -1010,7 +1029,7 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
       const dropPos = typeof rawDropPos === "number" ? Math.max(1, Math.min(rawDropPos, editor.state.doc.content.size)) : fallbackPos;
       void uploadAndInsertEntries(
         droppedFiles.map((file) => ({ file, kind: detectUploadKind(file) })),
-        { insertPos: dropPos }
+        { insertPos: dropPos, imageDefaultWidth: DRAG_DROP_IMAGE_INSERT_WIDTH }
       );
     };
 
@@ -1555,10 +1574,8 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
       closeEmojiPicker();
     };
     window.addEventListener("resize", handleViewportChange);
-    window.addEventListener("scroll", handleViewportChange, true);
     return () => {
       window.removeEventListener("resize", handleViewportChange);
-      window.removeEventListener("scroll", handleViewportChange, true);
     };
   }, [closeEmojiPicker, emojiPicker.open]);
 
@@ -1590,8 +1607,9 @@ export function EditorV2({ docId, value, attachments, disabled = false, onChange
         ref={(node) => {
           slashItemRefs.current[index] = node;
         }}
-        onClick={(event) => {
+        onPointerDown={(event) => {
           event.preventDefault();
+          event.stopPropagation();
           applySlashItem(item);
         }}
         type="button"

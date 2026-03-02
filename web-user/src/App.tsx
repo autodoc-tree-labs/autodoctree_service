@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiError, type Workspace } from "@autodoctree/api-client";
-import { CircleHelp, FileText, GitBranch, Plus, Search, Trash2, type LucideIcon } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleHelp, FileText, GitBranch, Library, Plus, Search, Trash2, type LucideIcon } from "lucide-react";
 import { createApiClient } from "./api";
 import { EditorV2 } from "./editor/EditorV2";
 import { blockDocToMarkdown, normalizeBlockDoc, type BlockDoc } from "./editor/blockContent";
-import { useSession } from "./session";
+import { type SessionAccount, useSession } from "./session";
 import type { DocumentItem } from "./types";
 
 type AuthResponse = {
   access_token: string;
   refresh_token: string;
 };
+type RegisterCodeResponse = {
+  expires_in_seconds: number;
+};
+type SignupStep = "request" | "verify";
 
 type WorkspaceListResponse = { items: Workspace[] };
 type WorkspaceMember = { user_id: string; email: string; role: string };
@@ -19,6 +23,33 @@ type WorkspaceMemberListResponse = { items: WorkspaceMember[] };
 type WorkspaceInviteResponse = { invite_token: string };
 type DocumentListResponse = { items: DocumentItem[]; page: number; size: number; total: number };
 type FavoriteDocumentListResponse = { items: Array<{ document_id: string; created_at?: string }>; total: number };
+type LibraryDocumentNode = {
+  id: string;
+  title: string;
+  parent_document_id?: string | null;
+  status?: string;
+  created_by?: string;
+  updated_by?: string;
+  created_at?: string;
+  updated_at?: string;
+  children: LibraryDocumentNode[];
+};
+type SidebarDocumentTreeResponse = {
+  items: LibraryDocumentNode[];
+  total_roots: number;
+  limit: number;
+  has_more: boolean;
+  personal_top_document_ids: string[];
+};
+type LibraryDocumentListResponse = {
+  items: LibraryDocumentNode[];
+  page: number;
+  size: number;
+  total_roots: number;
+  total_pages: number;
+  has_more: boolean;
+  personal_top_document_ids: string[];
+};
 type SearchResponse = { items: Array<{ document_id: string; title: string; score: number; breadcrumb?: string[] }>; debug?: Record<string, unknown> };
 type PaletteHistoryResponse = { items: Array<{ id: string; event_type: string; query_text?: string; document_id?: string; command_key?: string; created_at: string }> };
 type TreeNodeDocumentSummary = {
@@ -98,7 +129,7 @@ type SidebarPageNode = {
   children: SidebarPageNode[];
 };
 
-type SidebarViewKey = "documents" | "tree" | "questions" | "trash" | "workspace";
+type SidebarViewKey = "documents" | "library" | "tree" | "questions" | "trash" | "workspace";
 type AppApiClient = ReturnType<typeof createApiClient>;
 type SidebarDocumentsSyncEventDetail = { workspaceId: string | null };
 
@@ -201,6 +232,7 @@ const SIDEBAR_WIDTH_MIN = 220;
 const SIDEBAR_WIDTH_MAX = 520;
 const SIDEBAR_WIDTH_STEP = 12;
 const COMMAND_PALETTE_MAX_RESULTS = 8;
+const AUTH_PASSWORD_MIN_LENGTH = 8;
 const FEATURE_BLOCK_EDITOR = String(import.meta.env.VITE_FEATURE_BLOCK_EDITOR ?? "true").toLowerCase() === "true";
 
 const REASON_TEXT: Record<string, string> = {
@@ -217,6 +249,14 @@ const ERROR_MESSAGE_TEXT: Array<[string, string]> = [
   ["NetworkError when attempting to fetch resource", "서버 연결에 실패했습니다. 네트워크 상태를 확인하세요."],
   ["Load failed", "서버 연결에 실패했습니다."],
   ["Network request failed", "네트워크 요청에 실패했습니다."],
+  ["Password must be at least 8 characters", "비밀번호는 8자 이상이어야 합니다."],
+  ["size must be between 8 and 128", "비밀번호는 8자 이상 128자 이하여야 합니다."],
+  ["Verification code is required", "인증번호를 입력하세요."],
+  ["Verification code is invalid or expired", "인증번호가 유효하지 않거나 만료되었습니다."],
+  ["Verification attempts exceeded", "인증번호 입력 횟수를 초과했습니다. 인증번호를 다시 발송하세요."],
+  ["Email verification delivery failed", "인증번호 메일 발송에 실패했습니다. 잠시 후 다시 시도하세요."],
+  ["Invite token is bound to another email", "이 초대 토큰은 다른 이메일 계정에 발급되었습니다."],
+  ["Email already exists", "이미 가입된 이메일입니다."],
   ["Unauthorized", "인증이 필요합니다."],
   ["Forbidden", "권한이 없습니다."],
   ["Not Found", "요청한 리소스를 찾을 수 없습니다."]
@@ -342,6 +382,9 @@ const workspaceDocumentDetailPath = (workspaceId: string, documentId: string): s
   `/w/${encodeURIComponent(workspaceId)}/doc/${encodeURIComponent(documentId)}/details`;
 
 const detectSidebarView = (pathname: string): SidebarViewKey => {
+  if (pathname.includes("/view/library") || pathname.endsWith("/library")) {
+    return "library";
+  }
   if (pathname.includes("/view/tree") || pathname.endsWith("/tree")) {
     return "tree";
   }
@@ -373,38 +416,34 @@ const sortDocumentsByRecency = (left: DocumentItem, right: DocumentItem): number
   return left.title.localeCompare(right.title, "ko");
 };
 
-const buildSidebarPageTree = (documents: DocumentItem[]): SidebarPageNode[] => {
-  const ordered = [...documents].sort(sortDocumentsByRecency);
-  const nodeById = new Map<string, SidebarPageNode>();
-  ordered.forEach((document) => {
-    nodeById.set(document.id, { doc: document, children: [] });
-  });
+const DEFAULT_PIPELINE_STATUS = { ingest: "PENDING", embed: "PENDING", index: "PENDING", tree: "PENDING" } as const;
 
-  const roots: SidebarPageNode[] = [];
-  ordered.forEach((document) => {
-    const node = nodeById.get(document.id);
-    if (!node) {
-      return;
-    }
-    const parentId = document.parent_document_id ?? null;
-    const parent = parentId ? nodeById.get(parentId) : undefined;
-    if (parent && parentId !== document.id) {
-      parent.children.push(node);
-    } else {
-      roots.push(node);
-    }
-  });
+const toSidebarDocumentItem = (node: LibraryDocumentNode): DocumentItem => ({
+  id: node.id,
+  title: node.title,
+  status: node.status ?? "READY",
+  parent_document_id: node.parent_document_id ?? null,
+  pipeline_status: { ...DEFAULT_PIPELINE_STATUS },
+  attachments: [],
+  updated_at: node.updated_at ?? new Date(0).toISOString(),
+  created_at: node.created_at,
+  created_by: node.created_by,
+  updated_by: node.updated_by
+});
 
-  const sortNodes = (nodes: SidebarPageNode[]) => {
-    nodes.sort((left, right) => sortDocumentsByRecency(left.doc, right.doc));
-    nodes.forEach((node) => {
-      if (node.children.length > 0) {
-        sortNodes(node.children);
-      }
-    });
+const mapLibraryNodeToSidebarPageNode = (node: LibraryDocumentNode): SidebarPageNode => ({
+  doc: toSidebarDocumentItem(node),
+  children: (node.children ?? []).map(mapLibraryNodeToSidebarPageNode)
+});
+
+const flattenSidebarTreeDocuments = (nodes: SidebarPageNode[]): DocumentItem[] => {
+  const flattened: DocumentItem[] = [];
+  const walk = (node: SidebarPageNode) => {
+    flattened.push(node.doc);
+    node.children.forEach(walk);
   };
-  sortNodes(roots);
-  return roots;
+  nodes.forEach(walk);
+  return flattened;
 };
 
 const parseWorkspaceDocumentIdFromPathname = (pathname: string): string | null => {
@@ -928,7 +967,7 @@ function NoticePanel({ notice }: { notice: UiNotice | null }) {
   );
 }
 
-type SidebarMenuIconName = "plus" | "search" | "document" | "tree" | "question" | "trash";
+type SidebarMenuIconName = "plus" | "search" | "document" | "tree" | "question" | "trash" | "library";
 
 const SIDEBAR_MENU_ICONS: Record<SidebarMenuIconName, LucideIcon> = {
   plus: Plus,
@@ -936,7 +975,8 @@ const SIDEBAR_MENU_ICONS: Record<SidebarMenuIconName, LucideIcon> = {
   document: FileText,
   tree: GitBranch,
   question: CircleHelp,
-  trash: Trash2
+  trash: Trash2,
+  library: Library
 };
 
 function SidebarMenuIcon({ name, className }: { name: SidebarMenuIconName; className?: string }) {
@@ -983,13 +1023,17 @@ const renameNodeInTree = (tree: TreeActiveResponse, nodeId: string, label: strin
 };
 
 function Layout({ children, api }: { children: React.ReactNode; api: AppApiClient }) {
-  const { state, clearTokens, setWorkspace } = useSession();
+  const { state, clearTokens, clearAllAccounts, setWorkspace, switchAccount, removeAccount, upsertAccount } = useSession();
   const navigate = useNavigate();
   const location = useLocation();
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceError, setWorkspaceError] = useState<UiError | null>(null);
   const [sidebarDocuments, setSidebarDocuments] = useState<DocumentItem[]>([]);
+  const [sidebarPageTreeRoots, setSidebarPageTreeRoots] = useState<SidebarPageNode[]>([]);
+  const [sidebarTotalRoots, setSidebarTotalRoots] = useState(0);
+  const [sidebarHasMoreRoots, setSidebarHasMoreRoots] = useState(false);
+  const [expandedSidebarPageIds, setExpandedSidebarPageIds] = useState<string[]>([]);
   const [sidebarFavoriteDocumentIds, setSidebarFavoriteDocumentIds] = useState<string[]>([]);
   const [documentError, setDocumentError] = useState<UiError | null>(null);
   const [sidebarFavoriteError, setSidebarFavoriteError] = useState<UiError | null>(null);
@@ -1019,6 +1063,22 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   const [inviteToken, setInviteToken] = useState<string | null>(null);
   const [inviteError, setInviteError] = useState<UiError | null>(null);
   const [inviteNotice, setInviteNotice] = useState<UiNotice | null>(null);
+  const [accountWorkspacesById, setAccountWorkspacesById] = useState<Record<string, Workspace[]>>({});
+  const [accountWorkspaceErrorById, setAccountWorkspaceErrorById] = useState<Record<string, UiError | null>>({});
+  const [accountWorkspaceLoadingIds, setAccountWorkspaceLoadingIds] = useState<string[]>([]);
+  const [accountMenuId, setAccountMenuId] = useState<string | null>(null);
+  const [accountActionTargetId, setAccountActionTargetId] = useState<string | null>(null);
+  const [accountActionWorkspaceName, setAccountActionWorkspaceName] = useState("새 워크스페이스");
+  const [accountActionInviteToken, setAccountActionInviteToken] = useState("");
+  const [accountActionPending, setAccountActionPending] = useState(false);
+  const [accountActionError, setAccountActionError] = useState<UiError | null>(null);
+  const [accountActionNotice, setAccountActionNotice] = useState<UiNotice | null>(null);
+  const [isAddAccountOpen, setIsAddAccountOpen] = useState(false);
+  const [addAccountEmail, setAddAccountEmail] = useState("");
+  const [addAccountPassword, setAddAccountPassword] = useState("");
+  const [addAccountPending, setAddAccountPending] = useState(false);
+  const [addAccountError, setAddAccountError] = useState<UiError | null>(null);
+  const [addAccountNotice, setAddAccountNotice] = useState<UiNotice | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_WIDTH_DEFAULT);
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [isDesktopSidebarCollapsed, setIsDesktopSidebarCollapsed] = useState(false);
@@ -1032,8 +1092,83 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   const routeWorkspaceId = routeWorkspaceMatch?.[1] ? decodeURIComponent(routeWorkspaceMatch[1]) : null;
   const activeWorkspaceId = routeWorkspaceId ?? state.workspaceId;
   const activeWorkspace = useMemo(() => workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null, [activeWorkspaceId, workspaces]);
+  const sessionAccounts = state.accounts;
+  const activeAccount = useMemo(
+    () => sessionAccounts.find((account) => account.id === state.activeAccountId) ?? null,
+    [sessionAccounts, state.activeAccountId]
+  );
+  const accountById = useMemo(() => new Map(sessionAccounts.map((account) => [account.id, account])), [sessionAccounts]);
+  const authApi = useMemo(
+    () =>
+      createApiClient({
+        getToken: () => null,
+        getWorkspaceId: () => null,
+        onUnauthorized: async () => false
+      }),
+    []
+  );
   const canInviteMembers = activeWorkspace?.role === "OWNER";
   const activeView = detectSidebarView(location.pathname);
+
+  const fetchWorkspacesByToken = useCallback(
+    async (accessToken: string): Promise<Workspace[]> => {
+      const tokenClient = createApiClient({
+        getToken: () => accessToken,
+        getWorkspaceId: () => null,
+        onUnauthorized: async () => false
+      });
+      const response = await tokenClient.request<WorkspaceListResponse>("/workspaces");
+      return response.items;
+    },
+    []
+  );
+
+  const refreshAccountWorkspaceList = useCallback(
+    async (accountId: string, tokenOverride?: string): Promise<Workspace[]> => {
+      const account = accountById.get(accountId);
+      const accessToken = tokenOverride ?? account?.accessToken ?? null;
+      if (!accessToken) {
+        return [];
+      }
+      setAccountWorkspaceLoadingIds((previous) => (previous.includes(accountId) ? previous : [...previous, accountId]));
+      try {
+        const items = await fetchWorkspacesByToken(accessToken);
+        setAccountWorkspacesById((previous) => ({ ...previous, [accountId]: items }));
+        setAccountWorkspaceErrorById((previous) => ({ ...previous, [accountId]: null }));
+        if (accountId === state.activeAccountId) {
+          setWorkspaces(items);
+        }
+        return items;
+      } catch (error) {
+        setAccountWorkspaceErrorById((previous) => ({
+          ...previous,
+          [accountId]: toUiError(error, "워크스페이스 목록을 불러오지 못했습니다")
+        }));
+        return [];
+      } finally {
+        setAccountWorkspaceLoadingIds((previous) => previous.filter((value) => value !== accountId));
+      }
+    },
+    [accountById, fetchWorkspacesByToken, state.activeAccountId]
+  );
+
+  const activateAccountWorkspace = useCallback(
+    (accountId: string, workspace: Workspace) => {
+      switchAccount(accountId);
+      setWorkspace(workspace.id, workspace.name);
+      saveLastWorkspaceId(workspace.id);
+      navigate(workspaceRootPath(workspace.id));
+      setIsPaletteOpen(false);
+      setIsWorkspaceLauncherOpen(false);
+      setIsInviteFormOpen(false);
+      setAccountMenuId(null);
+      setAccountActionTargetId(null);
+      setIsAddAccountOpen(false);
+      setSidebarPageMenuDocId(null);
+      setIsSidebarOpen(false);
+    },
+    [navigate, setWorkspace, switchAccount]
+  );
   const applySidebarWidth = useCallback((nextWidth: number) => {
     setSidebarWidth(clampSidebarWidth(nextWidth));
   }, []);
@@ -1087,6 +1222,21 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     setSidebarDraggingDocumentId(null);
     setSidebarDropTarget(null);
     setSidebarMovePendingDocumentId(null);
+    setAccountMenuId(null);
+    setAccountActionTargetId(null);
+    setAccountActionWorkspaceName("새 워크스페이스");
+    setAccountActionInviteToken("");
+    setAccountActionPending(false);
+    setAccountActionError(null);
+    setAccountActionNotice(null);
+    setIsAddAccountOpen(false);
+    setAddAccountPending(false);
+    setAddAccountError(null);
+    setAddAccountNotice(null);
+    setSidebarPageTreeRoots([]);
+    setSidebarTotalRoots(0);
+    setSidebarHasMoreRoots(false);
+    setExpandedSidebarPageIds([]);
     setSidebarFavoriteDocumentIds([]);
     setSidebarFavoriteError(null);
   }, [activeWorkspaceId]);
@@ -1102,12 +1252,24 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       }
       setIsWorkspaceLauncherOpen(false);
       setIsInviteFormOpen(false);
+      setAccountMenuId(null);
+      setAccountActionTargetId(null);
+      setIsAddAccountOpen(false);
     };
     window.addEventListener("mousedown", closeOnOutsideClick);
     return () => {
       window.removeEventListener("mousedown", closeOnOutsideClick);
     };
   }, [isWorkspaceLauncherOpen]);
+
+  useEffect(() => {
+    if (!isWorkspaceLauncherOpen) {
+      return;
+    }
+    sessionAccounts.forEach((account) => {
+      void refreshAccountWorkspaceList(account.id);
+    });
+  }, [isWorkspaceLauncherOpen, refreshAccountWorkspaceList, sessionAccounts]);
 
   useEffect(() => {
     if (!state.accessToken) {
@@ -1123,10 +1285,20 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
           return;
         }
         setWorkspaces(response.items);
+        if (state.activeAccountId) {
+          setAccountWorkspacesById((previous) => ({ ...previous, [state.activeAccountId!]: response.items }));
+          setAccountWorkspaceErrorById((previous) => ({ ...previous, [state.activeAccountId!]: null }));
+        }
         setWorkspaceError(null);
       } catch (error) {
         if (!active) {
           return;
+        }
+        if (state.activeAccountId) {
+          setAccountWorkspaceErrorById((previous) => ({
+            ...previous,
+            [state.activeAccountId!]: toUiError(error, "워크스페이스 목록을 불러오지 못했습니다")
+          }));
         }
         setWorkspaceError(toUiError(error, "워크스페이스 목록을 불러오지 못했습니다"));
       }
@@ -1134,7 +1306,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     return () => {
       active = false;
     };
-  }, [api, state.accessToken]);
+  }, [api, state.accessToken, state.activeAccountId]);
 
   useEffect(() => {
     if (!routeWorkspaceId) {
@@ -1166,6 +1338,10 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   const loadSidebarDocuments = useCallback(async () => {
     if (!activeWorkspaceId) {
       setSidebarDocuments([]);
+      setSidebarPageTreeRoots([]);
+      setSidebarTotalRoots(0);
+      setSidebarHasMoreRoots(false);
+      setExpandedSidebarPageIds([]);
       setSidebarFavoriteDocumentIds([]);
       setSidebarNodeTreeResponse(null);
       setSidebarNodeError(null);
@@ -1174,6 +1350,25 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     try {
       const response = await api.request<DocumentListResponse>("/documents?page=0&size=200", {}, true);
       setSidebarDocuments(response.items);
+      setDocumentError(null);
+    } catch (error) {
+      setDocumentError(toUiError(error, "페이지 목록을 불러오지 못했습니다"));
+    }
+  }, [activeWorkspaceId, api]);
+
+  const loadSidebarPageRoots = useCallback(async () => {
+    if (!activeWorkspaceId) {
+      setSidebarPageTreeRoots([]);
+      setSidebarTotalRoots(0);
+      setSidebarHasMoreRoots(false);
+      setExpandedSidebarPageIds([]);
+      return;
+    }
+    try {
+      const response = await api.request<SidebarDocumentTreeResponse>("/documents/sidebar", {}, true);
+      setSidebarPageTreeRoots((response.items ?? []).map(mapLibraryNodeToSidebarPageNode));
+      setSidebarTotalRoots(typeof response.total_roots === "number" ? response.total_roots : response.items.length);
+      setSidebarHasMoreRoots(Boolean(response.has_more));
       setDocumentError(null);
     } catch (error) {
       setDocumentError(toUiError(error, "페이지 목록을 불러오지 못했습니다"));
@@ -1203,14 +1398,19 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
   useEffect(() => {
     if (!activeWorkspaceId) {
       setSidebarDocuments([]);
+      setSidebarPageTreeRoots([]);
+      setSidebarTotalRoots(0);
+      setSidebarHasMoreRoots(false);
+      setExpandedSidebarPageIds([]);
       setSidebarFavoriteDocumentIds([]);
       setSidebarNodeTreeResponse(null);
       setSidebarNodeError(null);
       return;
     }
     void loadSidebarDocuments();
+    void loadSidebarPageRoots();
     void loadSidebarFavorites();
-  }, [activeWorkspaceId, loadSidebarDocuments, loadSidebarFavorites]);
+  }, [activeWorkspaceId, loadSidebarDocuments, loadSidebarFavorites, loadSidebarPageRoots]);
 
   const loadSidebarNodeTree = useCallback(async () => {
     if (!activeWorkspaceId) {
@@ -1248,6 +1448,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         return;
       }
       void loadSidebarDocuments();
+      void loadSidebarPageRoots();
       void loadSidebarFavorites();
       if (pagesBrowseMode === "NODE") {
         void loadSidebarNodeTree();
@@ -1257,7 +1458,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     return () => {
       window.removeEventListener(SIDEBAR_DOCUMENTS_SYNC_EVENT, syncSidebarDocuments);
     };
-  }, [activeWorkspaceId, loadSidebarDocuments, loadSidebarFavorites, loadSidebarNodeTree, pagesBrowseMode]);
+  }, [activeWorkspaceId, loadSidebarDocuments, loadSidebarFavorites, loadSidebarNodeTree, loadSidebarPageRoots, pagesBrowseMode]);
 
   useEffect(() => {
     const openPalette = (event: KeyboardEvent) => {
@@ -1329,10 +1530,17 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     }
   }, [sidebarPageMenuDocId, sidebarRenamingDocumentId]);
 
-  const pageTreeRoots = useMemo(() => buildSidebarPageTree(sidebarDocuments), [sidebarDocuments]);
+  const pageTreeRoots = useMemo(() => sidebarPageTreeRoots, [sidebarPageTreeRoots]);
   const filteredPageTreeRoots = useMemo(() => filterSidebarPageTree(pageTreeRoots, sidebarQuery), [pageTreeRoots, sidebarQuery]);
+  const visibleSidebarDocuments = useMemo(() => flattenSidebarTreeDocuments(pageTreeRoots), [pageTreeRoots]);
   const sidebarFavoriteSet = useMemo(() => new Set(sidebarFavoriteDocumentIds), [sidebarFavoriteDocumentIds]);
-  const sidebarDocumentById = useMemo(() => new Map(sidebarDocuments.map((document) => [document.id, document])), [sidebarDocuments]);
+  const sidebarDocumentById = useMemo(() => {
+    const byId = new Map(sidebarDocuments.map((document) => [document.id, document]));
+    visibleSidebarDocuments.forEach((document) => {
+      byId.set(document.id, document);
+    });
+    return byId;
+  }, [sidebarDocuments, visibleSidebarDocuments]);
   const favoriteSidebarDocuments = useMemo(() => {
     const matched = sidebarFavoriteDocumentIds
       .map((documentId) => sidebarDocumentById.get(documentId))
@@ -1435,6 +1643,15 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     return sidebarNodeTrees.map((node) => filterNode(node)).filter((node): node is EditorNodeTree => node !== null);
   }, [sidebarNodeTrees, sidebarQuery]);
 
+  const toggleSidebarPageExpand = useCallback((documentId: string) => {
+    setExpandedSidebarPageIds((previous) => {
+      if (previous.includes(documentId)) {
+        return previous.filter((id) => id !== documentId);
+      }
+      return [...previous, documentId];
+    });
+  }, []);
+
   const createRootPage = useCallback(async () => {
     if (!activeWorkspaceId || creatingRootPage) {
       return;
@@ -1452,8 +1669,11 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
             parent_document_id: null
           })
         },
-        true
+          true
       );
+      await loadSidebarDocuments();
+      await loadSidebarPageRoots();
+      await loadSidebarFavorites();
       navigate(workspaceDocumentPath(activeWorkspaceId, created.id));
     } catch {
       // Keep action non-blocking inside quick action.
@@ -1461,7 +1681,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       setCreatingRootPage(false);
       setIsPaletteOpen(false);
     }
-  }, [activeWorkspaceId, api, creatingRootPage, navigate]);
+  }, [activeWorkspaceId, api, creatingRootPage, loadSidebarDocuments, loadSidebarFavorites, loadSidebarPageRoots, navigate]);
 
   const createSidebarChildPage = useCallback(
     async (parentDocument: DocumentItem) => {
@@ -1488,6 +1708,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         );
         setSidebarPageMenuDocId(null);
         await loadSidebarDocuments();
+        await loadSidebarPageRoots();
         await loadSidebarFavorites();
         navigate(workspaceDocumentPath(activeWorkspaceId, created.id));
         setSidebarActionNotice({ tone: "success", message: "하위 페이지를 생성했습니다." });
@@ -1497,7 +1718,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         setSidebarCreatingParentId(null);
       }
     },
-    [activeWorkspaceId, api, loadSidebarDocuments, loadSidebarFavorites, navigate, sidebarCreatingParentId, sidebarDeletingDocumentId]
+    [activeWorkspaceId, api, loadSidebarDocuments, loadSidebarFavorites, loadSidebarPageRoots, navigate, sidebarCreatingParentId, sidebarDeletingDocumentId]
   );
 
   const copySidebarDocumentLink = useCallback(
@@ -1571,6 +1792,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         setSidebarRenamingDocumentId(null);
         setSidebarRenameDraft("");
         await loadSidebarDocuments();
+        await loadSidebarPageRoots();
         setSidebarActionNotice({ tone: "success", message: "페이지 이름을 변경했습니다." });
       } catch (error) {
         setSidebarActionError(toUiError(error, "페이지 이름 변경에 실패했습니다"));
@@ -1578,7 +1800,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         setSidebarRenamePendingDocumentId(null);
       }
     },
-    [api, loadSidebarDocuments, sidebarRenameDraft, sidebarRenamePendingDocumentId]
+    [api, loadSidebarDocuments, loadSidebarPageRoots, sidebarRenameDraft, sidebarRenamePendingDocumentId]
   );
 
   const deleteSidebarDocument = useCallback(
@@ -1594,7 +1816,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       setSidebarDeletingDocumentId(document.id);
       setSidebarActionError(null);
       setSidebarActionNotice(null);
-      const subtreeDocumentIds = collectDocumentSubtreeIds(sidebarDocuments, document.id);
+      const subtreeDocumentIds = collectDocumentSubtreeIds(visibleSidebarDocuments, document.id);
       const deletedDocumentIds = subtreeDocumentIds.size > 0 ? subtreeDocumentIds : new Set([document.id]);
 
       try {
@@ -1607,6 +1829,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         );
         setSidebarPageMenuDocId(null);
         await loadSidebarDocuments();
+        await loadSidebarPageRoots();
         await loadSidebarFavorites();
         if (pagesBrowseMode === "NODE") {
           await loadSidebarNodeTree();
@@ -1627,14 +1850,15 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       api,
       loadSidebarDocuments,
       loadSidebarFavorites,
+      loadSidebarPageRoots,
       loadSidebarNodeTree,
       location.pathname,
       navigate,
       pagesBrowseMode,
-      sidebarDocuments,
       sidebarCreatingParentId,
       sidebarDeletingDocumentId,
-      sidebarFavoritePendingId
+      sidebarFavoritePendingId,
+      visibleSidebarDocuments
     ]
   );
 
@@ -1710,6 +1934,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
           true
         );
         await loadSidebarDocuments();
+        await loadSidebarPageRoots();
         const moveText =
           mode === "CHILD"
             ? "하위로 이동했습니다."
@@ -1729,6 +1954,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       activeWorkspaceId,
       api,
       loadSidebarDocuments,
+      loadSidebarPageRoots,
       sidebarCreatingParentId,
       sidebarDeletingDocumentId,
       sidebarDocumentById,
@@ -1754,16 +1980,22 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       if (!nextWorkspace) {
         return;
       }
+      if (state.activeAccountId) {
+        switchAccount(state.activeAccountId);
+      }
       setWorkspace(nextWorkspace.id, nextWorkspace.name);
       saveLastWorkspaceId(nextWorkspace.id);
       navigate(workspaceRootPath(nextWorkspace.id));
       setIsPaletteOpen(false);
       setIsWorkspaceLauncherOpen(false);
       setIsInviteFormOpen(false);
+      setAccountMenuId(null);
+      setAccountActionTargetId(null);
+      setIsAddAccountOpen(false);
       setSidebarPageMenuDocId(null);
       setIsSidebarOpen(false);
     },
-    [navigate, setWorkspace, workspaces]
+    [navigate, setWorkspace, state.activeAccountId, switchAccount, workspaces]
   );
 
   const goToWorkspaceSettings = useCallback(() => {
@@ -1771,17 +2003,236 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
     setIsPaletteOpen(false);
     setIsWorkspaceLauncherOpen(false);
     setIsInviteFormOpen(false);
+    setAccountMenuId(null);
+    setAccountActionTargetId(null);
+    setIsAddAccountOpen(false);
     setIsSidebarOpen(false);
   }, [navigate]);
 
-  const logoutFromWorkspace = useCallback(() => {
-    clearTokens();
-    setIsPaletteOpen(false);
-    setIsWorkspaceLauncherOpen(false);
-    setIsInviteFormOpen(false);
-    setIsSidebarOpen(false);
-    navigate("/login");
-  }, [clearTokens, navigate]);
+  const logoutAllAccountsFromLauncher = useCallback(() => {
+    const logoutTasks = sessionAccounts.map((account) =>
+      authApi
+        .request<void>("/auth/logout", {
+          method: "POST",
+          body: JSON.stringify({ refresh_token: account.refreshToken })
+        })
+        .catch(() => undefined)
+    );
+    void Promise.all(logoutTasks).finally(() => {
+      clearAllAccounts();
+      setIsPaletteOpen(false);
+      setIsWorkspaceLauncherOpen(false);
+      setIsInviteFormOpen(false);
+      setAccountMenuId(null);
+      setAccountActionTargetId(null);
+      setIsAddAccountOpen(false);
+      setIsSidebarOpen(false);
+      navigate("/login");
+    });
+  }, [authApi, clearAllAccounts, navigate, sessionAccounts]);
+
+  const logoutSingleAccount = useCallback(
+    (accountId: string) => {
+      const account = accountById.get(accountId);
+      if (!account) {
+        return;
+      }
+      const remainingAccounts = sessionAccounts.filter((item) => item.id !== accountId);
+      void authApi
+        .request<void>("/auth/logout", {
+          method: "POST",
+          body: JSON.stringify({ refresh_token: account.refreshToken })
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          removeAccount(accountId);
+          setAccountWorkspacesById((previous) => {
+            const next = { ...previous };
+            delete next[accountId];
+            return next;
+          });
+          setAccountWorkspaceErrorById((previous) => {
+            const next = { ...previous };
+            delete next[accountId];
+            return next;
+          });
+          setAccountMenuId(null);
+          setAccountActionTargetId((previous) => (previous === accountId ? null : previous));
+          setAccountActionError(null);
+          setAccountActionNotice(null);
+          if (remainingAccounts.length === 0) {
+            navigate("/login");
+            return;
+          }
+          if (state.activeAccountId === accountId) {
+            const nextAccount = remainingAccounts[0];
+            switchAccount(nextAccount.id);
+            if (nextAccount.workspaceId) {
+              navigate(workspaceRootPath(nextAccount.workspaceId));
+            } else {
+              navigate("/workspace");
+            }
+          }
+        });
+    },
+    [accountById, authApi, navigate, removeAccount, sessionAccounts, state.activeAccountId, switchAccount]
+  );
+
+  const createWorkspaceForAccount = useCallback(
+    async (accountId: string) => {
+      const account = accountById.get(accountId);
+      if (!account) {
+        return;
+      }
+      const normalizedName = accountActionWorkspaceName.trim();
+      if (!normalizedName) {
+        setAccountActionError({ message: "워크스페이스 이름을 입력하세요.", status: null });
+        return;
+      }
+      setAccountActionPending(true);
+      setAccountActionError(null);
+      setAccountActionNotice(null);
+      try {
+        const accountApi = createApiClient({
+          getToken: () => account.accessToken,
+          getWorkspaceId: () => null,
+          onUnauthorized: async () => false
+        });
+        const created = await accountApi.request<{ id: string; name: string }>("/workspaces", {
+          method: "POST",
+          body: JSON.stringify({ name: normalizedName })
+        });
+        const items = await refreshAccountWorkspaceList(accountId, account.accessToken);
+        upsertAccount(
+          {
+            email: account.email,
+            accessToken: account.accessToken,
+            refreshToken: account.refreshToken,
+            workspaceId: created.id,
+            workspaceName: created.name
+          },
+          { accountId, activate: true }
+        );
+        const targetWorkspace = items.find((workspace) => workspace.id === created.id) ?? { id: created.id, name: created.name, role: "OWNER" as const };
+        activateAccountWorkspace(accountId, targetWorkspace);
+        setAccountActionNotice({ tone: "success", message: "워크스페이스를 생성했습니다." });
+      } catch (error) {
+        setAccountActionError(toUiError(error, "워크스페이스 생성에 실패했습니다"));
+      } finally {
+        setAccountActionPending(false);
+      }
+    },
+    [accountActionWorkspaceName, accountById, activateAccountWorkspace, refreshAccountWorkspaceList, upsertAccount]
+  );
+
+  const joinWorkspaceForAccount = useCallback(
+    async (accountId: string) => {
+      const account = accountById.get(accountId);
+      if (!account) {
+        return;
+      }
+      const inviteToken = accountActionInviteToken.trim();
+      if (!inviteToken) {
+        setAccountActionError({ message: "초대 토큰을 입력하세요.", status: null });
+        return;
+      }
+      setAccountActionPending(true);
+      setAccountActionError(null);
+      setAccountActionNotice(null);
+      try {
+        const accountApi = createApiClient({
+          getToken: () => account.accessToken,
+          getWorkspaceId: () => null,
+          onUnauthorized: async () => false
+        });
+        const accepted = await accountApi.request<{ workspace_id: string }>("/workspaces/invites/accept", {
+          method: "POST",
+          body: JSON.stringify({ token: inviteToken })
+        });
+        const items = await refreshAccountWorkspaceList(accountId, account.accessToken);
+        const matchedWorkspace = items.find((workspace) => workspace.id === accepted.workspace_id) ?? null;
+        if (!matchedWorkspace) {
+          setAccountActionNotice({ tone: "success", message: "워크스페이스 참여를 완료했습니다." });
+          return;
+        }
+        upsertAccount(
+          {
+            email: account.email,
+            accessToken: account.accessToken,
+            refreshToken: account.refreshToken,
+            workspaceId: matchedWorkspace.id,
+            workspaceName: matchedWorkspace.name
+          },
+          { accountId, activate: true }
+        );
+        activateAccountWorkspace(accountId, matchedWorkspace);
+        setAccountActionNotice({ tone: "success", message: "워크스페이스에 참여했습니다." });
+      } catch (error) {
+        setAccountActionError(toUiError(error, "워크스페이스 참여에 실패했습니다"));
+      } finally {
+        setAccountActionPending(false);
+      }
+    },
+    [accountActionInviteToken, accountById, activateAccountWorkspace, refreshAccountWorkspaceList, upsertAccount]
+  );
+
+  const addAccountFromLauncher = useCallback(async () => {
+    const normalizedEmail = addAccountEmail.trim().toLowerCase();
+    if (!normalizedEmail) {
+      setAddAccountError({ message: "이메일을 입력하세요.", status: null });
+      return;
+    }
+    if (!addAccountPassword) {
+      setAddAccountError({ message: "비밀번호를 입력하세요.", status: null });
+      return;
+    }
+
+    setAddAccountPending(true);
+    setAddAccountError(null);
+    setAddAccountNotice(null);
+    try {
+      const payload = await authApi.request<AuthResponse>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email: normalizedEmail, password: addAccountPassword })
+      });
+      const workspaceItems = await fetchWorkspacesByToken(payload.access_token);
+      const nextWorkspace = workspaceItems[0] ?? null;
+      const accountId = upsertAccount(
+        {
+          email: normalizedEmail,
+          accessToken: payload.access_token,
+          refreshToken: payload.refresh_token,
+          workspaceId: nextWorkspace?.id ?? null,
+          workspaceName: nextWorkspace?.name ?? null
+        },
+        { activate: true }
+      );
+      if (accountId) {
+        setAccountWorkspacesById((previous) => ({ ...previous, [accountId]: workspaceItems }));
+      }
+      if (nextWorkspace) {
+        activateAccountWorkspace(accountId, nextWorkspace);
+      }
+      setAddAccountNotice({
+        tone: "success",
+        message: "계정을 추가했습니다."
+      });
+      setAddAccountEmail("");
+      setAddAccountPassword("");
+      setIsAddAccountOpen(false);
+    } catch (error) {
+      setAddAccountError(toUiError(error, "계정 추가에 실패했습니다"));
+    } finally {
+      setAddAccountPending(false);
+    }
+  }, [
+    activateAccountWorkspace,
+    addAccountEmail,
+    addAccountPassword,
+    authApi,
+    fetchWorkspacesByToken,
+    upsertAccount
+  ]);
 
   const createWorkspaceInvite = useCallback(async () => {
     if (!activeWorkspaceId) {
@@ -1857,6 +2308,13 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         execute: () => goToView("tree")
       },
       {
+        id: "action:view-library",
+        label: "라이브러리 보기",
+        description: "모든 상위 페이지를 100개 단위로 탐색합니다.",
+        keywords: "library pages hierarchy",
+        execute: () => goToView("library")
+      },
+      {
         id: "action:view-questions",
         label: "질문 인박스 보기",
         description: "답변이 필요한 질문을 처리합니다.",
@@ -1930,6 +2388,9 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
       const isDragged = sidebarDraggingDocumentId === node.doc.id;
       const isChildDropTarget = sidebarDropTarget?.mode === "CHILD" && sidebarDropTarget.targetDocumentId === node.doc.id;
       const isSiblingDropTarget = sidebarDropTarget?.mode === "SIBLING" && sidebarDropTarget.targetDocumentId === node.doc.id;
+      const hasChildren = node.children.length > 0;
+      const isSearchMode = sidebarQuery.trim().length > 0;
+      const isExpanded = isSearchMode || expandedSidebarPageIds.includes(node.doc.id);
       return (
         <li className={`sidebar-page-item${menuOpen ? " is-menu-open" : ""}`} key={node.doc.id}>
           <div
@@ -1973,33 +2434,52 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
               void moveSidebarDocument(draggingId, node.doc.id, "CHILD");
             }}
           >
-            <button
-              className={`sidebar-page-button${isActive ? " is-active" : ""}`}
-              draggable={!menuDisabled}
-              onClick={() => {
-                if (!activeWorkspaceId) {
-                  return;
-                }
-                navigate(workspaceDocumentPath(activeWorkspaceId, node.doc.id));
-              }}
-              onDragEnd={() => {
-                setSidebarDraggingDocumentId(null);
-                setSidebarDropTarget(null);
-              }}
-              onDragStart={(event) => {
-                event.dataTransfer.effectAllowed = "move";
-                event.dataTransfer.setData("text/plain", node.doc.id);
-                setSidebarDraggingDocumentId(node.doc.id);
-                setSidebarDropTarget(null);
-                setSidebarPageMenuDocId(null);
-              }}
-              style={{ paddingLeft: `${12 + depth * 16}px` }}
-              type="button"
-            >
-              <span className="sidebar-page-dot">•</span>
-              {isFavorite ? <span className="sidebar-page-favorite" title="즐겨찾기">★</span> : null}
-              <span className="sidebar-page-title">{node.doc.title}</span>
-            </button>
+            <div className="sidebar-page-main" style={{ paddingLeft: `${6 + depth * 16}px` }}>
+              <button
+                aria-label={hasChildren ? (isExpanded ? "하위 페이지 접기" : "하위 페이지 펼치기") : "하위 페이지 없음"}
+                className={`sidebar-page-toggle${hasChildren ? " has-children" : ""}`}
+                disabled={!hasChildren}
+                onClick={() => {
+                  if (!hasChildren) {
+                    return;
+                  }
+                  toggleSidebarPageExpand(node.doc.id);
+                }}
+                type="button"
+              >
+                {hasChildren ? (
+                  isExpanded ? <ChevronDown className="sidebar-page-toggle-icon" strokeWidth={1.9} /> : <ChevronRight className="sidebar-page-toggle-icon" strokeWidth={1.9} />
+                ) : (
+                  <span className="sidebar-page-toggle-placeholder" />
+                )}
+              </button>
+              <button
+                className={`sidebar-page-button${isActive ? " is-active" : ""}`}
+                draggable={!menuDisabled}
+                onClick={() => {
+                  if (!activeWorkspaceId) {
+                    return;
+                  }
+                  navigate(workspaceDocumentPath(activeWorkspaceId, node.doc.id));
+                }}
+                onDragEnd={() => {
+                  setSidebarDraggingDocumentId(null);
+                  setSidebarDropTarget(null);
+                }}
+                onDragStart={(event) => {
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", node.doc.id);
+                  setSidebarDraggingDocumentId(node.doc.id);
+                  setSidebarDropTarget(null);
+                  setSidebarPageMenuDocId(null);
+                }}
+                type="button"
+              >
+                <span className="sidebar-page-dot">•</span>
+                {isFavorite ? <span className="sidebar-page-favorite" title="즐겨찾기">★</span> : null}
+                <span className="sidebar-page-title">{node.doc.title}</span>
+              </button>
+            </div>
             <div className={`sidebar-page-row-actions${menuOpen ? " is-menu-open" : ""}`}>
               <button
                 aria-label="하위 페이지 추가"
@@ -2161,7 +2641,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
               ) : null}
             </div>
           </div>
-          {node.children.length > 0 ? <ul className="sidebar-page-list">{renderPageTree(node.children, depth + 1)}</ul> : null}
+          {hasChildren && isExpanded ? <ul className="sidebar-page-list">{renderPageTree(node.children, depth + 1)}</ul> : null}
         </li>
       );
     });
@@ -2261,6 +2741,9 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
           setIsSidebarOpen(false);
           setIsWorkspaceLauncherOpen(false);
           setIsInviteFormOpen(false);
+          setAccountMenuId(null);
+          setAccountActionTargetId(null);
+          setIsAddAccountOpen(false);
         }}
         role="presentation"
       />
@@ -2276,6 +2759,8 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
               onClick={() => {
                 setIsWorkspaceLauncherOpen((previous) => !previous);
                 setSidebarPageMenuDocId(null);
+                setAccountMenuId(null);
+                setAccountActionTargetId(null);
               }}
               type="button"
             >
@@ -2289,7 +2774,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
               <div aria-label="워크스페이스 메뉴" className="workspace-launcher-popover" id="workspace-launcher-popover" role="dialog">
                 <ErrorPanel error={workspaceError} />
                 <div className="workspace-launcher-current">
-                  <strong>{activeWorkspace?.name ?? state.workspaceName ?? "워크스페이스"}</strong>
+                  <strong>{activeWorkspace?.name ?? state.workspaceName ?? activeAccount?.email ?? "워크스페이스"}</strong>
                   <span>{activeWorkspace ? `${roleText(activeWorkspace.role)} · ${workspaces.length}개 워크스페이스` : "활성 워크스페이스를 선택해 주세요."}</span>
                 </div>
                 <div className="workspace-launcher-top-actions">
@@ -2350,33 +2835,213 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
                   </div>
                 ) : null}
                 <div className="workspace-launcher-divider" />
-                <p className="workspace-launcher-list-title">워크스페이스 목록</p>
-                <ul className="workspace-launcher-list">
-                  {workspaces.map((workspace) => {
-                    const isActiveWorkspace = workspace.id === activeWorkspaceId;
+                <p className="workspace-launcher-list-title">계정 및 워크스페이스</p>
+                <div className="workspace-launcher-account-sections">
+                  {sessionAccounts.map((account) => {
+                    const accountWorkspaces = accountWorkspacesById[account.id] ?? (account.id === state.activeAccountId ? workspaces : []);
+                    const accountWorkspaceError = accountWorkspaceErrorById[account.id] ?? null;
+                    const isWorkspaceLoading = accountWorkspaceLoadingIds.includes(account.id);
+                    const menuOpen = accountMenuId === account.id;
+                    const actionOpen = accountActionTargetId === account.id;
+                    const isActiveAccount = account.id === state.activeAccountId;
                     return (
-                      <li key={workspace.id}>
+                      <section className="workspace-launcher-account-section" key={account.id}>
+                        <div className="workspace-launcher-account-header">
+                          <strong>{account.email}</strong>
+                          <button
+                            aria-expanded={menuOpen}
+                            aria-label={`계정 메뉴 ${account.email}`}
+                            className="workspace-launcher-account-menu-trigger"
+                            onClick={() => {
+                              setAccountMenuId((previous) => (previous === account.id ? null : account.id));
+                              setAccountActionError(null);
+                              setAccountActionNotice(null);
+                            }}
+                            type="button"
+                          >
+                            ...
+                          </button>
+                          {menuOpen ? (
+                            <div className="workspace-launcher-account-menu" role="menu">
+                              <button
+                                className="workspace-launcher-account-menu-item"
+                                onClick={() => {
+                                  setAccountActionTargetId(account.id);
+                                  setAccountActionWorkspaceName("새 워크스페이스");
+                                  setAccountActionInviteToken("");
+                                  setAccountActionError(null);
+                                  setAccountActionNotice(null);
+                                  setAccountMenuId(null);
+                                }}
+                                role="menuitem"
+                                type="button"
+                              >
+                                워크스페이스 생성 또는 참여
+                              </button>
+                              <button
+                                className="workspace-launcher-account-menu-item is-danger"
+                                onClick={() => {
+                                  logoutSingleAccount(account.id);
+                                }}
+                                role="menuitem"
+                                type="button"
+                              >
+                                로그아웃
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <ul className="workspace-launcher-list">
+                          {accountWorkspaces.map((workspace) => {
+                            const isActiveWorkspace = isActiveAccount && workspace.id === activeWorkspaceId;
+                            return (
+                              <li key={`${account.id}:${workspace.id}`}>
+                                <button
+                                  aria-label={`워크스페이스 전환 ${workspace.name}`}
+                                  className={`workspace-launcher-item${isActiveWorkspace ? " is-active" : ""}`}
+                                  onClick={() => {
+                                    activateAccountWorkspace(account.id, workspace);
+                                  }}
+                                  type="button"
+                                >
+                                  <span className="workspace-launcher-item-check" aria-hidden>
+                                    {isActiveWorkspace ? "✓" : ""}
+                                  </span>
+                                  <span className="workspace-launcher-item-main">
+                                    <strong>{workspace.name}</strong>
+                                    <span>{roleText(workspace.role)}</span>
+                                  </span>
+                                </button>
+                              </li>
+                            );
+                          })}
+                          {accountWorkspaces.length === 0 && !isWorkspaceLoading ? <li className="sidebar-empty">워크스페이스가 없습니다.</li> : null}
+                        </ul>
+
+                        {isWorkspaceLoading ? <p className="workspace-launcher-account-hint">목록 동기화 중...</p> : null}
+                        <ErrorPanel error={accountWorkspaceError} />
+
                         <button
-                          aria-label={`워크스페이스 전환 ${workspace.name}`}
-                          className={`workspace-launcher-item${isActiveWorkspace ? " is-active" : ""}`}
-                          onClick={() => handleWorkspaceChange(workspace.id)}
+                          className="workspace-launcher-add-workspace"
+                          onClick={() => {
+                            setAccountActionTargetId(account.id);
+                            setAccountMenuId(null);
+                            setAccountActionWorkspaceName("새 워크스페이스");
+                            setAccountActionInviteToken("");
+                            setAccountActionError(null);
+                            setAccountActionNotice(null);
+                          }}
                           type="button"
                         >
-                          <span className="workspace-launcher-item-check" aria-hidden>
-                            {isActiveWorkspace ? "✓" : ""}
-                          </span>
-                          <span className="workspace-launcher-item-main">
-                            <strong>{workspace.name}</strong>
-                            <span>{roleText(workspace.role)}</span>
-                          </span>
+                          + 새 워크스페이스
                         </button>
-                      </li>
+
+                        {actionOpen ? (
+                          <div className="workspace-launcher-account-actions">
+                            <label className="field-label" htmlFor={`account-create-workspace-${account.id}`}>
+                              새 워크스페이스 이름
+                            </label>
+                            <input
+                              className="field-input"
+                              id={`account-create-workspace-${account.id}`}
+                              onChange={(event) => setAccountActionWorkspaceName(event.target.value)}
+                              value={accountActionWorkspaceName}
+                            />
+                            <button
+                              className="btn btn-primary btn-small"
+                              disabled={accountActionPending}
+                              onClick={() => {
+                                void createWorkspaceForAccount(account.id);
+                              }}
+                              type="button"
+                            >
+                              {accountActionPending ? "처리 중..." : "워크스페이스 생성"}
+                            </button>
+                            <label className="field-label" htmlFor={`account-invite-token-${account.id}`}>
+                              초대 토큰으로 참여
+                            </label>
+                            <input
+                              className="field-input"
+                              id={`account-invite-token-${account.id}`}
+                              onChange={(event) => setAccountActionInviteToken(event.target.value)}
+                              placeholder="invite token"
+                              value={accountActionInviteToken}
+                            />
+                            <button
+                              className="btn btn-secondary btn-small"
+                              disabled={accountActionPending || !accountActionInviteToken.trim()}
+                              onClick={() => {
+                                void joinWorkspaceForAccount(account.id);
+                              }}
+                              type="button"
+                            >
+                              참여
+                            </button>
+                            <ErrorPanel error={accountActionError} />
+                            <NoticePanel notice={accountActionNotice} />
+                          </div>
+                        ) : null}
+                      </section>
                     );
                   })}
-                </ul>
+                </div>
                 <div className="workspace-launcher-divider" />
-                <button className="workspace-launcher-logout" onClick={logoutFromWorkspace} type="button">
-                  로그아웃
+                <button
+                  className="workspace-launcher-add-account"
+                  onClick={() => {
+                    setIsAddAccountOpen((previous) => !previous);
+                    setAddAccountError(null);
+                    setAddAccountNotice(null);
+                  }}
+                  type="button"
+                >
+                  다른 계정 추가
+                </button>
+                {isAddAccountOpen ? (
+                  <div className="workspace-launcher-add-account-form">
+                    <p className="workspace-launcher-list-title">로그인</p>
+                    <label className="field-label" htmlFor="add-account-email">
+                      이메일
+                    </label>
+                    <input
+                      className="field-input"
+                      id="add-account-email"
+                      onChange={(event) => setAddAccountEmail(event.target.value)}
+                      placeholder="email@example.com"
+                      value={addAccountEmail}
+                    />
+                    <label className="field-label" htmlFor="add-account-password">
+                      비밀번호
+                    </label>
+                    <input
+                      className="field-input"
+                      id="add-account-password"
+                      onChange={(event) => setAddAccountPassword(event.target.value)}
+                      placeholder="비밀번호"
+                      type="password"
+                      value={addAccountPassword}
+                    />
+                    <button className="btn btn-primary btn-small" disabled={addAccountPending} onClick={() => void addAccountFromLauncher()} type="button">
+                      {addAccountPending ? "처리 중..." : "로그인 후 추가"}
+                    </button>
+                    <ErrorPanel error={addAccountError} />
+                    <NoticePanel notice={addAccountNotice} />
+                    <button
+                      className="btn btn-ghost btn-small"
+                      onClick={() => {
+                        setIsWorkspaceLauncherOpen(false);
+                        setIsAddAccountOpen(false);
+                        navigate("/signup");
+                      }}
+                      type="button"
+                    >
+                      회원가입 창 열기
+                    </button>
+                  </div>
+                ) : null}
+                <button className="workspace-launcher-logout" onClick={logoutAllAccountsFromLauncher} type="button">
+                  모든 계정에서 로그아웃
                 </button>
               </div>
             ) : null}
@@ -2447,7 +3112,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
         <div className="sidebar-section sidebar-section-pages">
           <div className="sidebar-section-title-row">
             <p className="sidebar-section-label">Pages</p>
-            <span className="sidebar-pill">{pagesBrowseMode === "DOCUMENT" ? sidebarDocuments.length : sidebarNodeTreeResponse?.nodes.length ?? 0}</span>
+            <span className="sidebar-pill">{pagesBrowseMode === "DOCUMENT" ? sidebarTotalRoots : sidebarNodeTreeResponse?.nodes.length ?? 0}</span>
           </div>
           <div className="editor-view-toggle" role="tablist" aria-label="페이지 보기 모드 전환">
             <button
@@ -2480,6 +3145,7 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
             error={sidebarActionError}
             onRetry={() => {
               void loadSidebarDocuments();
+              void loadSidebarPageRoots();
             }}
           />
           {pagesBrowseMode === "DOCUMENT" ? (
@@ -2513,6 +3179,17 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
                   <li className="sidebar-empty">페이지가 없습니다.</li>
                 )}
               </ul>
+              {sidebarHasMoreRoots ? (
+                <button
+                  className="sidebar-more-button"
+                  onClick={() => {
+                    goToView("library");
+                  }}
+                  type="button"
+                >
+                  ... 더보기
+                </button>
+              ) : null}
             </>
           ) : (
             <>
@@ -2544,6 +3221,14 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
             >
               <SidebarMenuIcon className="sidebar-menu-item-icon sidebar-menu-item-icon-view" name="document" />
               <span className="sidebar-menu-item-label">Documents</span>
+            </button>
+            <button
+              className={`sidebar-view-button${activeView === "library" ? " is-active" : ""}`}
+              onClick={() => goToView("library")}
+              type="button"
+            >
+              <SidebarMenuIcon className="sidebar-menu-item-icon sidebar-menu-item-icon-view" name="library" />
+              <span className="sidebar-menu-item-label">Library</span>
             </button>
             <button
               className={`sidebar-view-button${activeView === "tree" ? " is-active" : ""}`}
@@ -2654,6 +3339,16 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
                 <button
                   className="header-menu-item"
                   onClick={() => {
+                    goToView("library");
+                    setIsSidebarOpen(false);
+                  }}
+                  type="button"
+                >
+                  Library
+                </button>
+                <button
+                  className="header-menu-item"
+                  onClick={() => {
                     goToView("questions");
                     setIsSidebarOpen(false);
                   }}
@@ -2680,6 +3375,8 @@ function Layout({ children, api }: { children: React.ReactNode; api: AppApiClien
             <strong>
               {activeView === "tree"
                 ? "Tree"
+                : activeView === "library"
+                  ? "Library"
                 : activeView === "questions"
                   ? "Questions"
                   : activeView === "trash"
@@ -2893,7 +3590,7 @@ function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<UiError | null>(null);
-  const { setTokens } = useSession();
+  const { upsertAccount } = useSession();
   const navigate = useNavigate();
 
   const api = useMemo(
@@ -2914,50 +3611,271 @@ function LoginPage() {
           event.preventDefault();
           setError(null);
           try {
-          const response = await api.request<AuthResponse>("/auth/login", {
-            method: "POST",
-            body: JSON.stringify({ email, password })
-          });
-          setTokens(response.access_token, response.refresh_token);
-          navigate("/");
-        } catch (e) {
-          setError(toUiError(e, "로그인에 실패했습니다"));
-        }
-      }}
-    >
-      <div className="auth-eyebrow">오토독 트리</div>
-      <h1 className="auth-title">다시 오신 것을 환영합니다</h1>
-      <p className="auth-subtitle">워크스페이스 계정으로 로그인해 문서를 자동으로 정리하세요.</p>
+            const normalizedEmail = email.trim().toLowerCase();
+            const response = await api.request<AuthResponse>("/auth/login", {
+              method: "POST",
+              body: JSON.stringify({ email: normalizedEmail, password })
+            });
+            upsertAccount(
+              {
+                email: normalizedEmail,
+                accessToken: response.access_token,
+                refreshToken: response.refresh_token
+              },
+              { activate: true }
+            );
+            navigate("/");
+          } catch (e) {
+            setError(toUiError(e, "로그인에 실패했습니다"));
+          }
+        }}
+      >
+        <div className="auth-eyebrow">오토독 트리</div>
+        <h1 className="auth-title">다시 오신 것을 환영합니다</h1>
+        <p className="auth-subtitle">워크스페이스 계정으로 로그인해 문서를 자동으로 정리하세요.</p>
 
-      <label className="field-label" htmlFor="login-email">
+        <label className="field-label" htmlFor="login-email">
           이메일
-      </label>
+        </label>
         <input
           className="field-input"
           id="login-email"
-          onChange={(e) => setEmail(e.target.value)}
+          onChange={(event) => setEmail(event.target.value)}
           placeholder="이메일 주소"
           type="email"
           value={email}
         />
 
-      <label className="field-label" htmlFor="login-password">
+        <label className="field-label" htmlFor="login-password">
           비밀번호
-      </label>
+        </label>
         <input
           className="field-input"
           id="login-password"
-          onChange={(e) => setPassword(e.target.value)}
+          onChange={(event) => setPassword(event.target.value)}
           placeholder="비밀번호"
           type="password"
           value={password}
         />
 
-      <button className="btn btn-primary btn-block" type="submit">
+        <button className="btn btn-primary btn-block" type="submit">
           로그인
-      </button>
+        </button>
 
         <ErrorPanel error={error} />
+        <div className="auth-switch-row">
+          <span>계정이 없나요?</span>
+          <Link className="btn btn-ghost btn-small" to="/signup">
+            회원가입
+          </Link>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function SignupPage() {
+  const [step, setStep] = useState<SignupStep>("request");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
+  const [requestPending, setRequestPending] = useState(false);
+  const [verifyPending, setVerifyPending] = useState(false);
+  const [error, setError] = useState<UiError | null>(null);
+  const [notice, setNotice] = useState<UiNotice | null>(null);
+  const [expiresInSeconds, setExpiresInSeconds] = useState<number | null>(null);
+  const { upsertAccount } = useSession();
+  const navigate = useNavigate();
+
+  const api = useMemo(
+    () =>
+      createApiClient({
+        getToken: () => null,
+        getWorkspaceId: () => null,
+        onUnauthorized: async () => false
+      }),
+    []
+  );
+
+  const requestVerificationCode = useCallback(async () => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) {
+      setError({ message: "이메일을 입력하세요.", status: null });
+      return;
+    }
+    if (!password) {
+      setError({ message: "비밀번호를 입력하세요.", status: null });
+      return;
+    }
+    if (password.length < AUTH_PASSWORD_MIN_LENGTH) {
+      setError({ message: `비밀번호는 ${AUTH_PASSWORD_MIN_LENGTH}자 이상이어야 합니다.`, status: null });
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError({ message: "비밀번호 확인이 일치하지 않습니다.", status: null });
+      return;
+    }
+    setRequestPending(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await api.request<RegisterCodeResponse>("/auth/register/request-code", {
+        method: "POST",
+        body: JSON.stringify({ email: normalizedEmail, password })
+      });
+      setEmail(normalizedEmail);
+      setStep("verify");
+      setExpiresInSeconds(response.expires_in_seconds);
+      setNotice({
+        tone: "success",
+        message: `인증번호를 이메일로 전송했습니다. (${Math.max(1, Math.ceil(response.expires_in_seconds / 60))}분 내 입력)`
+      });
+    } catch (e) {
+      setError(toUiError(e, "인증번호 발송에 실패했습니다"));
+    } finally {
+      setRequestPending(false);
+    }
+  }, [api, confirmPassword, email, password]);
+
+  const completeSignup = useCallback(async () => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) {
+      setError({ message: "이메일을 입력하세요.", status: null });
+      return;
+    }
+    if (!verificationCode.trim()) {
+      setError({ message: "인증번호를 입력하세요.", status: null });
+      return;
+    }
+    setVerifyPending(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await api.request<AuthResponse>("/auth/register/verify", {
+        method: "POST",
+        body: JSON.stringify({ email: normalizedEmail, verification_code: verificationCode.trim() })
+      });
+      upsertAccount(
+        {
+          email: normalizedEmail,
+          accessToken: response.access_token,
+          refreshToken: response.refresh_token
+        },
+        { activate: true }
+      );
+      navigate("/");
+    } catch (e) {
+      setError(toUiError(e, "회원가입에 실패했습니다"));
+    } finally {
+      setVerifyPending(false);
+    }
+  }, [api, email, navigate, upsertAccount, verificationCode]);
+
+  return (
+    <div className="auth-shell">
+      <form
+        className="panel auth-card"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (step === "request") {
+            await requestVerificationCode();
+            return;
+          }
+          await completeSignup();
+        }}
+      >
+        <div className="auth-eyebrow">오토독 트리</div>
+        <h1 className="auth-title">새 계정 만들기</h1>
+        <p className="auth-subtitle">
+          이메일로 받은 인증번호를 확인한 뒤 가입이 완료됩니다.
+        </p>
+
+        <label className="field-label" htmlFor="signup-email">
+          이메일
+        </label>
+        <input
+          className="field-input"
+          disabled={step === "verify"}
+          id="signup-email"
+          onChange={(event) => setEmail(event.target.value)}
+          placeholder="email@example.com"
+          type="email"
+          value={email}
+        />
+
+        <label className="field-label" htmlFor="signup-password">
+          비밀번호
+        </label>
+        <input
+          className="field-input"
+          disabled={step === "verify"}
+          id="signup-password"
+          minLength={AUTH_PASSWORD_MIN_LENGTH}
+          onChange={(event) => setPassword(event.target.value)}
+          placeholder="비밀번호"
+          type="password"
+          value={password}
+        />
+
+        <label className="field-label" htmlFor="signup-password-confirm">
+          비밀번호 확인
+        </label>
+        <input
+          className="field-input"
+          disabled={step === "verify"}
+          id="signup-password-confirm"
+          minLength={AUTH_PASSWORD_MIN_LENGTH}
+          onChange={(event) => setConfirmPassword(event.target.value)}
+          placeholder="비밀번호 확인"
+          type="password"
+          value={confirmPassword}
+        />
+
+        {step === "verify" ? (
+          <>
+            <label className="field-label" htmlFor="signup-verification-code">
+              이메일 인증번호
+            </label>
+            <input
+              className="field-input"
+              id="signup-verification-code"
+              onChange={(event) => setVerificationCode(event.target.value)}
+              placeholder="6자리 인증번호"
+              value={verificationCode}
+            />
+            {expiresInSeconds ? (
+              <p className="auth-code-expiry">
+                인증번호 유효시간: 약 {Math.max(1, Math.ceil(expiresInSeconds / 60))}분
+              </p>
+            ) : null}
+          </>
+        ) : null}
+
+        <button className="btn btn-primary btn-block" disabled={requestPending || verifyPending} type="submit">
+          {step === "request"
+            ? requestPending
+              ? "인증번호 발송 중..."
+              : "인증번호 발송"
+            : verifyPending
+              ? "가입 처리 중..."
+              : "인증번호 확인 후 가입"}
+        </button>
+
+        {step === "verify" ? (
+          <button className="btn btn-ghost btn-block" disabled={requestPending || verifyPending} onClick={() => void requestVerificationCode()} type="button">
+            {requestPending ? "재발송 중..." : "인증번호 재발송"}
+          </button>
+        ) : null}
+
+        <ErrorPanel error={error} />
+        <NoticePanel notice={notice} />
+        <div className="auth-switch-row">
+          <span>이미 계정이 있나요?</span>
+          <Link className="btn btn-ghost btn-small" to="/login">
+            로그인으로 이동
+          </Link>
+        </div>
       </form>
     </div>
   );
@@ -2972,7 +3890,15 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const { state, setTokens, clearTokens, setWorkspace } = useSession();
+  const { state, setTokens, clearTokens, removeAccount, setWorkspace } = useSession();
+
+  const removeActiveAccountOrReset = useCallback(() => {
+    if (state.activeAccountId) {
+      removeAccount(state.activeAccountId);
+      return;
+    }
+    clearTokens();
+  }, [clearTokens, removeAccount, state.activeAccountId]);
 
   const api = useMemo(
     () =>
@@ -2981,7 +3907,7 @@ export default function App() {
         getWorkspaceId: () => state.workspaceId,
         onUnauthorized: async () => {
           if (!state.refreshToken) {
-            clearTokens();
+            removeActiveAccountOrReset();
             return false;
           }
           try {
@@ -2993,19 +3919,19 @@ export default function App() {
               body: JSON.stringify({ refresh_token: state.refreshToken })
             });
             if (!refreshed.ok) {
-              clearTokens();
+              removeActiveAccountOrReset();
               return false;
             }
             const payload = (await refreshed.json()) as AuthResponse;
             setTokens(payload.access_token, payload.refresh_token);
             return true;
           } catch {
-            clearTokens();
+            removeActiveAccountOrReset();
             return false;
           }
         }
       }),
-    [clearTokens, setTokens, state.accessToken, state.refreshToken, state.workspaceId]
+    [removeActiveAccountOrReset, setTokens, state.accessToken, state.refreshToken, state.workspaceId]
   );
 
   useEffect(() => {
@@ -3356,6 +4282,300 @@ export default function App() {
               ))}
             </ul>
           )}
+        </section>
+      </Layout>
+    );
+  }
+
+  function LibraryPage() {
+    const navigate = useNavigate();
+    const pageSize = 100;
+    const [roots, setRoots] = useState<LibraryDocumentNode[]>([]);
+    const [page, setPage] = useState(0);
+    const [totalRoots, setTotalRoots] = useState(0);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<UiError | null>(null);
+    const [notice, setNotice] = useState<UiNotice | null>(null);
+    const [expandedIds, setExpandedIds] = useState<string[]>([]);
+    const [selectedRootIds, setSelectedRootIds] = useState<string[]>([]);
+    const [actionPending, setActionPending] = useState<"PIN" | "TRASH" | null>(null);
+
+    const loadLibrary = useCallback(
+      async (targetPage: number) => {
+        if (!state.workspaceId) {
+          setRoots([]);
+          setPage(0);
+          setTotalRoots(0);
+          return;
+        }
+        setLoading(true);
+        setError(null);
+        try {
+          const payload = await api.request<LibraryDocumentListResponse>(
+            `/documents/library?page=${targetPage}&size=${pageSize}`,
+            {},
+            true
+          );
+          setRoots(payload.items ?? []);
+          setPage(typeof payload.page === "number" ? payload.page : targetPage);
+          setTotalRoots(typeof payload.total_roots === "number" ? payload.total_roots : payload.items.length);
+        } catch (loadError) {
+          setError(toUiError(loadError, "라이브러리 목록을 불러오지 못했습니다"));
+        } finally {
+          setLoading(false);
+        }
+      },
+      [api, state.workspaceId]
+    );
+
+    useEffect(() => {
+      setExpandedIds([]);
+      setSelectedRootIds([]);
+      setNotice(null);
+      if (!state.workspaceId) {
+        setRoots([]);
+        setTotalRoots(0);
+        setPage(0);
+        return;
+      }
+      void loadLibrary(0);
+    }, [loadLibrary, state.workspaceId]);
+
+    const toggleExpand = useCallback((documentId: string) => {
+      setExpandedIds((previous) => {
+        if (previous.includes(documentId)) {
+          return previous.filter((id) => id !== documentId);
+        }
+        return [...previous, documentId];
+      });
+    }, []);
+
+    const toggleRootSelection = useCallback((documentId: string) => {
+      setSelectedRootIds((previous) => {
+        if (previous.includes(documentId)) {
+          return previous.filter((id) => id !== documentId);
+        }
+        return [...previous, documentId];
+      });
+    }, []);
+
+    const currentRootIds = useMemo(() => roots.map((root) => root.id), [roots]);
+    const selectedCount = selectedRootIds.length;
+    const totalPages = Math.max(1, Math.ceil(totalRoots / pageSize));
+
+    const moveSelectedRootsToTop = useCallback(async () => {
+      if (!state.workspaceId || selectedRootIds.length === 0 || actionPending) {
+        return;
+      }
+      setActionPending("PIN");
+      setError(null);
+      setNotice(null);
+      try {
+        await api.request(
+          "/documents/library/personal-top",
+          {
+            method: "POST",
+            body: JSON.stringify({ document_ids: selectedRootIds })
+          },
+          true
+        );
+        emitSidebarDocumentsSync(state.workspaceId);
+        setNotice({ tone: "success", message: "선택한 상위 페이지를 개인 페이지 상단으로 이동했습니다." });
+        setSelectedRootIds([]);
+        await loadLibrary(page);
+      } catch (actionError) {
+        setError(toUiError(actionError, "개인 페이지 상단 이동에 실패했습니다"));
+      } finally {
+        setActionPending(null);
+      }
+    }, [actionPending, api, loadLibrary, page, selectedRootIds, state.workspaceId]);
+
+    const moveSelectedRootsToTrash = useCallback(async () => {
+      if (!state.workspaceId || selectedRootIds.length === 0 || actionPending) {
+        return;
+      }
+      const confirmed = window.confirm(`선택한 상위 페이지 ${selectedRootIds.length}개를 휴지통으로 이동할까요? 하위 페이지도 함께 이동됩니다.`);
+      if (!confirmed) {
+        return;
+      }
+      setActionPending("TRASH");
+      setError(null);
+      setNotice(null);
+      try {
+        await api.request(
+          "/documents/library/bulk-trash",
+          {
+            method: "POST",
+            body: JSON.stringify({ document_ids: selectedRootIds })
+          },
+          true
+        );
+        emitSidebarDocumentsSync(state.workspaceId);
+        setNotice({ tone: "success", message: "선택한 상위 페이지를 휴지통으로 이동했습니다." });
+        setSelectedRootIds([]);
+        const nextPage = page > 0 && currentRootIds.length === selectedRootIds.length ? page - 1 : page;
+        await loadLibrary(nextPage);
+      } catch (actionError) {
+        setError(toUiError(actionError, "휴지통 이동에 실패했습니다"));
+      } finally {
+        setActionPending(null);
+      }
+    }, [actionPending, api, currentRootIds.length, loadLibrary, page, selectedRootIds, state.workspaceId]);
+
+    const renderLibraryRows = (nodes: LibraryDocumentNode[], depth: number): React.ReactNode =>
+      nodes.map((node) => {
+        const hasChildren = node.children.length > 0;
+        const expanded = expandedIds.includes(node.id);
+        const isRoot = depth === 0;
+        const isSelectedRoot = selectedRootIds.includes(node.id);
+        return (
+          <li className={`library-tree-item${isRoot && isSelectedRoot ? " is-selected-root" : ""}`} key={node.id}>
+            <div className="library-tree-row" style={{ paddingLeft: `${depth * 18}px` }}>
+              {isRoot ? (
+                <input
+                  aria-label={`${node.title} 선택`}
+                  checked={isSelectedRoot}
+                  className="library-root-checkbox"
+                  onChange={() => {
+                    toggleRootSelection(node.id);
+                  }}
+                  type="checkbox"
+                />
+              ) : (
+                <span className="library-root-checkbox-placeholder" />
+              )}
+              <button
+                aria-label={hasChildren ? (expanded ? "하위 문서 접기" : "하위 문서 펼치기") : "하위 문서 없음"}
+                className={`library-toggle${hasChildren ? " has-children" : ""}`}
+                disabled={!hasChildren}
+                onClick={() => {
+                  if (hasChildren) {
+                    toggleExpand(node.id);
+                  }
+                }}
+                type="button"
+              >
+                {hasChildren ? (
+                  expanded ? <ChevronDown className="library-toggle-icon" strokeWidth={1.9} /> : <ChevronRight className="library-toggle-icon" strokeWidth={1.9} />
+                ) : (
+                  <span className="library-toggle-placeholder" />
+                )}
+              </button>
+              <button
+                className="library-title-button"
+                onClick={() => {
+                  if (!state.workspaceId) {
+                    return;
+                  }
+                  navigate(workspaceDocumentPath(state.workspaceId, node.id));
+                }}
+                type="button"
+              >
+                <FileText className="library-doc-icon" strokeWidth={1.8} />
+                <span>{node.title}</span>
+              </button>
+              <span className="library-updated-at">{node.updated_at ? new Date(node.updated_at).toLocaleString("ko-KR") : "-"}</span>
+            </div>
+            {hasChildren && expanded ? <ul className="library-tree-list">{renderLibraryRows(node.children, depth + 1)}</ul> : null}
+          </li>
+        );
+      });
+
+    return (
+      <Layout api={api}>
+        <section className="panel">
+          <PageHeader
+            title="라이브러리"
+            subtitle="모든 상위 페이지를 확인하고 개인 페이지 상단/휴지통 일괄 작업을 수행합니다."
+            action={
+              <div className="action-row">
+                <button
+                  className="btn btn-secondary btn-small"
+                  disabled={!state.workspaceId || loading}
+                  onClick={() => {
+                    void loadLibrary(page);
+                  }}
+                  type="button"
+                >
+                  {loading ? "새로고침 중..." : "새로고침"}
+                </button>
+              </div>
+            }
+          />
+          {!state.workspaceId ? <WorkspaceRequiredHint /> : null}
+          <NoticePanel notice={notice} />
+          <ErrorPanel
+            error={error}
+            onRetry={() => {
+              void loadLibrary(page);
+            }}
+          />
+
+          {selectedCount > 0 ? (
+            <div className="library-toolbar">
+              <span className="library-selected-count">{selectedCount}개 선택됨</span>
+              <button
+                className="btn btn-secondary btn-small"
+                disabled={actionPending !== null}
+                onClick={() => {
+                  void moveSelectedRootsToTop();
+                }}
+                type="button"
+              >
+                {actionPending === "PIN" ? "이동 중..." : "개인 페이지 상단으로 이동"}
+              </button>
+              <button
+                className="btn btn-ghost btn-small"
+                disabled={actionPending !== null}
+                onClick={() => {
+                  void moveSelectedRootsToTrash();
+                }}
+                type="button"
+              >
+                {actionPending === "TRASH" ? "이동 중..." : "휴지통으로 이동"}
+              </button>
+            </div>
+          ) : null}
+
+          {state.workspaceId && !loading && roots.length === 0 ? (
+            <EmptyState title="페이지가 없습니다" description="라이브러리에 표시할 상위 페이지가 없습니다." />
+          ) : null}
+
+          {roots.length > 0 ? (
+            <div className="library-tree-wrap">
+              <div className="library-tree-header">
+                <span>페이지 이름</span>
+                <span>마지막 수정 시각</span>
+              </div>
+              <ul className="library-tree-list">{renderLibraryRows(roots, 0)}</ul>
+            </div>
+          ) : null}
+
+          <div className="library-pagination">
+            <button
+              className="btn btn-ghost btn-small"
+              disabled={!state.workspaceId || loading || page <= 0}
+              onClick={() => {
+                void loadLibrary(page - 1);
+              }}
+              type="button"
+            >
+              이전
+            </button>
+            <span className="library-pagination-label">
+              {Math.min(page + 1, totalPages)} / {totalPages} 페이지 · 상위 페이지 {totalRoots}개
+            </span>
+            <button
+              className="btn btn-ghost btn-small"
+              disabled={!state.workspaceId || loading || page + 1 >= totalPages}
+              onClick={() => {
+                void loadLibrary(page + 1);
+              }}
+              type="button"
+            >
+              다음
+            </button>
+          </div>
         </section>
       </Layout>
     );
@@ -6598,6 +7818,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/signup" element={<SignupPage />} />
       <Route
         path="/"
         element={
@@ -6651,6 +7872,16 @@ export default function App() {
           <ProtectedRoute>
             <WorkspaceRouteSync>
               <InboxPage />
+            </WorkspaceRouteSync>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/w/:workspaceId/view/library"
+        element={
+          <ProtectedRoute>
+            <WorkspaceRouteSync>
+              <LibraryPage />
             </WorkspaceRouteSync>
           </ProtectedRoute>
         }

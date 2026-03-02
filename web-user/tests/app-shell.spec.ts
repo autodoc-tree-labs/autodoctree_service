@@ -117,6 +117,10 @@ async function mockApi(page: Page) {
   const documentsByWorkspace = initialDocumentsByWorkspace();
   const trashByWorkspace = initialTrashByWorkspace();
   const favoritesByWorkspace = initialFavoritesByWorkspace();
+  const personalTopByWorkspace: Record<string, string[]> = {
+    "ws-1": [],
+    "ws-2": []
+  };
   const pendingUploadsByAttachmentId = new Map<
     string,
     { workspaceId: string; documentId: string; filename: string; contentType: string; size: number }
@@ -148,6 +152,57 @@ async function mockApi(page: Page) {
       }
     }
     return ids;
+  };
+
+  const sortByRecency = (left: { updated_at?: string; title: string }, right: { updated_at?: string; title: string }) => {
+    const leftTs = Date.parse(left.updated_at ?? "") || 0;
+    const rightTs = Date.parse(right.updated_at ?? "") || 0;
+    if (leftTs !== rightTs) {
+      return rightTs - leftTs;
+    }
+    return left.title.localeCompare(right.title, "ko");
+  };
+
+  const buildLibraryRoots = (workspaceId: string) => {
+    const docs = [...(documentsByWorkspace[workspaceId] ?? [])].sort(sortByRecency);
+    const nodeById = new Map(
+      docs.map((doc) => [
+        doc.id,
+        {
+          ...doc,
+          children: [] as Array<Record<string, unknown>>
+        }
+      ])
+    );
+    const roots: Array<Record<string, unknown>> = [];
+    for (const doc of docs) {
+      const node = nodeById.get(doc.id);
+      if (!node) {
+        continue;
+      }
+      const parentId = doc.parent_document_id;
+      const parentNode = parentId ? nodeById.get(parentId) : undefined;
+      if (!parentNode || parentId === doc.id) {
+        roots.push(node);
+      } else {
+        (parentNode.children as Array<Record<string, unknown>>).push(node);
+      }
+    }
+    const sortNodes = (nodes: Array<Record<string, unknown>>) => {
+      nodes.sort((left, right) => sortByRecency(left as { updated_at?: string; title: string }, right as { updated_at?: string; title: string }));
+      nodes.forEach((node) => sortNodes((node.children as Array<Record<string, unknown>>) ?? []));
+    };
+    sortNodes(roots);
+    return roots;
+  };
+
+  const orderedLibraryRoots = (workspaceId: string) => {
+    const roots = buildLibraryRoots(workspaceId);
+    const rootById = new Map(roots.map((root) => [String(root.id), root]));
+    const pinned = (personalTopByWorkspace[workspaceId] ?? []).map((id) => rootById.get(id)).filter((value): value is Record<string, unknown> => Boolean(value));
+    const pinnedIds = new Set(pinned.map((root) => String(root.id)));
+    const rest = roots.filter((root) => !pinnedIds.has(String(root.id)));
+    return [...pinned, ...rest];
   };
 
   await page.route("**/mock-upload/**", async (route) => {
@@ -248,6 +303,102 @@ async function mockApi(page: Page) {
     if (method === "GET" && path === "/documents") {
       const items = documentsByWorkspace[workspaceId] ?? [];
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items, page: 0, size: 20, total: items.length }) });
+      return;
+    }
+
+    if (method === "GET" && path === "/documents/sidebar") {
+      const orderedRoots = orderedLibraryRoots(workspaceId);
+      const limit = 20;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: orderedRoots.slice(0, limit),
+          total_roots: orderedRoots.length,
+          limit,
+          has_more: orderedRoots.length > limit,
+          personal_top_document_ids: personalTopByWorkspace[workspaceId] ?? []
+        })
+      });
+      return;
+    }
+
+    if (method === "GET" && path === "/documents/library") {
+      const orderedRoots = orderedLibraryRoots(workspaceId);
+      const page = Number(url.searchParams.get("page") ?? "0");
+      const size = Number(url.searchParams.get("size") ?? "100");
+      const safePage = Number.isFinite(page) && page >= 0 ? page : 0;
+      const safeSize = Number.isFinite(size) && size > 0 ? Math.min(size, 100) : 100;
+      const from = safePage * safeSize;
+      const to = Math.min(from + safeSize, orderedRoots.length);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: orderedRoots.slice(from, to),
+          page: safePage,
+          size: safeSize,
+          total_roots: orderedRoots.length,
+          total_pages: orderedRoots.length === 0 ? 0 : Math.ceil(orderedRoots.length / safeSize),
+          has_more: to < orderedRoots.length,
+          personal_top_document_ids: personalTopByWorkspace[workspaceId] ?? []
+        })
+      });
+      return;
+    }
+
+    if (method === "POST" && path === "/documents/library/personal-top") {
+      const payload = JSON.parse(request.postData() ?? "{}") as { document_ids?: string[] };
+      const selected = Array.from(new Set((payload.document_ids ?? []).filter((value): value is string => typeof value === "string" && value.length > 0)));
+      const rootIds = new Set(orderedLibraryRoots(workspaceId).map((root) => String(root.id)));
+      if (selected.length === 0 || selected.some((id) => !rootIds.has(id))) {
+        await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "invalid document_ids" }) });
+        return;
+      }
+      const existing = personalTopByWorkspace[workspaceId] ?? [];
+      personalTopByWorkspace[workspaceId] = [...selected, ...existing.filter((id) => !selected.includes(id))].slice(0, 20);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ items: personalTopByWorkspace[workspaceId], limit: 20, total: personalTopByWorkspace[workspaceId].length })
+      });
+      return;
+    }
+
+    if (method === "POST" && path === "/documents/library/bulk-trash") {
+      const payload = JSON.parse(request.postData() ?? "{}") as { document_ids?: string[] };
+      const selected = Array.from(new Set((payload.document_ids ?? []).filter((value): value is string => typeof value === "string" && value.length > 0)));
+      const rootIds = new Set(orderedLibraryRoots(workspaceId).map((root) => String(root.id)));
+      if (selected.length === 0 || selected.some((id) => !rootIds.has(id))) {
+        await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "invalid document_ids" }) });
+        return;
+      }
+      const docs = documentsByWorkspace[workspaceId] ?? [];
+      const trash = trashByWorkspace[workspaceId] ?? [];
+      const deletedIds = new Set<string>();
+      const deletedDocs: Array<(typeof docs)[number]> = [];
+      selected.forEach((rootId) => {
+        collectSubtreeIds(workspaceId, rootId).forEach((docId) => deletedIds.add(docId));
+      });
+      for (let index = docs.length - 1; index >= 0; index -= 1) {
+        const candidate = docs[index];
+        if (!deletedIds.has(candidate.id)) {
+          continue;
+        }
+        const [removed] = docs.splice(index, 1);
+        removed.status = "DELETED";
+        removed.parent_document_id = null;
+        removed.updated_at = "2026-02-19T10:01:00Z";
+        deletedDocs.unshift(removed);
+      }
+      trash.unshift(...deletedDocs);
+      favoritesByWorkspace[workspaceId] = (favoritesByWorkspace[workspaceId] ?? []).filter((value) => !deletedIds.has(value));
+      personalTopByWorkspace[workspaceId] = (personalTopByWorkspace[workspaceId] ?? []).filter((value) => !deletedIds.has(value));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ deleted_root_count: selected.length, deleted_document_count: deletedIds.size })
+      });
       return;
     }
 
@@ -380,6 +531,7 @@ async function mockApi(page: Page) {
       const trash = trashByWorkspace[workspaceId] ?? [];
       trash.unshift(...deleted);
       favoritesByWorkspace[workspaceId] = (favoritesByWorkspace[workspaceId] ?? []).filter((value) => !subtreeIds.has(value));
+      personalTopByWorkspace[workspaceId] = (personalTopByWorkspace[workspaceId] ?? []).filter((value) => !subtreeIds.has(value));
       await route.fulfill({ status: 204, body: "" });
       return;
     }
@@ -445,6 +597,79 @@ test("renders workspace app shell and view navigation", async ({ page }) => {
   await page.getByRole("button", { name: "Tree" }).click();
   await expect(page).toHaveURL(/\/w\/ws-1\/view\/tree/);
   await expect(page.getByRole("heading", { name: "트리" })).toBeVisible();
+});
+
+test("sidebar shows only roots by default and ... 더보기 opens library view", async ({ page }) => {
+  const sidebarItems = Array.from({ length: 21 }, (_, index) => ({
+    id: `root-${index + 1}`,
+    title: `루트 문서 ${index + 1}`,
+    parent_document_id: null,
+    status: "READY",
+    updated_at: "2026-02-19T09:00:00Z",
+    children: index === 0 ? [{ id: "root-1-child", title: "루트 문서 1 하위", parent_document_id: "root-1", status: "READY", updated_at: "2026-02-19T08:30:00Z", children: [] }] : []
+  }));
+  await page.route("**/api/v1/documents/sidebar", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: sidebarItems.slice(0, 20),
+        total_roots: 21,
+        limit: 20,
+        has_more: true,
+        personal_top_document_ids: []
+      })
+    });
+  });
+  await page.route("**/api/v1/documents/library*", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: sidebarItems,
+        page: 0,
+        size: 100,
+        total_roots: 21,
+        total_pages: 1,
+        has_more: false,
+        personal_top_document_ids: []
+      })
+    });
+  });
+
+  await page.goto("/w/ws-1");
+  await expect(page.locator(".sidebar-section-pages .sidebar-page-title", { hasText: /^루트 문서 1 하위$/ })).toHaveCount(0);
+  const rootRow = page.locator(".sidebar-page-row").filter({
+    has: page.locator(".sidebar-page-title", { hasText: /^루트 문서 1$/ })
+  });
+  await rootRow.first().getByRole("button", { name: "하위 페이지 펼치기" }).click();
+  await expect(page.locator(".sidebar-section-pages .sidebar-page-title", { hasText: /^루트 문서 1 하위$/ })).toHaveCount(1);
+  await page.getByRole("button", { name: "... 더보기" }).click();
+  await expect(page).toHaveURL(/\/w\/ws-1\/view\/library/);
+  await expect(page.getByRole("heading", { name: "라이브러리" })).toBeVisible();
+});
+
+test("library bulk toolbar can pin selected roots to personal top", async ({ page }) => {
+  await page.goto("/w/ws-1/view/library");
+
+  const targetRow = page.locator(".library-tree-row", {
+    has: page.getByRole("button", { name: /녹차의 효능/ })
+  });
+  await targetRow.getByRole("checkbox").check();
+  await page.getByRole("button", { name: "개인 페이지 상단으로 이동" }).click();
+  await expect(page.getByText("선택한 상위 페이지를 개인 페이지 상단으로 이동했습니다.")).toBeVisible();
+
+  await page.goto("/w/ws-1");
+  const topLevelTitles = page.locator(".sidebar-section-pages > ul.sidebar-page-list > li.sidebar-page-item > .sidebar-page-row .sidebar-page-title");
+  await expect(topLevelTitles.first()).toHaveText("녹차의 효능");
 });
 
 test("opens command palette and jumps to document editor", async ({ page }) => {
@@ -571,6 +796,24 @@ test("drag and drop upload inserts file block without upload button click", asyn
   await editorSurface.dispatchEvent("drop", { dataTransfer });
 
   await expect(page.locator(".editor-v2-file a").first()).toHaveText("drag-note.txt");
+  await dataTransfer.dispose();
+});
+
+test("drag and drop image upload inserts image block with 50% width", async ({ page }) => {
+  await page.goto("/w/ws-1/doc/doc-1");
+  await expect(page.getByLabel("제목")).toHaveValue("코난 전기");
+
+  const dataTransfer = await page.evaluateHandle(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(["fake-image-binary"], "drag-photo.png", { type: "image/png" }));
+    return dt;
+  });
+
+  const editorSurface = page.locator(".editor-v2-prosemirror");
+  await editorSurface.dispatchEvent("drop", { dataTransfer });
+
+  await expect(page.locator(".editor-v2-image-node").first()).toHaveAttribute("style", /width:\s*50%/i);
+  await expect(page.locator(".editor-v2-image-node img").first()).toHaveAttribute("src", /drag-photo\.png/);
   await dataTransfer.dispose();
 });
 
@@ -786,11 +1029,13 @@ test("deleting parent page from sidebar also removes child pages", async ({ page
 
   const pagesTitles = page.locator(".sidebar-section-pages .sidebar-page-title");
   await expect(pagesTitles.filter({ hasText: /^코난 전기$/ })).toHaveCount(1);
-  await expect(pagesTitles.filter({ hasText: /^코난 전기 하위$/ })).toHaveCount(1);
+  await expect(pagesTitles.filter({ hasText: /^코난 전기 하위$/ })).toHaveCount(0);
 
   const parentRow = page.locator(".sidebar-page-row").filter({
     has: page.locator(".sidebar-page-title", { hasText: /^코난 전기$/ })
   });
+  await parentRow.first().getByRole("button", { name: "하위 페이지 펼치기" }).click();
+  await expect(pagesTitles.filter({ hasText: /^코난 전기 하위$/ })).toHaveCount(1);
   await parentRow.first().hover();
   await parentRow.first().getByRole("button", { name: "페이지 메뉴" }).click();
   page.once("dialog", (dialog) => dialog.accept());
@@ -814,11 +1059,16 @@ test("drag and drop page row moves document under another document", async ({ pa
 
   const source = page.locator(".sidebar-section-pages").getByRole("button", { name: "• 녹차의 효능", exact: true });
   const target = page.locator(".sidebar-section-pages").getByRole("button", { name: /코난 전기/ }).first();
-  await expect(source).toHaveCSS("padding-left", "12px");
+  const topLevelTitles = page.locator(".sidebar-section-pages > ul.sidebar-page-list > li.sidebar-page-item > .sidebar-page-row .sidebar-page-title");
+  await expect(topLevelTitles).toHaveCount(2);
 
   await source.dragTo(target);
-
-  await expect(source).toHaveCSS("padding-left", "28px");
+  await expect(topLevelTitles).toHaveCount(1);
+  const parentRow = page.locator(".sidebar-page-row").filter({
+    has: page.locator(".sidebar-page-title", { hasText: /^코난 전기$/ })
+  });
+  await parentRow.first().getByRole("button", { name: "하위 페이지 펼치기" }).click();
+  await expect(page.locator(".sidebar-section-pages .sidebar-page-title", { hasText: /^녹차의 효능$/ })).toHaveCount(1);
 });
 
 test("trash view lists deleted documents and supports restore", async ({ page }) => {

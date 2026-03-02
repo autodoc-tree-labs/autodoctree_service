@@ -144,6 +144,46 @@ class TenantIsolationIntegrationTest {
             .andExpect(jsonPath("$.items[?(@.id == '$wsADocId')]").isEmpty)
 
         mockMvc.perform(
+            get("/api/v1/documents/sidebar")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsBId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.items[?(@.id == '$wsADocId')]").isEmpty)
+
+        mockMvc.perform(
+            get("/api/v1/documents/library")
+                .param("page", "0")
+                .param("size", "100")
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsBId)
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.items[?(@.id == '$wsADocId')]").isEmpty)
+
+        mockMvc.perform(
+            post("/api/v1/documents/library/personal-top")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsBId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf("document_ids" to listOf(wsADocId))
+                    )
+                )
+        ).andExpect(status().isBadRequest)
+
+        mockMvc.perform(
+            post("/api/v1/documents/library/bulk-trash")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer $tokenB")
+                .header("X-Workspace-Id", wsAId)
+                .content(
+                    objectMapper.writeValueAsString(
+                        mapOf("document_ids" to listOf(wsADocId))
+                    )
+                )
+        ).andExpect(status().isForbidden)
+
+        mockMvc.perform(
             get("/api/v1/documents/favorites")
                 .header("Authorization", "Bearer $tokenB")
                 .header("X-Workspace-Id", wsBId)

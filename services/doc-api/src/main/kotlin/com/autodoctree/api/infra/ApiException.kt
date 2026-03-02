@@ -21,3 +21,6 @@ class NotFoundException(message: String = "Not found") :
 
 class ConflictException(message: String) :
     ApiException(409, "CONFLICT", message)
+
+class ServiceUnavailableException(message: String) :
+    ApiException(503, "SERVICE_UNAVAILABLE", message)

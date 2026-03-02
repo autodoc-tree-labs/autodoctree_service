@@ -20,6 +20,17 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:56379}
+  mail:
+    host: ${SMTP_HOST:localhost}
+    port: ${SMTP_PORT:51025}
+    username: ${SMTP_USERNAME:}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: ${SMTP_AUTH:false}
+          starttls:
+            enable: ${SMTP_STARTTLS_ENABLE:false}
 
 management:
   endpoints:
@@ -34,6 +45,13 @@ auth:
   jwt-secret: ${DOC_API_JWT_SECRET:dev-secret-change-me}
   access-token-ttl-seconds: ${DOC_API_ACCESS_TOKEN_TTL_SECONDS:900}
   refresh-token-ttl-seconds: ${DOC_API_REFRESH_TOKEN_TTL_SECONDS:1209600}
+  register-verification:
+    code-ttl-seconds: ${DOC_API_REGISTER_CODE_TTL_SECONDS:600}
+    max-attempts: ${DOC_API_REGISTER_MAX_ATTEMPTS:5}
+    sender-email: ${DOC_API_REGISTER_SENDER_EMAIL:no-reply@autodoc.local}
+    subject: ${DOC_API_REGISTER_EMAIL_SUBJECT:AutoDoc signup verification code}
+  invite:
+    require-email-match: ${DOC_API_INVITE_REQUIRE_EMAIL_MATCH:true}
 
 storage:
   endpoint: ${S3_ENDPOINT:http://localhost:59000}

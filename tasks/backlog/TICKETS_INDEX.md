@@ -37,6 +37,9 @@
 | B-1400 | Block editor v1 backend model and sync pipeline | `tasks/backlog/B-1400 - Block editor v1 backend model and sync pipeline.md` |
 | B-1401 | Cascading soft delete for document hierarchy | `tasks/backlog/B-1401 - Cascading soft delete for document hierarchy.md` |
 | B-1402 | Enforce tenant scope on workspace invite creation endpoint | `tasks/backlog/B-1402 - Enforce tenant scope on workspace invite creation endpoint.md` |
+| B-1403 | Library hierarchy API and personal top pages storage | `tasks/backlog/B-1403 - Library hierarchy API and personal top pages storage.md` |
+| B-1404 | Auth register endpoint and account-aware session contracts | `tasks/backlog/B-1404 - Auth register endpoint and account-aware session contracts.md` |
+| B-1405 | Email verification signup and invite token email binding | `tasks/backlog/B-1405 - Email verification signup and invite token email binding.md` |
 | I-0101 | Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards | `tasks/backlog/I-0101 — Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards.md` |
 | I-0201 | Ollama Embedding Setup (bge-m3) — Offline Bootstrap & Healthchecks | `tasks/backlog/I-0201 — Ollama Embedding Setup (bge-m3) — Offline Bootstrap  Healthchecks.md` |
 | I-0301 | OpenSearch Korean Analyzer (nori) for Search Index + Field Mapping | `tasks/backlog/I-0301 — OpenSearch Korean Analyzer (nori) for Search Index  Field Mapping.md` |
@@ -64,3 +67,6 @@
 | U-1404 | Sidebar workspace launcher popover and member invite | `tasks/backlog/U-1404 - Sidebar workspace launcher popover and member invite.md` |
 | U-1405 | Drag and drop attachment upload in EditorV2 | `tasks/backlog/U-1405 - Drag and drop attachment upload in EditorV2.md` |
 | U-1406 | Collapsible editor side panels for wider writing area | `tasks/backlog/U-1406 - Collapsible editor side panels for wider writing area.md` |
+| U-1407 | Personal top pages sidebar cap and library bulk actions | `tasks/backlog/U-1407 - Personal top pages sidebar cap and library bulk actions.md` |
+| U-1408 | Workspace launcher multi-account switcher and add-account signup | `tasks/backlog/U-1408 - Workspace launcher multi-account switcher and add-account signup.md` |
+| U-1409 | Separate signup window with email verification and login-only account add | `tasks/backlog/U-1409 - Separate signup window with email verification and login-only account add.md` |

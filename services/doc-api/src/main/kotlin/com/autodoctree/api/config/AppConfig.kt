@@ -20,7 +20,20 @@ import java.net.URI
 data class AuthProperties(
     val jwtSecret: String,
     val accessTokenTtlSeconds: Long,
-    val refreshTokenTtlSeconds: Long
+    val refreshTokenTtlSeconds: Long,
+    val registerVerification: AuthRegisterVerificationProperties = AuthRegisterVerificationProperties(),
+    val invite: AuthInviteProperties = AuthInviteProperties()
+)
+
+data class AuthRegisterVerificationProperties(
+    val codeTtlSeconds: Long = 600,
+    val maxAttempts: Int = 5,
+    val senderEmail: String = "no-reply@autodoc.local",
+    val subject: String = "AutoDoc signup verification code"
+)
+
+data class AuthInviteProperties(
+    val requireEmailMatch: Boolean = true
 )
 
 @ConfigurationProperties(prefix = "storage")

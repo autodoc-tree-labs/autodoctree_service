@@ -72,6 +72,15 @@ data class DocumentFavoriteRow(
     val createdAt: LocalDateTime
 )
 
+data class DocumentPersonalTopRow(
+    val workspaceId: String,
+    val userId: String,
+    val documentId: String,
+    val ord: Int,
+    val createdAt: LocalDateTime,
+    val updatedAt: LocalDateTime
+)
+
 data class PipelineStatusRow(
     val workspaceId: String,
     val documentId: String,
@@ -884,6 +893,78 @@ class DocumentFavoriteRepository(private val jdbcTemplate: JdbcTemplate) {
         jdbcTemplate.update(
             """
             DELETE FROM document_favorite
+            WHERE workspace_id = ? AND document_id IN ($placeholders)
+            """.trimIndent(),
+            *args.toTypedArray()
+        )
+    }
+}
+
+@Repository
+class DocumentPersonalTopRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<DocumentPersonalTopRow> { rs: ResultSet, _: Int ->
+        DocumentPersonalTopRow(
+            workspaceId = rs.getString("workspace_id"),
+            userId = rs.getString("user_id"),
+            documentId = rs.getString("document_id"),
+            ord = rs.getInt("ord"),
+            createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
+            updatedAt = rs.getTimestamp("updated_at").toLocalDateTime()
+        )
+    }
+
+    fun listByWorkspaceAndUser(workspaceId: String, userId: String): List<DocumentPersonalTopRow> = jdbcTemplate.query(
+        """
+        SELECT workspace_id, user_id, document_id, ord, created_at, updated_at
+        FROM document_personal_top
+        WHERE workspace_id = ? AND user_id = ?
+        ORDER BY ord ASC, updated_at DESC
+        """.trimIndent(),
+        mapper,
+        workspaceId,
+        userId
+    )
+
+    fun replaceForWorkspaceAndUser(
+        workspaceId: String,
+        userId: String,
+        orderedDocumentIds: List<String>
+    ) {
+        jdbcTemplate.update(
+            """
+            DELETE FROM document_personal_top
+            WHERE workspace_id = ? AND user_id = ?
+            """.trimIndent(),
+            workspaceId,
+            userId
+        )
+        val now = LocalDateTime.now()
+        orderedDocumentIds.forEachIndexed { index, documentId ->
+            jdbcTemplate.update(
+                """
+                INSERT INTO document_personal_top(workspace_id, user_id, document_id, ord, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                workspaceId,
+                userId,
+                documentId,
+                index,
+                now,
+                now
+            )
+        }
+    }
+
+    fun removeByDocuments(workspaceId: String, documentIds: Collection<String>) {
+        if (documentIds.isEmpty()) {
+            return
+        }
+        val placeholders = documentIds.joinToString(",") { "?" }
+        val args = mutableListOf<Any>(workspaceId)
+        args.addAll(documentIds)
+        jdbcTemplate.update(
+            """
+            DELETE FROM document_personal_top
             WHERE workspace_id = ? AND document_id IN ($placeholders)
             """.trimIndent(),
             *args.toTypedArray()
@@ -2448,6 +2529,18 @@ data class PaletteHistoryRow(
     val createdAt: LocalDateTime
 )
 
+data class RegistrationVerificationCodeRow(
+    val id: String,
+    val email: String,
+    val passwordHash: String,
+    val codeHash: String,
+    val expiresAt: LocalDateTime,
+    val attemptCount: Int,
+    val consumedAt: LocalDateTime?,
+    val createdAt: LocalDateTime,
+    val updatedAt: LocalDateTime
+)
+
 @Repository
 class PaletteHistoryRepository(private val jdbcTemplate: JdbcTemplate) {
     private val mapper = RowMapper<PaletteHistoryRow> { rs: ResultSet, _: Int ->
@@ -2572,6 +2665,96 @@ class WorkspaceInviteRepository(private val jdbcTemplate: JdbcTemplate) {
             "UPDATE workspace_invites SET accepted_at = ?, accepted_by = ? WHERE id = ?",
             LocalDateTime.now(),
             userId,
+            id
+        )
+    }
+}
+
+@Repository
+class RegistrationVerificationCodeRepository(private val jdbcTemplate: JdbcTemplate) {
+    private val mapper = RowMapper<RegistrationVerificationCodeRow> { rs: ResultSet, _: Int ->
+        RegistrationVerificationCodeRow(
+            id = rs.getString("id"),
+            email = rs.getString("email"),
+            passwordHash = rs.getString("password_hash"),
+            codeHash = rs.getString("code_hash"),
+            expiresAt = rs.getTimestamp("expires_at").toLocalDateTime(),
+            attemptCount = rs.getInt("attempt_count"),
+            consumedAt = rs.getTimestamp("consumed_at")?.toLocalDateTime(),
+            createdAt = rs.getTimestamp("created_at").toLocalDateTime(),
+            updatedAt = rs.getTimestamp("updated_at").toLocalDateTime()
+        )
+    }
+
+    fun createOrReplace(email: String, passwordHash: String, codeHash: String, expiresAt: LocalDateTime): String {
+        jdbcTemplate.update(
+            """
+            DELETE FROM registration_verification_codes
+            WHERE email = ?
+              AND consumed_at IS NULL
+            """.trimIndent(),
+            email
+        )
+
+        val id = UUID.randomUUID().toString()
+        val now = LocalDateTime.now()
+        jdbcTemplate.update(
+            """
+            INSERT INTO registration_verification_codes(
+              id, email, password_hash, code_hash, expires_at, attempt_count, consumed_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)
+            """.trimIndent(),
+            id,
+            email,
+            passwordHash,
+            codeHash,
+            expiresAt,
+            now,
+            now
+        )
+        return id
+    }
+
+    fun findActiveByEmail(email: String): RegistrationVerificationCodeRow? = jdbcTemplate.queryOneOrNull(
+        """
+        SELECT *
+        FROM registration_verification_codes
+        WHERE email = ?
+          AND consumed_at IS NULL
+          AND expires_at > ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """.trimIndent(),
+        mapper,
+        email,
+        LocalDateTime.now()
+    )
+
+    fun incrementAttempt(id: String) {
+        jdbcTemplate.update(
+            """
+            UPDATE registration_verification_codes
+            SET attempt_count = attempt_count + 1,
+                updated_at = ?
+            WHERE id = ?
+            """.trimIndent(),
+            LocalDateTime.now(),
+            id
+        )
+    }
+
+    fun markConsumed(id: String) {
+        val now = LocalDateTime.now()
+        jdbcTemplate.update(
+            """
+            UPDATE registration_verification_codes
+            SET consumed_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """.trimIndent(),
+            now,
+            now,
             id
         )
     }

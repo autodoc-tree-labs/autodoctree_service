@@ -73,6 +73,12 @@ services:
       mc mb --ignore-existing local/autodoc;
       exit 0;'
 
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports:
+      - "${MAILPIT_SMTP_PORT:-51025}:1025"
+      - "${MAILPIT_UI_PORT:-58025}:8025"
+
   ollama:
     image: ollama/ollama:0.5.7
     profiles: ["llm"]
