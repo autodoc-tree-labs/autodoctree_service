@@ -17,7 +17,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.jdbc.core.JdbcTemplate
+import org.mybatis.spring.SqlSessionTemplate
 import org.springframework.test.context.ActiveProfiles
 import java.time.LocalDateTime
 
@@ -53,7 +53,7 @@ class EmbeddingTargetsIntegrationTest {
     private lateinit var objectMapper: ObjectMapper
 
     @Autowired
-    private lateinit var jdbcTemplate: JdbcTemplate
+    private lateinit var sqlSession: SqlSessionTemplate
 
     private lateinit var ownerId: String
     private lateinit var workspaceId: String
@@ -214,17 +214,15 @@ class EmbeddingTargetsIntegrationTest {
         }
 
         pipelineStatusRepository.updateStage(workspaceId, doc.id, Stage.EMBED, StageStatus.FAILED, "stale running")
-        jdbcTemplate.update(
-            """
-            UPDATE stage_execution
-            SET status = ?, updated_at = ?
-            WHERE workspace_id = ? AND document_id = ? AND stage = ?
-            """.trimIndent(),
-            StageStatus.RUNNING.name,
-            LocalDateTime.now().minusHours(2),
-            workspaceId,
-            doc.id,
-            Stage.EMBED.name
+        sqlSession.update(
+            "com.autodoctree.api.db.RepositorySql.stageExecutionUpdateStatusForTest",
+            mapOf(
+                "status" to StageStatus.RUNNING.name,
+                "updatedAt" to LocalDateTime.now().minusHours(2),
+                "workspaceId" to workspaceId,
+                "documentId" to doc.id,
+                "stage" to Stage.EMBED.name
+            )
         )
 
         outboxRepository.insert(

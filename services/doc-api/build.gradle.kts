@@ -16,6 +16,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-mail")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
+    implementation("org.mybatis.spring.boot:mybatis-spring-boot-starter:3.0.4")
     implementation("io.micrometer:micrometer-registry-prometheus")
 
     implementation("org.flywaydb:flyway-core")

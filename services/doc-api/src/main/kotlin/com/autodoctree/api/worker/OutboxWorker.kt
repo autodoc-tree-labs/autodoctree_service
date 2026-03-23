@@ -121,21 +121,25 @@ class OutboxWorker(
                     payloadJson = event.payloadJson
                 )
                 logger.warn(
-                    "worker_event_dlq workspace_id={} event_id={} type={} retries={}",
+                    "worker_event_dlq workspace_id={} event_id={} type={} retries={} error_type={} message={}",
                     event.workspaceId,
                     event.id,
                     event.eventType,
-                    retries
+                    retries,
+                    ex.javaClass.simpleName,
+                    ex.message?.take(240)
                 )
             } else {
                 val seconds = (2.0.pow(retries.toDouble()) * 2).toLong()
                 outboxRepository.markRetry(event.id, retries, LocalDateTime.now().plusSeconds(seconds))
                 logger.warn(
-                    "worker_event_retry workspace_id={} event_id={} type={} retry_count={}",
+                    "worker_event_retry workspace_id={} event_id={} type={} retry_count={} error_type={} message={}",
                     event.workspaceId,
                     event.id,
                     event.eventType,
-                    retries
+                    retries,
+                    ex.javaClass.simpleName,
+                    ex.message?.take(240)
                 )
             }
         }

@@ -1,0 +1,1396 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+  PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+  "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.autodoctree.api.db.RepositorySql">
+  <insert id="userInsert">
+    INSERT INTO users(id, email, password_hash, created_at)
+    VALUES (#{id}, #{email}, #{passwordHash}, #{createdAt})
+  </insert>
+
+  <select id="userFindByEmail" resultType="map">
+    SELECT * FROM users WHERE email = #{email}
+  </select>
+
+  <select id="userFindById" resultType="map">
+    SELECT * FROM users WHERE id = #{id}
+  </select>
+
+  <insert id="refreshTokenInsert">
+    INSERT INTO refresh_tokens(id, user_id, token_hash, expires_at, revoked_at, created_at)
+    VALUES (#{id}, #{userId}, #{tokenHash}, #{expiresAt}, NULL, #{createdAt})
+  </insert>
+
+  <select id="refreshTokenFindActiveByHash" resultType="map">
+    SELECT id, user_id, expires_at, revoked_at
+    FROM refresh_tokens
+    WHERE token_hash = #{tokenHash}
+      AND revoked_at IS NULL
+      AND expires_at &gt; #{now}
+  </select>
+
+  <update id="refreshTokenRevokeByHash">
+    UPDATE refresh_tokens
+    SET revoked_at = #{revokedAt}
+    WHERE token_hash = #{tokenHash}
+      AND revoked_at IS NULL
+  </update>
+
+  <insert id="workspaceInsert">
+    INSERT INTO workspaces(id, name, created_by, created_at)
+    VALUES (#{id}, #{name}, #{createdBy}, #{createdAt})
+  </insert>
+
+  <select id="workspaceListByUser" resultType="map">
+    SELECT w.*
+    FROM workspaces w
+    JOIN memberships m ON m.workspace_id = w.id
+    WHERE m.user_id = #{userId}
+    ORDER BY w.created_at
+  </select>
+
+  <select id="workspaceFindByWorkspaceAndUser" resultType="map">
+    SELECT w.*
+    FROM workspaces w
+    JOIN memberships m ON m.workspace_id = w.id
+    WHERE w.id = #{workspaceId}
+      AND m.user_id = #{userId}
+  </select>
+
+  <insert id="membershipInsert">
+    INSERT INTO memberships(workspace_id, user_id, role, created_at)
+    VALUES (#{workspaceId}, #{userId}, #{role}, #{createdAt})
+  </insert>
+
+  <update id="membershipUpdateRole">
+    UPDATE memberships
+    SET role = #{role}
+    WHERE workspace_id = #{workspaceId}
+      AND user_id = #{userId}
+  </update>
+
+  <delete id="membershipDelete">
+    DELETE FROM memberships
+    WHERE workspace_id = #{workspaceId}
+      AND user_id = #{userId}
+  </delete>
+
+  <select id="membershipFindRoleByWorkspaceAndUser" resultType="string">
+    SELECT role
+    FROM memberships
+    WHERE workspace_id = #{workspaceId}
+      AND user_id = #{userId}
+  </select>
+
+  <select id="membershipListMembers" resultType="map">
+    SELECT m.workspace_id, m.user_id, m.role, m.created_at, u.email
+    FROM memberships m
+    JOIN users u ON u.id = m.user_id
+    WHERE m.workspace_id = #{workspaceId}
+    ORDER BY m.created_at
+  </select>
+
+  <insert id="documentInsert">
+    INSERT INTO documents(
+      id, workspace_id, title, body_markdown, body_text, blocks_json, parent_document_id, source_type,
+      status, version, deleted, created_by, updated_by, created_at, updated_at
+    )
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{title},
+      #{bodyMarkdown, jdbcType=VARCHAR},
+      #{bodyText, jdbcType=VARCHAR},
+      CAST(#{blocksJson, jdbcType=VARCHAR} AS JSON),
+      #{parentDocumentId, jdbcType=VARCHAR},
+      #{sourceType},
+      #{status},
+      0,
+      false,
+      #{createdBy},
+      #{updatedBy},
+      #{createdAt},
+      #{updatedAt}
+    )
+  </insert>
+
+  <select id="documentFindByWorkspaceAndId" resultType="map">
+    SELECT * FROM documents
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{documentId}
+      AND deleted = false
+  </select>
+
+  <select id="documentFindDeletedByWorkspaceAndId" resultType="map">
+    SELECT * FROM documents
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{documentId}
+      AND deleted = true
+  </select>
+
+  <select id="documentListByWorkspace" resultType="map">
+    SELECT * FROM documents
+    WHERE workspace_id = #{workspaceId}
+      AND deleted = false
+    <if test="status != null and status != ''">
+      AND status = #{status}
+    </if>
+    <if test="queryPattern != null and queryPattern != ''">
+      AND (LOWER(title) LIKE #{queryPattern} OR LOWER(COALESCE(body_text, '')) LIKE #{queryPattern})
+    </if>
+    ORDER BY updated_at DESC
+    LIMIT #{limit} OFFSET #{offset}
+  </select>
+
+  <select id="documentCountByWorkspace" resultType="long">
+    SELECT COUNT(*) FROM documents
+    WHERE workspace_id = #{workspaceId}
+      AND deleted = false
+    <if test="status != null and status != ''">
+      AND status = #{status}
+    </if>
+    <if test="queryPattern != null and queryPattern != ''">
+      AND (LOWER(title) LIKE #{queryPattern} OR LOWER(COALESCE(body_text, '')) LIKE #{queryPattern})
+    </if>
+  </select>
+
+  <update id="documentUpdate">
+    UPDATE documents
+    SET title = #{title},
+        body_markdown = #{bodyMarkdown, jdbcType=VARCHAR},
+        body_text = #{bodyText, jdbcType=VARCHAR},
+        blocks_json = CAST(#{blocksJson, jdbcType=VARCHAR} AS JSON),
+        version = version + 1,
+        updated_at = #{updatedAt},
+        updated_by = #{updatedBy}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{documentId}
+      AND version = #{expectedVersion}
+      AND deleted = false
+  </update>
+
+  <update id="documentSoftDeleteDocuments">
+    UPDATE documents
+    SET deleted = true,
+        status = #{status},
+        parent_document_id = NULL,
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND id IN
+      <foreach collection="documentIds" item="documentId" open="(" separator="," close=")">
+        #{documentId}
+      </foreach>
+      AND deleted = false
+  </update>
+
+  <update id="documentUpdateBodyText">
+    UPDATE documents
+    SET body_text = #{bodyText},
+        status = #{status},
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{documentId}
+  </update>
+
+  <update id="documentUpdateStatus">
+    UPDATE documents
+    SET status = #{status},
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{documentId}
+  </update>
+
+  <update id="documentUpdateTemplateSignals">
+    UPDATE documents
+    SET template_score = #{templateScore},
+        template_boilerplate_ratio = #{templateBoilerplateRatio},
+        template_ngram_repeat_ratio = #{templateNgramRepeatRatio},
+        template_detected_at = #{templateDetectedAt, jdbcType=TIMESTAMP}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{documentId}
+      AND deleted = false
+  </update>
+
+  <select id="documentSearchByWorkspace" resultType="map">
+    SELECT *
+    FROM documents
+    WHERE workspace_id = #{workspaceId}
+      AND deleted = false
+      AND (LOWER(title) LIKE #{queryPattern} OR LOWER(COALESCE(body_text, '')) LIKE #{queryPattern})
+    ORDER BY updated_at DESC
+    LIMIT #{limit} OFFSET #{offset}
+  </select>
+
+  <select id="documentListWorkspaceDocuments" resultType="map">
+    SELECT *
+    FROM documents
+    WHERE workspace_id = #{workspaceId}
+      AND deleted = false
+    ORDER BY updated_at DESC
+  </select>
+
+  <select id="documentListDeletedByWorkspace" resultType="map">
+    SELECT * FROM documents
+    WHERE workspace_id = #{workspaceId}
+      AND deleted = true
+    <if test="queryPattern != null and queryPattern != ''">
+      AND (LOWER(title) LIKE #{queryPattern} OR LOWER(COALESCE(body_text, '')) LIKE #{queryPattern})
+    </if>
+    ORDER BY updated_at DESC
+    LIMIT #{limit} OFFSET #{offset}
+  </select>
+
+  <select id="documentCountDeletedByWorkspace" resultType="long">
+    SELECT COUNT(*) FROM documents
+    WHERE workspace_id = #{workspaceId}
+      AND deleted = true
+    <if test="queryPattern != null and queryPattern != ''">
+      AND (LOWER(title) LIKE #{queryPattern} OR LOWER(COALESCE(body_text, '')) LIKE #{queryPattern})
+    </if>
+  </select>
+
+  <update id="documentRestore">
+    UPDATE documents
+    SET deleted = false,
+        status = #{status},
+        parent_document_id = NULL,
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{documentId}
+      AND deleted = true
+  </update>
+
+  <update id="documentMoveParent">
+    UPDATE documents
+    SET parent_document_id = #{parentDocumentId, jdbcType=VARCHAR},
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{documentId}
+      AND deleted = false
+  </update>
+
+  <select id="documentFavoriteListByWorkspaceAndUser" resultType="map">
+    SELECT f.workspace_id, f.user_id, f.document_id, f.created_at
+    FROM document_favorite f
+    JOIN documents d ON d.id = f.document_id
+    WHERE f.workspace_id = #{workspaceId}
+      AND f.user_id = #{userId}
+      AND d.workspace_id = f.workspace_id
+      AND d.deleted = false
+    ORDER BY f.created_at DESC
+  </select>
+
+  <insert id="documentFavoriteInsert">
+    INSERT INTO document_favorite(workspace_id, user_id, document_id, created_at)
+    VALUES (#{workspaceId}, #{userId}, #{documentId}, #{createdAt})
+  </insert>
+
+  <delete id="documentFavoriteRemove">
+    DELETE FROM document_favorite
+    WHERE workspace_id = #{workspaceId}
+      AND user_id = #{userId}
+      AND document_id = #{documentId}
+  </delete>
+
+  <delete id="documentFavoriteRemoveByDocument">
+    DELETE FROM document_favorite
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+  </delete>
+
+  <delete id="documentFavoriteRemoveByDocuments">
+    DELETE FROM document_favorite
+    WHERE workspace_id = #{workspaceId}
+      AND document_id IN
+      <foreach collection="documentIds" item="documentId" open="(" separator="," close=")">
+        #{documentId}
+      </foreach>
+  </delete>
+
+  <select id="documentPersonalTopListByWorkspaceAndUser" resultType="map">
+    SELECT workspace_id, user_id, document_id, ord, created_at, updated_at
+    FROM document_personal_top
+    WHERE workspace_id = #{workspaceId}
+      AND user_id = #{userId}
+    ORDER BY ord ASC, updated_at DESC
+  </select>
+
+  <delete id="documentPersonalTopDeleteByWorkspaceAndUser">
+    DELETE FROM document_personal_top
+    WHERE workspace_id = #{workspaceId}
+      AND user_id = #{userId}
+  </delete>
+
+  <insert id="documentPersonalTopInsertBatch">
+    INSERT INTO document_personal_top(workspace_id, user_id, document_id, ord, created_at, updated_at)
+    VALUES
+    <foreach collection="records" item="row" separator=",">
+      (
+        #{row.workspaceId},
+        #{row.userId},
+        #{row.documentId},
+        #{row.ord},
+        #{row.createdAt},
+        #{row.updatedAt}
+      )
+    </foreach>
+  </insert>
+
+  <delete id="documentPersonalTopRemoveByDocuments">
+    DELETE FROM document_personal_top
+    WHERE workspace_id = #{workspaceId}
+      AND document_id IN
+      <foreach collection="documentIds" item="documentId" open="(" separator="," close=")">
+        #{documentId}
+      </foreach>
+  </delete>
+
+  <insert id="pipelineStatusInsert">
+    INSERT INTO pipeline_status(
+      workspace_id, document_id, ingest_status, embed_status, index_status, tree_status, failure_reason, updated_at
+    )
+    VALUES (
+      #{workspaceId},
+      #{documentId},
+      #{ingestStatus},
+      #{embedStatus},
+      #{indexStatus},
+      #{treeStatus},
+      NULL,
+      #{updatedAt}
+    )
+  </insert>
+
+  <select id="pipelineStatusFindByWorkspaceAndDocument" resultType="map">
+    SELECT * FROM pipeline_status
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+  </select>
+
+  <update id="pipelineStatusUpdateStage">
+    UPDATE pipeline_status
+    <set>
+      <choose>
+        <when test="stage == 'INGEST'">ingest_status = #{status},</when>
+        <when test="stage == 'EMBED'">embed_status = #{status},</when>
+        <when test="stage == 'INDEX'">index_status = #{status},</when>
+        <otherwise>tree_status = #{status},</otherwise>
+      </choose>
+      failure_reason = #{failureReason, jdbcType=VARCHAR},
+      updated_at = #{updatedAt}
+    </set>
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+  </update>
+
+  <update id="pipelineStatusMarkRetryPendingFromStage">
+    UPDATE pipeline_status
+    <set>
+      <choose>
+        <when test="stage == 'INGEST'">
+          ingest_status = #{pendingStatus},
+          embed_status = #{pendingStatus},
+          index_status = #{pendingStatus},
+          tree_status = #{pendingStatus},
+        </when>
+        <when test="stage == 'EMBED'">
+          embed_status = #{pendingStatus},
+          index_status = #{pendingStatus},
+          tree_status = #{pendingStatus},
+        </when>
+        <when test="stage == 'INDEX'">
+          index_status = #{pendingStatus},
+          tree_status = #{pendingStatus},
+        </when>
+        <otherwise>
+          tree_status = #{pendingStatus},
+        </otherwise>
+      </choose>
+      failure_reason = NULL,
+      updated_at = #{updatedAt}
+    </set>
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+  </update>
+
+  <insert id="attachmentInsert">
+    INSERT INTO attachments(
+      id, workspace_id, document_id, filename, content_type, size,
+      object_key, checksum_sha256, status, created_at, completed_at
+    )
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{documentId},
+      #{filename},
+      #{contentType},
+      #{size},
+      #{objectKey},
+      #{checksumSha256, jdbcType=VARCHAR},
+      #{status},
+      #{createdAt},
+      NULL
+    )
+  </insert>
+
+  <select id="attachmentFindByWorkspaceAndId" resultType="map">
+    SELECT * FROM attachments
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{attachmentId}
+  </select>
+
+  <update id="attachmentUpdateCompleted">
+    UPDATE attachments
+    SET status = #{status},
+        completed_at = #{completedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{attachmentId}
+  </update>
+
+  <select id="attachmentListByWorkspaceAndDocument" resultType="map">
+    SELECT * FROM attachments
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+    ORDER BY created_at
+  </select>
+
+  <select id="attachmentListByWorkspace" resultType="map">
+    SELECT * FROM attachments
+    WHERE workspace_id = #{workspaceId}
+    ORDER BY created_at
+  </select>
+
+  <delete id="documentSectionDeleteByWorkspaceAndDocument">
+    DELETE FROM document_sections
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+  </delete>
+
+  <insert id="documentSectionInsertBatch">
+    INSERT INTO document_sections(
+      id, workspace_id, document_id, ord, heading, chunk_text, quality_flags, created_at
+    )
+    VALUES
+    <foreach collection="sections" item="section" separator=",">
+      (
+        #{section.id},
+        #{section.workspaceId},
+        #{section.documentId},
+        #{section.ord},
+        #{section.heading, jdbcType=VARCHAR},
+        #{section.chunkText},
+        #{section.qualityFlags, jdbcType=VARCHAR},
+        #{section.createdAt}
+      )
+    </foreach>
+  </insert>
+
+  <select id="documentSectionListByWorkspaceAndDocument" resultType="map">
+    SELECT * FROM document_sections
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+    ORDER BY ord
+  </select>
+
+  <insert id="embeddingInsert">
+    INSERT INTO embeddings(
+      id, workspace_id, document_id, target_type, target_id, input_hash, vector_json, model_version, created_at
+    )
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{documentId},
+      #{targetType},
+      #{targetId},
+      #{inputHash},
+      #{vectorJson},
+      #{modelVersion},
+      #{createdAt}
+    )
+  </insert>
+
+  <update id="embeddingUpdateByInputHash">
+    UPDATE embeddings
+    SET vector_json = #{vectorJson},
+        created_at = #{createdAt}
+    WHERE workspace_id = #{workspaceId}
+      AND target_type = #{targetType}
+      AND target_id = #{targetId}
+      AND model_version = #{modelVersion}
+      AND input_hash = #{inputHash}
+  </update>
+
+  <select id="embeddingFindByInputHash" resultType="map">
+    SELECT *
+    FROM embeddings
+    WHERE workspace_id = #{workspaceId}
+      AND target_type = #{targetType}
+      AND target_id = #{targetId}
+      AND model_version = #{modelVersion}
+      AND input_hash = #{inputHash}
+    ORDER BY created_at DESC
+    LIMIT 1
+  </select>
+
+  <select id="embeddingFindDocEmbedding" resultType="map">
+    SELECT *
+    FROM embeddings
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+      AND target_type = 'DOCUMENT'
+      AND model_version = #{modelVersion}
+    ORDER BY created_at DESC
+    LIMIT 1
+  </select>
+
+  <select id="embeddingListDocEmbeddings" resultType="map">
+    SELECT *
+    FROM embeddings
+    WHERE workspace_id = #{workspaceId}
+      AND target_type = 'DOCUMENT'
+      AND model_version = #{modelVersion}
+    ORDER BY created_at DESC
+  </select>
+
+  <select id="embeddingListByWorkspaceAndModel" resultType="map">
+    SELECT id, workspace_id, document_id, target_type, target_id, input_hash, vector_json, model_version, created_at
+    FROM (
+      SELECT *,
+             ROW_NUMBER() OVER (
+               PARTITION BY workspace_id, document_id, target_type, target_id, model_version
+               ORDER BY created_at DESC
+             ) AS rn
+      FROM embeddings
+      WHERE workspace_id = #{workspaceId}
+        AND model_version = #{modelVersion}
+    ) latest
+    WHERE latest.rn = 1
+    ORDER BY document_id, target_type
+  </select>
+
+  <select id="embeddingListByWorkspaceAndDocumentAndModel" resultType="map">
+    SELECT id, workspace_id, document_id, target_type, target_id, input_hash, vector_json, model_version, created_at
+    FROM (
+      SELECT *,
+             ROW_NUMBER() OVER (
+               PARTITION BY workspace_id, document_id, target_type, target_id, model_version
+               ORDER BY created_at DESC
+             ) AS rn
+      FROM embeddings
+      WHERE workspace_id = #{workspaceId}
+        AND document_id = #{documentId}
+        AND model_version = #{modelVersion}
+    ) latest
+    WHERE latest.rn = 1
+    ORDER BY target_type, target_id
+  </select>
+
+  <insert id="outboxInsert">
+    INSERT INTO outbox_event(
+      id, workspace_id, document_id, event_type, payload_json, status,
+      retry_count, available_at, created_at, updated_at
+    )
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{documentId, jdbcType=VARCHAR},
+      #{eventType},
+      #{payloadJson},
+      #{status},
+      0,
+      #{availableAt},
+      #{createdAt},
+      #{updatedAt}
+    )
+  </insert>
+
+  <select id="outboxFetchBatch" resultType="map">
+    SELECT * FROM outbox_event
+    WHERE status IN ('PENDING', 'RETRY')
+      AND available_at &lt;= #{now}
+    ORDER BY created_at ASC
+    LIMIT #{limit}
+  </select>
+
+  <update id="outboxMarkProcessing">
+    UPDATE outbox_event
+    SET status = #{status},
+        updated_at = #{updatedAt}
+    WHERE id = #{eventId}
+  </update>
+
+  <update id="outboxMarkDone">
+    UPDATE outbox_event
+    SET status = #{status},
+        updated_at = #{updatedAt}
+    WHERE id = #{eventId}
+  </update>
+
+  <update id="outboxMarkRetry">
+    UPDATE outbox_event
+    SET status = #{status},
+        retry_count = #{retryCount},
+        available_at = #{availableAt},
+        updated_at = #{updatedAt}
+    WHERE id = #{eventId}
+  </update>
+
+  <update id="outboxMarkDlq">
+    UPDATE outbox_event
+    SET status = #{status},
+        updated_at = #{updatedAt}
+    WHERE id = #{eventId}
+  </update>
+
+  <select id="outboxListByWorkspace" resultType="map">
+    SELECT * FROM outbox_event
+    WHERE workspace_id = #{workspaceId}
+    <if test="documentId != null and documentId != ''">
+      AND document_id = #{documentId}
+    </if>
+    ORDER BY created_at DESC
+    LIMIT 200
+  </select>
+
+  <insert id="dlqInsert">
+    INSERT INTO dlq_event(id, outbox_event_id, workspace_id, reason, payload_json, created_at)
+    VALUES (#{id}, #{outboxEventId}, #{workspaceId}, #{reason}, #{payloadJson}, #{createdAt})
+  </insert>
+
+  <insert id="stageExecutionTryInsert">
+    INSERT INTO stage_execution(
+      id, workspace_id, document_id, stage, input_hash, model_version,
+      status, message, retries, created_at, updated_at
+    )
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{documentId},
+      #{stage},
+      #{inputHash},
+      #{modelVersion},
+      #{status},
+      NULL,
+      0,
+      #{createdAt},
+      #{updatedAt}
+    )
+  </insert>
+
+  <update id="stageExecutionReopenAllowDone">
+    UPDATE stage_execution
+    SET status = #{runningStatus},
+        message = NULL,
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+      AND stage = #{stage}
+      AND input_hash = #{inputHash}
+      AND model_version = #{modelVersion}
+      AND (
+        status IN (#{failedStatus}, #{doneStatus})
+        OR (status = #{runningStatus} AND updated_at &lt; #{staleRunningCutoff})
+      )
+  </update>
+
+  <update id="stageExecutionReopenFailedOnly">
+    UPDATE stage_execution
+    SET status = #{runningStatus},
+        message = NULL,
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+      AND stage = #{stage}
+      AND input_hash = #{inputHash}
+      AND model_version = #{modelVersion}
+      AND (
+        status = #{failedStatus}
+        OR (status = #{runningStatus} AND updated_at &lt; #{staleRunningCutoff})
+      )
+  </update>
+
+  <select id="stageExecutionFindByKey" resultType="map">
+    SELECT * FROM stage_execution
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+      AND stage = #{stage}
+      AND input_hash = #{inputHash}
+      AND model_version = #{modelVersion}
+    LIMIT 1
+  </select>
+
+  <update id="stageExecutionMarkDone">
+    UPDATE stage_execution
+    SET status = #{status},
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+      AND stage = #{stage}
+      AND input_hash = #{inputHash}
+      AND model_version = #{modelVersion}
+  </update>
+
+  <update id="stageExecutionMarkFailed">
+    UPDATE stage_execution
+    SET status = #{status},
+        message = #{message},
+        retries = retries + 1,
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+      AND stage = #{stage}
+      AND input_hash = #{inputHash}
+      AND model_version = #{modelVersion}
+  </update>
+
+  <select id="stageExecutionListByWorkspace" resultType="map">
+    SELECT * FROM stage_execution
+    WHERE workspace_id = #{workspaceId}
+    <if test="documentId != null and documentId != ''">
+      AND document_id = #{documentId}
+    </if>
+    ORDER BY created_at DESC
+    LIMIT 200
+  </select>
+
+  <update id="stageExecutionUpdateStatusForTest">
+    UPDATE stage_execution
+    SET status = #{status},
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+      AND stage = #{stage}
+  </update>
+
+  <insert id="treeSnapshotInsert">
+    INSERT INTO tree_snapshot(
+      id, workspace_id, view_type, status, moved_ratio, churn_count, node_rename_count, label_cache_json, created_at, activated_at, activated_by
+    )
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{viewType},
+      #{status},
+      #{movedRatio},
+      #{churnCount},
+      #{nodeRenameCount},
+      #{labelCacheJson},
+      #{createdAt},
+      NULL,
+      NULL
+    )
+  </insert>
+
+  <select id="treeFindActiveSnapshot" resultType="map">
+    SELECT *
+    FROM tree_snapshot
+    WHERE workspace_id = #{workspaceId}
+      AND view_type = #{viewType}
+      AND status = 'ACTIVE'
+    ORDER BY created_at DESC
+    LIMIT 1
+  </select>
+
+  <select id="treeListLockedNodesInSnapshot" resultType="map">
+    SELECT *
+    FROM tree_node
+    WHERE workspace_id = #{workspaceId}
+      AND snapshot_id = #{snapshotId}
+      AND view_type = #{viewType}
+      AND locked = true
+  </select>
+
+  <select id="treeFindSnapshotByWorkspace" resultType="map">
+    SELECT * FROM tree_snapshot
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{snapshotId}
+  </select>
+
+  <select id="treeListSnapshots" resultType="map">
+    SELECT * FROM tree_snapshot
+    WHERE workspace_id = #{workspaceId}
+      AND view_type = #{viewType}
+    ORDER BY created_at DESC
+    LIMIT 30
+  </select>
+
+  <update id="treeMarkActiveSnapshotsRecommended">
+    UPDATE tree_snapshot
+    SET status = 'RECOMMENDED'
+    WHERE workspace_id = #{workspaceId}
+      AND view_type = #{viewType}
+      AND status = 'ACTIVE'
+  </update>
+
+  <update id="treeActivateSnapshot">
+    UPDATE tree_snapshot
+    SET status = 'ACTIVE',
+        activated_at = #{activatedAt},
+        activated_by = #{activatedBy}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{snapshotId}
+      AND view_type = #{viewType}
+  </update>
+
+  <insert id="treeNodeInsert">
+    INSERT INTO tree_node(id, workspace_id, snapshot_id, view_type, parent_id, label, depth, locked, created_at)
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{snapshotId},
+      #{viewType},
+      #{parentId, jdbcType=VARCHAR},
+      #{label},
+      #{depth},
+      #{locked},
+      #{createdAt}
+    )
+  </insert>
+
+  <select id="treeListNodes" resultType="map">
+    SELECT * FROM tree_node
+    WHERE workspace_id = #{workspaceId}
+      AND snapshot_id = #{snapshotId}
+      AND view_type = #{viewType}
+    ORDER BY depth, label
+  </select>
+
+  <select id="treeFindNodeByWorkspace" resultType="map">
+    SELECT * FROM tree_node
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{nodeId}
+  </select>
+
+  <update id="treeUpdateNodeLock">
+    UPDATE tree_node
+    SET locked = #{locked}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{nodeId}
+  </update>
+
+  <update id="treeRenameNode">
+    UPDATE tree_node
+    SET label = #{label}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{nodeId}
+  </update>
+
+  <insert id="treeMembershipInsert">
+    INSERT INTO tree_membership(id, workspace_id, snapshot_id, view_type, node_id, document_id, rationale_json, created_at)
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{snapshotId},
+      #{viewType},
+      #{nodeId},
+      #{documentId},
+      #{rationaleJson},
+      #{createdAt}
+    )
+  </insert>
+
+  <select id="treeListMemberships" resultType="map">
+    SELECT * FROM tree_membership
+    WHERE workspace_id = #{workspaceId}
+      AND snapshot_id = #{snapshotId}
+      AND view_type = #{viewType}
+  </select>
+
+  <select id="treeFindMembershipByDocInSnapshot" resultType="map">
+    SELECT * FROM tree_membership
+    WHERE workspace_id = #{workspaceId}
+      AND snapshot_id = #{snapshotId}
+      AND document_id = #{documentId}
+      AND view_type = #{viewType}
+  </select>
+
+  <update id="treeMoveDocumentInSnapshot">
+    UPDATE tree_membership
+    SET node_id = #{toNodeId}
+    WHERE workspace_id = #{workspaceId}
+      AND snapshot_id = #{snapshotId}
+      AND document_id = #{documentId}
+      AND view_type = #{viewType}
+  </update>
+
+  <select id="conceptPrototypeListByWorkspaceAndSnapshot" resultType="map">
+    SELECT *
+    FROM concept_prototype
+    WHERE workspace_id = #{workspaceId}
+      AND snapshot_id = #{snapshotId}
+    ORDER BY doc_count DESC, label
+  </select>
+
+  <select id="conceptPrototypeListByWorkspaceAndActiveSnapshot" resultType="map">
+    SELECT cp.*
+    FROM concept_prototype cp
+    JOIN tree_snapshot ts ON ts.id = cp.snapshot_id AND ts.workspace_id = cp.workspace_id
+    WHERE cp.workspace_id = #{workspaceId}
+      AND ts.status = 'ACTIVE'
+      AND ts.view_type = #{viewType}
+    ORDER BY cp.doc_count DESC, cp.label
+  </select>
+
+  <delete id="conceptPrototypeDeleteByWorkspaceAndSnapshot">
+    DELETE FROM concept_prototype
+    WHERE workspace_id = #{workspaceId}
+      AND snapshot_id = #{snapshotId}
+  </delete>
+
+  <insert id="conceptPrototypeInsertBatch">
+    INSERT INTO concept_prototype(
+      id, workspace_id, snapshot_id, concept_key, label, prototype_vector_json,
+      exemplar_doc_ids_json, doc_count, drift_score, created_at, updated_at
+    )
+    VALUES
+    <foreach collection="concepts" item="concept" separator=",">
+      (
+        #{concept.id},
+        #{concept.workspaceId},
+        #{concept.snapshotId},
+        #{concept.conceptKey},
+        #{concept.label},
+        #{concept.prototypeVectorJson},
+        #{concept.exemplarDocIdsJson},
+        #{concept.docCount},
+        #{concept.driftScore},
+        #{concept.createdAt},
+        #{concept.updatedAt}
+      )
+    </foreach>
+  </insert>
+
+  <insert id="feedbackInsert">
+    INSERT INTO feedback_event(id, workspace_id, user_id, event_type, payload_json, created_at)
+    VALUES (#{id}, #{workspaceId}, #{userId}, #{eventType}, #{payloadJson}, #{createdAt})
+  </insert>
+
+  <select id="feedbackListByWorkspace" resultType="map">
+    SELECT * FROM feedback_event
+    WHERE workspace_id = #{workspaceId}
+    ORDER BY created_at DESC
+    LIMIT #{limit}
+  </select>
+
+  <select id="workspaceTreePolicyFindByWorkspace" resultType="map">
+    SELECT * FROM workspace_tree_policy
+    WHERE workspace_id = #{workspaceId}
+  </select>
+
+  <insert id="workspaceTreePolicyInsert">
+    INSERT INTO workspace_tree_policy(
+      workspace_id, auto_threshold, recommend_threshold, quarantine_enabled, reranker_enabled, updated_by, updated_at
+    )
+    VALUES (
+      #{workspaceId},
+      #{autoThreshold},
+      #{recommendThreshold},
+      #{quarantineEnabled},
+      #{rerankerEnabled},
+      #{updatedBy},
+      #{updatedAt}
+    )
+  </insert>
+
+  <update id="workspaceTreePolicyUpdate">
+    UPDATE workspace_tree_policy
+    SET auto_threshold = #{autoThreshold},
+        recommend_threshold = #{recommendThreshold},
+        quarantine_enabled = #{quarantineEnabled},
+        reranker_enabled = #{rerankerEnabled},
+        updated_by = #{updatedBy},
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+  </update>
+
+  <select id="workspaceQuestionControlFindByWorkspace" resultType="map">
+    SELECT * FROM workspace_question_control
+    WHERE workspace_id = #{workspaceId}
+  </select>
+
+  <insert id="workspaceQuestionControlInsert">
+    INSERT INTO workspace_question_control(workspace_id, enabled, updated_by, updated_at)
+    VALUES (#{workspaceId}, #{enabled}, #{updatedBy}, #{updatedAt})
+  </insert>
+
+  <update id="workspaceQuestionControlUpdate">
+    UPDATE workspace_question_control
+    SET enabled = #{enabled},
+        updated_by = #{updatedBy},
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+  </update>
+
+  <insert id="activeLearningQuestionInsert">
+    INSERT INTO active_learning_question(
+      id, workspace_id, snapshot_id, question_type, status, document_id, payload_json,
+      impact_score, answer_value, answered_by, answered_at, expires_at, created_at, updated_at
+    )
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{snapshotId, jdbcType=VARCHAR},
+      #{questionType},
+      #{status},
+      #{documentId},
+      #{payloadJson},
+      #{impactScore},
+      NULL,
+      NULL,
+      NULL,
+      #{expiresAt, jdbcType=TIMESTAMP},
+      #{createdAt},
+      #{updatedAt}
+    )
+  </insert>
+
+  <select id="activeLearningQuestionFindByWorkspaceAndId" resultType="map">
+    SELECT * FROM active_learning_question
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{questionId}
+  </select>
+
+  <select id="activeLearningQuestionListByWorkspace" resultType="map">
+    SELECT * FROM active_learning_question
+    WHERE workspace_id = #{workspaceId}
+    <if test="status != null and status != ''">
+      AND status = #{status}
+    </if>
+    ORDER BY impact_score DESC, created_at DESC
+    LIMIT #{limit}
+  </select>
+
+  <select id="activeLearningQuestionListOpenByWorkspace" resultType="map">
+    SELECT * FROM active_learning_question
+    WHERE workspace_id = #{workspaceId}
+      AND status = 'OPEN'
+    ORDER BY impact_score DESC, created_at DESC
+    LIMIT #{limit}
+  </select>
+
+  <select id="activeLearningQuestionCountByWorkspaceAndStatus" resultType="long">
+    SELECT COUNT(*)
+    FROM active_learning_question
+    WHERE workspace_id = #{workspaceId}
+      AND status = #{status}
+  </select>
+
+  <select id="activeLearningQuestionAverageImpactByWorkspaceAndStatus" resultType="double">
+    SELECT COALESCE(AVG(impact_score), 0)
+    FROM active_learning_question
+    WHERE workspace_id = #{workspaceId}
+      AND status = #{status}
+  </select>
+
+  <update id="activeLearningQuestionMarkAnswered">
+    UPDATE active_learning_question
+    SET status = 'ANSWERED',
+        answer_value = #{answerValue},
+        answered_by = #{answeredBy},
+        answered_at = #{answeredAt},
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{questionId}
+      AND status = 'OPEN'
+  </update>
+
+  <update id="activeLearningQuestionExpireStale">
+    UPDATE active_learning_question
+    SET status = 'EXPIRED',
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND status = 'OPEN'
+      AND expires_at IS NOT NULL
+      AND expires_at &lt; #{now}
+  </update>
+
+  <update id="activeLearningQuestionExpireAllOpen">
+    UPDATE active_learning_question
+    SET status = 'EXPIRED',
+        updated_at = #{updatedAt}
+    WHERE workspace_id = #{workspaceId}
+      AND status = 'OPEN'
+  </update>
+
+  <insert id="userRuleInsert">
+    INSERT INTO user_rule(
+      id, workspace_id, rule_type, rule_value, rule_effect, node_id, enabled, created_by, created_at
+    )
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{ruleType},
+      #{ruleValue},
+      #{ruleEffect},
+      #{nodeId},
+      #{enabled},
+      #{createdBy},
+      #{createdAt}
+    )
+  </insert>
+
+  <select id="userRuleListByWorkspace" resultType="map">
+    SELECT * FROM user_rule
+    WHERE workspace_id = #{workspaceId}
+      AND enabled = true
+    ORDER BY created_at DESC
+  </select>
+
+  <select id="userRuleFindByWorkspaceAndId" resultType="map">
+    SELECT * FROM user_rule
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{ruleId}
+  </select>
+
+  <update id="userRuleUpdate">
+    UPDATE user_rule
+    SET rule_type = #{ruleType},
+        rule_value = #{ruleValue},
+        rule_effect = #{ruleEffect},
+        node_id = #{nodeId}
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{ruleId}
+  </update>
+
+  <delete id="userRuleDelete">
+    DELETE FROM user_rule
+    WHERE workspace_id = #{workspaceId}
+      AND id = #{ruleId}
+  </delete>
+
+  <insert id="auditLogInsert">
+    INSERT INTO audit_log(id, workspace_id, actor_user_id, action, payload_json, created_at)
+    VALUES (#{id}, #{workspaceId}, #{actorUserId}, #{action}, #{payloadJson}, #{createdAt})
+  </insert>
+
+  <select id="auditLogListByWorkspace" resultType="map">
+    SELECT * FROM audit_log
+    WHERE workspace_id = #{workspaceId}
+    <if test="type != null and type != ''">
+      AND action = #{type}
+    </if>
+    <if test="actorUserId != null and actorUserId != ''">
+      AND actor_user_id = #{actorUserId}
+    </if>
+    <if test="queryPattern != null and queryPattern != ''">
+      AND (
+        LOWER(action) LIKE #{queryPattern}
+        OR LOWER(actor_user_id) LIKE #{queryPattern}
+        OR LOWER(payload_json) LIKE #{queryPattern}
+      )
+    </if>
+    <choose>
+      <when test="sortDirection == 'ASC'">
+        ORDER BY created_at ASC, id ASC
+      </when>
+      <otherwise>
+        ORDER BY created_at DESC, id DESC
+      </otherwise>
+    </choose>
+    LIMIT #{limit}
+  </select>
+
+  <insert id="paletteHistoryInsert">
+    INSERT INTO palette_history(id, workspace_id, user_id, event_type, query_text, document_id, command_key, created_at)
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{userId},
+      #{eventType},
+      #{queryText, jdbcType=VARCHAR},
+      #{documentId, jdbcType=VARCHAR},
+      #{commandKey, jdbcType=VARCHAR},
+      #{createdAt}
+    )
+  </insert>
+
+  <select id="paletteHistoryList" resultType="map">
+    SELECT *
+    FROM palette_history
+    WHERE workspace_id = #{workspaceId}
+      AND user_id = #{userId}
+    ORDER BY created_at DESC
+    LIMIT #{limit}
+  </select>
+
+  <insert id="documentAclInsert">
+    INSERT INTO document_acl(id, workspace_id, document_id, principal_user_id, permission, granted_by, created_at)
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{documentId},
+      #{principalUserId},
+      #{permission},
+      #{grantedBy},
+      #{createdAt}
+    )
+  </insert>
+
+  <update id="documentAclUpdate">
+    UPDATE document_acl
+    SET permission = #{permission},
+        granted_by = #{grantedBy}
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+      AND principal_user_id = #{principalUserId}
+  </update>
+
+  <select id="documentAclCountAccess" resultType="long">
+    SELECT COUNT(*)
+    FROM document_acl
+    WHERE workspace_id = #{workspaceId}
+      AND document_id = #{documentId}
+      AND principal_user_id = #{userId}
+  </select>
+
+  <insert id="workspaceInviteInsert">
+    INSERT INTO workspace_invites(id, workspace_id, email, role, token_hash, invited_by, expires_at, created_at)
+    VALUES (
+      #{id},
+      #{workspaceId},
+      #{email},
+      #{role},
+      #{tokenHash},
+      #{invitedBy},
+      #{expiresAt},
+      #{createdAt}
+    )
+  </insert>
+
+  <select id="workspaceInviteFindActiveByTokenHash" resultType="map">
+    SELECT *
+    FROM workspace_invites
+    WHERE token_hash = #{tokenHash}
+      AND accepted_at IS NULL
+      AND expires_at &gt; #{now}
+  </select>
+
+  <update id="workspaceInviteMarkAccepted">
+    UPDATE workspace_invites
+    SET accepted_at = #{acceptedAt},
+        accepted_by = #{userId}
+    WHERE id = #{id}
+  </update>
+
+  <delete id="registrationVerificationCodeDeleteActiveByEmail">
+    DELETE FROM registration_verification_codes
+    WHERE email = #{email}
+      AND consumed_at IS NULL
+  </delete>
+
+  <insert id="registrationVerificationCodeInsert">
+    INSERT INTO registration_verification_codes(
+      id, email, password_hash, code_hash, expires_at, attempt_count, consumed_at, created_at, updated_at
+    )
+    VALUES (
+      #{id},
+      #{email},
+      #{passwordHash},
+      #{codeHash},
+      #{expiresAt},
+      0,
+      NULL,
+      #{createdAt},
+      #{updatedAt}
+    )
+  </insert>
+
+  <select id="registrationVerificationCodeFindActiveByEmail" resultType="map">
+    SELECT *
+    FROM registration_verification_codes
+    WHERE email = #{email}
+      AND consumed_at IS NULL
+      AND expires_at &gt; #{now}
+    ORDER BY created_at DESC
+    LIMIT 1
+  </select>
+
+  <update id="registrationVerificationCodeIncrementAttempt">
+    UPDATE registration_verification_codes
+    SET attempt_count = attempt_count + 1,
+        updated_at = #{updatedAt}
+    WHERE id = #{id}
+  </update>
+
+  <update id="registrationVerificationCodeMarkConsumed">
+    UPDATE registration_verification_codes
+    SET consumed_at = #{consumedAt},
+        updated_at = #{updatedAt}
+    WHERE id = #{id}
+  </update>
+
+  <select id="searchDocumentSearch" resultType="map">
+    SELECT d.*
+    FROM documents d
+    WHERE d.workspace_id = #{workspaceId}
+      AND d.deleted = false
+      AND (
+        EXISTS (
+          SELECT 1
+          FROM memberships m
+          WHERE m.workspace_id = d.workspace_id
+            AND m.user_id = #{userId}
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM document_acl acl
+          WHERE acl.workspace_id = d.workspace_id
+            AND acl.document_id = d.id
+            AND acl.principal_user_id = #{userId}
+        )
+      )
+    <choose>
+      <when test="titleOnly">
+        AND LOWER(d.title) LIKE #{queryPattern}
+      </when>
+      <otherwise>
+        AND (LOWER(d.title) LIKE #{queryPattern} OR LOWER(COALESCE(d.body_text, '')) LIKE #{queryPattern})
+      </otherwise>
+    </choose>
+    <if test="createdBy != null and createdBy != ''">
+      AND d.created_by = #{createdBy}
+    </if>
+    <if test="updatedBy != null and updatedBy != ''">
+      AND d.updated_by = #{updatedBy}
+    </if>
+    <if test="fromDate != null">
+      AND d.updated_at &gt;= #{fromDate}
+    </if>
+    <if test="toDate != null">
+      AND d.updated_at &lt;= #{toDate}
+    </if>
+    <if test="scopePageId != null and scopePageId != ''">
+      AND d.id IN (
+        WITH RECURSIVE subtree AS (
+          SELECT id
+          FROM documents
+          WHERE workspace_id = #{workspaceId}
+            AND id = #{scopePageId}
+            AND deleted = false
+          UNION ALL
+          SELECT child.id
+          FROM documents child
+          JOIN subtree s ON child.parent_document_id = s.id
+          WHERE child.workspace_id = #{workspaceId}
+            AND child.deleted = false
+        )
+        SELECT id FROM subtree
+      )
+    </if>
+    <choose>
+      <when test="sortMode == 'UPDATED_AT_ASC'">
+        ORDER BY d.updated_at ASC, d.id ASC
+      </when>
+      <when test="sortMode == 'CREATED_AT_ASC'">
+        ORDER BY d.created_at ASC, d.id ASC
+      </when>
+      <when test="sortMode == 'CREATED_AT_DESC'">
+        ORDER BY d.created_at DESC, d.id DESC
+      </when>
+      <otherwise>
+        ORDER BY d.updated_at DESC, d.id DESC
+      </otherwise>
+    </choose>
+    LIMIT #{limit} OFFSET #{offset}
+  </select>
+</mapper>
