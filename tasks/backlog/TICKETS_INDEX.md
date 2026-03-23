@@ -40,6 +40,7 @@
 | B-1403 | Library hierarchy API and personal top pages storage | `tasks/backlog/B-1403 - Library hierarchy API and personal top pages storage.md` |
 | B-1404 | Auth register endpoint and account-aware session contracts | `tasks/backlog/B-1404 - Auth register endpoint and account-aware session contracts.md` |
 | B-1405 | Email verification signup and invite token email binding | `tasks/backlog/B-1405 - Email verification signup and invite token email binding.md` |
+| B-1413 | Replace jdbcTemplate repositories with MyBatis persistence | `tasks/backlog/B-1413 - Replace jdbcTemplate repositories with MyBatis persistence.md` |
 | I-0101 | Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards | `tasks/backlog/I-0101 — Observability Stack for Local Dev (OTelPrometheusGrafana) — Tree Dashboards.md` |
 | I-0201 | Ollama Embedding Setup (bge-m3) — Offline Bootstrap & Healthchecks | `tasks/backlog/I-0201 — Ollama Embedding Setup (bge-m3) — Offline Bootstrap  Healthchecks.md` |
 | I-0301 | OpenSearch Korean Analyzer (nori) for Search Index + Field Mapping | `tasks/backlog/I-0301 — OpenSearch Korean Analyzer (nori) for Search Index  Field Mapping.md` |

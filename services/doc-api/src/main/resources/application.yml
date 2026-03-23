@@ -32,6 +32,9 @@ spring:
           starttls:
             enable: ${SMTP_STARTTLS_ENABLE:false}
 
+mybatis:
+  mapper-locations: classpath*:mapper/*.xml
+
 management:
   endpoints:
     web:
