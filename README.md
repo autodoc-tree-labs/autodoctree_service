@@ -8,6 +8,13 @@
 - `web-admin/` : 운영/관리자 웹 (Vite + React + TS)
 - `tasks/backlog/` : 티켓 기반 개발(프론트/백엔드/인프라 포함)
 
+## Technical Docs
+- `docs/TECHNICAL_HANDBOOK.md` : 현재 코드 기준 통합 기술 가이드
+- `docs/DEV_SETUP.md` : 로컬 실행/시드/스모크 절차
+- `ARCHITECTURE.md` : 상위 아키텍처 요약
+- `API_SURFACE.md` : REST API 초안/계약 문서
+- `docs/RUNBOOK.md` : 운영/복구 런북
+
 ## Goals (v1 GA)
 - Web에서 문서 작성(Markdown V1 + TipTap Block Editor V2) + 파일 업로드(PDF/DOCX/TXT/MD/Image)
 - 비동기 파이프라인: ingest → embedding → index → auto-tree snapshot
