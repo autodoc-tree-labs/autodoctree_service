@@ -1,6 +1,6 @@
 package com.autodoctree.api.tenant
 
-import com.autodoctree.api.db.MembershipRepository
+import com.autodoctree.api.db.workspace.MembershipRepository
 import com.autodoctree.api.security.AuthUser
 import com.autodoctree.common.Role
 import com.fasterxml.jackson.databind.ObjectMapper

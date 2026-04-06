@@ -49,6 +49,7 @@
 | I-1101 | Security Baseline for Local (secretsenv PII logging policy enforcement) | `tasks/backlog/I-1101 — Security Baseline for Local (secretsenv PII logging policy enforcement).md` |
 | I-1211 | Test workspace SQL seed bootstrap for document and node classification | `tasks/backlog/I-1211 — Test workspace SQL seed bootstrap for document and node classification.md` |
 | I-1407 | Bulk synthetic dataset seeder for 1000+ docs and file metadata | `tasks/backlog/I-1407 - Bulk synthetic dataset seeder for 1000+ docs and file metadata.md` |
+| I-1413 | Domain package refactor for doc-api services and repositories | `tasks/backlog/I-1413 - Domain package refactor for doc-api services and repositories.md` |
 | U-0302 | User UI: Template Bin & Unsorted Inbox (격리유보 영역 UX) | `tasks/backlog/U-0302 — User UI Template Bin  Unsorted Inbox (격리유보 영역 UX).md` |
 | U-0402 | User UI: Confidence-aware Placement (후보 폴더 Top-3 제안 + 원클릭 확정) | `tasks/backlog/U-0402 — User UI Confidence-aware Placement (후보 폴더 Top-3 제안  원클릭 확정).md` |
 | U-0801 | User UI: Multi-View Navigator (TopicProjectTimelineVersion) | `tasks/backlog/U-0801 — User UI Multi-View Navigator (TopicProjectTimelineVersion).md` |

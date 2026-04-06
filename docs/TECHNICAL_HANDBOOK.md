@@ -112,17 +112,18 @@ flowchart LR
 
 `services/doc-api`는 현재 사실상 단일 백엔드 애플리케이션이다.
 
-- REST 컨트롤러: [`services/doc-api/src/main/kotlin/com/autodoctree/api/controller/ApiControllers.kt`](../services/doc-api/src/main/kotlin/com/autodoctree/api/controller/ApiControllers.kt)
+- REST 컨트롤러: `services/doc-api/src/main/kotlin/com/autodoctree/api/controller/*` (도메인별 하위 패키지)
 - 설정 바인딩: [`services/doc-api/src/main/kotlin/com/autodoctree/api/config/AppConfig.kt`](../services/doc-api/src/main/kotlin/com/autodoctree/api/config/AppConfig.kt)
 - 보안 체인: [`services/doc-api/src/main/kotlin/com/autodoctree/api/config/SecurityConfig.kt`](../services/doc-api/src/main/kotlin/com/autodoctree/api/config/SecurityConfig.kt)
 - 워커: [`services/doc-api/src/main/kotlin/com/autodoctree/api/worker/OutboxWorker.kt`](../services/doc-api/src/main/kotlin/com/autodoctree/api/worker/OutboxWorker.kt)
-- 저장소: [`services/doc-api/src/main/kotlin/com/autodoctree/api/db/Repositories.kt`](../services/doc-api/src/main/kotlin/com/autodoctree/api/db/Repositories.kt)
+- 저장소 공용 row/helper: [`services/doc-api/src/main/kotlin/com/autodoctree/api/db/Rows.kt`](../services/doc-api/src/main/kotlin/com/autodoctree/api/db/Rows.kt), [`services/doc-api/src/main/kotlin/com/autodoctree/api/db/JdbcSupport.kt`](../services/doc-api/src/main/kotlin/com/autodoctree/api/db/JdbcSupport.kt)
+- 저장소 구현: `services/doc-api/src/main/kotlin/com/autodoctree/api/db/{auth,workspace,document,pipeline,tree,admin,search}/*`
 
 ### 5.2 주요 서비스 경계
 
 #### Auth / Workspace
 
-파일: `AuthWorkspaceServices.kt`
+파일: `domain/auth/AuthServices.kt`, `domain/workspace/WorkspaceService.kt`
 
 - `AuthService`
   - 회원가입 인증코드 발송
@@ -143,7 +144,7 @@ flowchart LR
 
 #### Document / Attachment / Search
 
-파일: `DocumentServices.kt`
+파일: `domain/document/DocumentServices.kt`, `domain/attachment/AttachmentService.kt`, `domain/search/SearchService.kt`
 
 - `DocumentService`
   - 문서 생성/조회/수정/삭제/복구
@@ -165,7 +166,7 @@ flowchart LR
 
 #### Tree / Feedback / Admin / Questions
 
-파일: `TreeFeedbackAdminServices.kt`, `QuestionService.kt`
+파일: `domain/tree/TreeService.kt`, `domain/feedback/FeedbackService.kt`, `domain/admin/AdminService.kt`, `domain/question/QuestionService.kt`
 
 - `TreeService`
   - 워크스페이스 트리 리빌드
@@ -235,7 +236,7 @@ flowchart LR
 
 ### 7.1 핵심 엔티티 그룹
 
-`Repositories.kt` 기준 주요 저장소는 아래와 같이 묶인다.
+현재 저장소는 `db/auth`, `db/workspace`, `db/document`, `db/pipeline`, `db/tree`, `db/admin`, `db/search` 패키지로 나뉘고, row 타입은 `db/Rows.kt`에 공용으로 모여 있다.
 
 #### 계정/권한
 

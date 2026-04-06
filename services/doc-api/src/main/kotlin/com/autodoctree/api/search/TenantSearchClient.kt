@@ -4,9 +4,9 @@ import com.autodoctree.api.config.FeatureFlags
 import com.autodoctree.api.config.SearchProperties
 import com.autodoctree.api.config.SecurityFlags
 import com.autodoctree.api.config.TreeProperties
-import com.autodoctree.api.db.DocumentRepository
-import com.autodoctree.api.db.EmbeddingRepository
-import com.autodoctree.api.domain.EmbeddingAggregationService
+import com.autodoctree.api.db.document.DocumentRepository
+import com.autodoctree.api.db.pipeline.EmbeddingRepository
+import com.autodoctree.api.domain.tree.EmbeddingAggregationService
 import com.autodoctree.api.infra.BadRequestException
 import com.autodoctree.api.worker.EmbeddingProvider
 import com.fasterxml.jackson.databind.ObjectMapper

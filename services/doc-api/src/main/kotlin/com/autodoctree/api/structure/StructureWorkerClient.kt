@@ -2,8 +2,8 @@ package com.autodoctree.api.structure
 
 import com.autodoctree.api.config.StructureWorkerProperties
 import com.autodoctree.api.db.DocumentRow
-import com.autodoctree.api.domain.NeighborGraph
-import com.autodoctree.api.domain.TreeCluster
+import com.autodoctree.api.domain.tree.NeighborGraph
+import com.autodoctree.api.domain.tree.TreeCluster
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry

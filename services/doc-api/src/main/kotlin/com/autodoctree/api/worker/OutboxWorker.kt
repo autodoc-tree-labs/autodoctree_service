@@ -1,17 +1,17 @@
 package com.autodoctree.api.worker
 
 import com.autodoctree.api.config.WorkerProperties
-import com.autodoctree.api.db.DlqRepository
-import com.autodoctree.api.db.DocumentRepository
-import com.autodoctree.api.db.DocumentSectionRepository
-import com.autodoctree.api.db.EmbeddingRepository
+import com.autodoctree.api.db.pipeline.DlqRepository
+import com.autodoctree.api.db.document.DocumentRepository
+import com.autodoctree.api.db.document.DocumentSectionRepository
+import com.autodoctree.api.db.pipeline.EmbeddingRepository
 import com.autodoctree.api.db.OutboxEventRow
-import com.autodoctree.api.db.OutboxRepository
-import com.autodoctree.api.db.PipelineStatusRepository
-import com.autodoctree.api.db.StageExecutionRepository
-import com.autodoctree.api.domain.EmbeddingAggregationService
-import com.autodoctree.api.domain.RebuildDebounceQueue
-import com.autodoctree.api.domain.TreeService
+import com.autodoctree.api.db.pipeline.OutboxRepository
+import com.autodoctree.api.db.pipeline.PipelineStatusRepository
+import com.autodoctree.api.db.pipeline.StageExecutionRepository
+import com.autodoctree.api.domain.tree.EmbeddingAggregationService
+import com.autodoctree.api.domain.tree.RebuildDebounceQueue
+import com.autodoctree.api.domain.tree.TreeService
 import com.autodoctree.api.infra.sha256
 import com.autodoctree.api.search.TenantSearchClient
 import com.autodoctree.api.storage.S3StorageService
